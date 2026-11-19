@@ -55,20 +55,31 @@ For Codex, complete `codex login --device-auth` in that terminal.
 
 ## TerraScale template
 
-The [TerraScale Dockerfile](templates/terrascale/Dockerfile) includes the
-pinned T3 binary, Codex, Node 24, Go 1.27, the .NET 10 and 11 SDKs, Git, and
-Python. A new sandbox can skip the T3 download. The template uses Agent37's
-Codex base and persistent home directly.
+The [TerraScale Dockerfile](templates/terrascale/Dockerfile) bundles the pinned
+T3, managed OpenCode, and Codex runtimes. New sandboxes can start T3 with
+`agent37/default` using the included binaries.
+
+The image includes .NET 10 and 11, Go 1.27.4, Rust 1.99.1 with rustfmt and
+Clippy, Python 3.12 with uv, and Node 24 with mise. The TerraScale JS SDK's
+Node 24.21.0 and npm 11.18.0 and the docs site's Node 24.22.1 are already
+installed in mise. Agent shells can run `dotnet`, `go`, `cargo`, and `python3.12`
+on the standard `PATH`.
+
+Build and test tools include Git, GCC, Make, Ruby, ShellCheck, actionlint, the
+TerraScale `ts` CLI, PostgreSQL 16 client, NSS `certutil`, and the Linux tools
+used by the local test harness. Playwright and Chromium are preinstalled.
+Set `PLAYWRIGHT_BROWSERS_PATH=/opt/terrascale/playwright` for standalone
+Playwright commands that use the bundled browser.
 
 Publish it from this checkout with Agent37 CLI 0.4.1 or later and the API
 key for the TerraScale workspace in the child process environment:
 
 ```bash
 agent37 templates build templates/terrascale --name terrascale-agent37 --default-port 3737
-t3-agent37 create terrascale-pilot --template terrascale-agent37@1 --yes
+t3-agent37 create terrascale-pilot --template terrascale-agent37@2 --yes
 ```
 
-Replace `@1` with the revision returned by the build. Agent37's Codex
+Use the revision returned by the build when publishing your own copy. Agent37's Codex
 gateway uses port 3737. The CLI starts T3 on the separate protected port
 3773. Register only the template context. The template contains no TerraScale checkouts or login
 credentials. Give each instance access to its own repositories at runtime.
