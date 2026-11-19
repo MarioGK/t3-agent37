@@ -13,8 +13,8 @@ supports macOS.
 Download the wheel from the GitHub release and install it with uv:
 
 ```bash
-gh release download v0.1.2 --repo MarioGK/t3-agent37 --pattern '*.whl'
-uv tool install ./t3_agent37-0.1.2-py3-none-any.whl
+gh release download v0.1.3 --repo MarioGK/t3-agent37 --pattern '*.whl'
+uv tool install ./t3_agent37-0.1.3-py3-none-any.whl
 t3-agent37 --version
 ```
 
@@ -36,17 +36,20 @@ doesn't open, paste the printed pairing URL in **Settings → Environments →
 Add environment**. Keep the relay running while using T3 and protect the
 one-time pairing link.
 
-The default Agent37 template includes Codex. Open the temporary terminal
-URL below, run `codex login --device-auth`, and approve sign-in yourself.
-Then add the cloud checkout in T3 and start a thread with Codex.
+By default, the CLI sets up OpenCode with the Agent37-managed
+`agent37/default` model and selects it for new T3 threads. Each new sandbox
+gets $1 in one-time model headroom from the existing workspace wallet.
+Add the cloud checkout in T3 and start a thread.
 
-```bash
-t3-agent37 terminal terrascale-pilot
-```
+To configure the same default on an existing sandbox, run
+`t3-agent37 prepare terrascale-pilot`. The command leaves the sandbox running
+for you to connect. It grants the initial model headroom once when migrating
+from a different provider.
 
-For a different agent, pass `--provider claude` or `--provider opencode`.
-The CLI selects the matching Agent37 image and checks the provider on the
-instance before pairing. Sign in using that provider's instructions.
+Codex and Claude Code are available through `--provider codex` and
+`--provider claude`. They require their own account sign-in. Use
+`t3-agent37 terminal terrascale-pilot` for the temporary terminal URL.
+For Codex, complete `codex login --device-auth` in that terminal.
 
 ## TerraScale template
 
@@ -84,7 +87,7 @@ Stop the relay with Ctrl+C. To pause compute after work has finished, run
 `t3-agent37 down terrascale-pilot`. The Agent37 disk continues to accrue
 storage charges. Review active threads before stopping the instance.
 
-Version 0.1.2 uses explicit start and stop. Wake-on-send and cached
+The CLI uses explicit start and stop. Wake-on-send and cached
 threads during sleep are follow-up milestones. Native T3 pairing remains
 in place, and the relay uses only loopback and Agent37's protected HTTPS
 and WebSocket endpoint.

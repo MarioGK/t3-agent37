@@ -1,5 +1,6 @@
 """Install and start a checksum-pinned T3 runtime on an Agent37 sandbox."""
 
+from copy import deepcopy
 import fcntl
 import hashlib
 import json
@@ -27,6 +28,8 @@ SCRIPT = ROOT / "remote.py"
 PREBUILT = Path("/opt/t3-agent37/versions") / VERSION
 RUNTIME = PREBUILT if (PREBUILT / ".verified").is_file() else ROOT / "versions" / VERSION
 T3 = RUNTIME / "t3"
+OPENCODE_VERSION = "1.19.5"
+MANAGED_MODEL = "agent37/default"
 # Agent37 may keep the gateway port assigned at original creation even
 # after the template's default changes. Keep the two listeners distinct.
 PORT = 4373 if os.environ.get("AGENT37_GATEWAY_PORT") == "3773" else 3773
@@ -103,13 +106,86 @@ def serve():
                   "--base-dir", str(DATA), "--mode", "web", "--no-browser"])
 
 
+
+def update_json(path, update):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    before = json.loads(path.read_text()) if path.exists() else {}
+    after = update(deepcopy(before))
+    if before == after:
+        return
+    with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as output:
+        temporary = Path(output.name)
+        try:
+            json.dump(after, output, indent=2)
+            output.write("\n")
+            output.flush()
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
+def configure_managed_opencode():
+    if not os.environ.get("AGENT37_MANAGED_TOKEN") or not os.environ.get("AGENT37_LLM_PROXY_URL"):
+        raise RuntimeError("The sandbox has no Agent37 managed model credentials")
+    binary = shutil.which("opencode")
+    if binary is None:
+        prefix = ROOT / "providers" / OPENCODE_VERSION
+        binary = prefix / "node_modules/.bin/opencode"
+        if not binary.is_file():
+            prefix.mkdir(parents=True, exist_ok=True)
+            subprocess.run(
+                ["npm", "install", "--prefix", str(prefix), "--no-audit", "--no-fund",
+                 f"opencode-ai@{OPENCODE_VERSION}"],
+                check=True, stdout=subprocess.DEVNULL, timeout=120,
+            )
+
+    def configure_opencode(settings):
+        settings.setdefault("provider", {})["agent37"] = {
+            "npm": "@ai-sdk/openai-compatible",
+            "name": "Agent37",
+            "options": {
+                "baseURL": "{env:AGENT37_LLM_PROXY_URL}",
+                "apiKey": "{env:AGENT37_MANAGED_TOKEN}",
+            },
+            "models": {"default": {"name": "Agent37 Default"}},
+        }
+        settings.setdefault("model", MANAGED_MODEL)
+        return settings
+
+    def configure_t3(settings):
+        instances = settings.setdefault("providerInstances", {})
+        opencode = instances.setdefault("opencode", {"driver": "opencode"})
+        opencode["enabled"] = True
+        opencode.setdefault("config", {})["binaryPath"] = str(binary)
+        default = settings.get("defaultModelSelection") or {}
+        previous = default.get("instanceId", default.get("provider"))
+        if not previous or previous == "codex":
+            settings["defaultModelSelection"] = {"instanceId": "opencode", "model": MANAGED_MODEL}
+        return settings
+
+    config_home = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+    update_json(config_home / "opencode/opencode.json", configure_opencode)
+    update_json(DATA / "userdata/settings.json", configure_t3)
+
+
+def provider_ready(provider):
+    if provider == "opencode":
+        configure_managed_opencode()
+        return True
+    command = {"codex": ["codex", "login", "status"], "claude": ["claude", "auth", "status"]}
+    if provider not in command or shutil.which(provider) is None:
+        raise RuntimeError("The selected provider CLI must be installed on PATH")
+    return subprocess.run(
+        command[provider], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15,
+    ).returncode == 0
+
+
 def setup(provider):
     ROOT.mkdir(parents=True, mode=0o700, exist_ok=True)
     with (ROOT / "install.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         install_runtime()
-        if provider not in {"codex", "claude", "opencode"} or shutil.which(provider) is None:
-            raise RuntimeError("The selected provider CLI must be installed on PATH")
+        ready = provider_ready(provider)
         install_hook()
         result = descriptor()
         if result is None:
@@ -117,7 +193,8 @@ def setup(provider):
         for _ in range(60):
             result = descriptor()
             if result is not None:
-                print(json.dumps({"environmentId": result["environmentId"], "version": VERSION, "port": PORT}))
+                print(json.dumps({"environmentId": result["environmentId"], "version": VERSION,
+                                  "port": PORT, "providerReady": ready}))
                 return
             time.sleep(1)
         raise RuntimeError("T3 did not start. See ~/.local/share/t3-agent37/server.log")

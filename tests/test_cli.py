@@ -40,7 +40,8 @@ def test_dry_run_ignores_missing_key(monkeypatch, capsys):
     monkeypatch.delenv("AGENT37_API_KEY", raising=False)
     assert main(["create", "pilot", "--dry-run"]) == 0
     output = json.loads(capsys.readouterr().out)
-    assert output["template"] == "agent37-codex"
+    assert output["template"] == "agent37-opencode"
+    assert output["budget"] == {"credit_micros": 1_000_000}
     assert output["public_ports"] == []
     assert output["auto_sleep"] is False
 

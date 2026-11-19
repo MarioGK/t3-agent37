@@ -21,7 +21,7 @@ from urllib.request import Request
 
 from aiohttp import web
 
-from .api import Agent37, Agent37Error, instance_id
+from .api import Agent37, Agent37Error, MANAGED_CREDIT_MICROS, instance_id
 from .relay import application
 
 
@@ -45,12 +45,15 @@ def port_number(value):
 
 
 def request_body(name, template, provider="codex"):
-    return {
+    payload = {
         "name": name, "template": template,
         "metadata": {"managed_by": OWNER, "environment": name, "provider": provider},
         "public_ports": [], "auto_sleep": False,
         "env": {"AGENT37_MANAGED_PLUGIN_COMPOSIO_ENABLED": "false"},
     }
+    if provider == "opencode":
+        payload["budget"] = {"credit_micros": MANAGED_CREDIT_MICROS}
+    return payload
 
 
 def managed(client, name=None):
@@ -119,7 +122,8 @@ def setup(client, instance, provider):
     proof = json.loads(client.exec(instance, command))
     if not proof.get("environmentId"):
         raise Agent37Error("Sandbox setup did not return a T3 environment ID")
-    return wait_for_t3(client, instance, expected=proof["environmentId"], remote_port=proof["port"])
+    visible, port = wait_for_t3(client, instance, expected=proof["environmentId"], remote_port=proof["port"])
+    return {**visible, "providerReady": proof["providerReady"]}, port
 
 
 def wait_for_t3(client, instance, *, expected=None, remote_port=None, timeout=45):
@@ -229,12 +233,15 @@ def main(argv=None):
     sub.add_parser("list", help="List managed Agent37 environments")
     create = sub.add_parser("create", help="Create a sandbox, install T3, and open pairing")
     create.add_argument("name", type=label)
-    create.add_argument("--provider", choices=TEMPLATES, default="codex")
+    create.add_argument("--provider", choices=TEMPLATES, default="opencode",
+                        help="Agent provider (default: managed OpenCode)")
     create.add_argument("--template", help="Agent37 template override, optionally pinned by revision")
     create.add_argument("--port", type=port_number)
     mode = create.add_mutually_exclusive_group(required=True)
     mode.add_argument("--yes", action="store_true", help="Authorize paid provisioning")
     mode.add_argument("--dry-run", action="store_true", help="Print the request without using the API")
+    prepare = sub.add_parser("prepare", help="Set up managed OpenCode on an existing sandbox")
+    prepare.add_argument("name", type=label)
     connect = sub.add_parser("connect", help="Run the local relay for a paired environment")
     connect.add_argument("name", type=label)
     connect.add_argument("--port", type=port_number)
@@ -277,14 +284,26 @@ def main(argv=None):
         if args.action == "terminal":
             print(client.terminal(identifier))
             return 0
+        if args.action == "prepare":
+            client.require_managed_budget(identifier, initialize=summary(instance)["provider"] != "opencode")
+            if instance["status"] in {"stopped", "sleeping"}:
+                client.lifecycle(identifier, "start")
+            setup(client, identifier, "opencode")
+            client.set_provider(instance, "opencode")
+            print(f"Managed OpenCode is ready on {args.name} (agent37/default).")
+            return 0
         port = assigned_port(state, identifier, args.port)
         if args.action == "create":
             if instance["template"] != args.template or summary(instance)["provider"] != args.provider:
                 raise Agent37Error("This name already uses a different template or provider")
-            if instance["status"] == "stopped":
+            if args.provider == "opencode":
+                client.require_managed_budget(identifier)
+            if instance["status"] in {"stopped", "sleeping"}:
                 client.lifecycle(identifier, "start")
             proof, remote_port = setup(client, identifier, args.provider)
             print(f"Cloud T3 ready ({identifier}, {proof['environmentId']}).", flush=True)
+            if not proof["providerReady"]:
+                print(f"{args.provider} needs sign-in. Run t3-agent37 terminal {args.name}.", flush=True)
         else:
             if instance["status"] == "stopped":
                 raise Agent37Error("The sandbox is stopped. Run t3-agent37 up first.")

@@ -7,6 +7,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 API = "https://api.agent37.com/v1/instances"
 SANDBOX = "https://sandbox.agent37.app/v1/instances"
+MANAGED_CREDIT_MICROS = 1_000_000
 
 
 class Agent37Error(RuntimeError):
@@ -81,6 +82,23 @@ class Agent37:
         if response["exit_code"] != 0 or response.get("truncated"):
             raise Agent37Error(f"Sandbox setup command failed (exit {response['exit_code']})")
         return response["stdout"]
+
+
+    def require_managed_budget(self, instance, *, initialize=False):
+        url = f"{API}/{instance_id(instance)}/budget"
+        budget = self._request(url)
+        if initialize and not (budget["monthly_remaining_micros"] or budget["credit_remaining_micros"]):
+            budget = self._request(url + "/top-up", method="POST", payload={
+                "amount_micros": MANAGED_CREDIT_MICROS,
+                "idempotency_key": "t3-agent37-ready-v1",
+            })
+        if not (budget["monthly_remaining_micros"] or budget["credit_remaining_micros"]):
+            raise Agent37Error("Agent37 model budget is exhausted. Add headroom in Agent37 before starting a turn.")
+
+    def set_provider(self, instance, provider):
+        metadata = {**instance["metadata"], "provider": provider}
+        return self._request(f"{API}/{instance_id(instance['id'])}", method="PATCH",
+                             payload={"metadata": metadata})
 
     def terminal(self, instance):
         return self._request(f"{API}/{instance_id(instance)}/signed-url", method="POST",
