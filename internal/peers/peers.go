@@ -3,6 +3,7 @@ package peers
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -257,8 +258,11 @@ func VerifyTailnet(ctx context.Context, name, environmentID, address string) (st
 	client := newHTTPClient(5 * time.Second)
 	defer client.CloseIdleConnections()
 	target := newPeerAPI(client, name, origin, environmentID, "")
-	if err := target.verify(ctx, 6, false); err != nil {
-		return "", err
+	timeout := fmt.Errorf("%s joined Tailscale, but its private HTTPS endpoint did not become ready within one minute", name)
+	ready, cancel := context.WithTimeoutCause(ctx, time.Minute, timeout)
+	defer cancel()
+	if err := target.verify(ready, 60, false); err != nil {
+		return "", cmp.Or(context.Cause(ready), err)
 	}
 	return origin, nil
 }
