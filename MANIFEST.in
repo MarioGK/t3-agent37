@@ -1,0 +1,2 @@
+include templates/terrascale/Dockerfile
+include tests/native_smoke.py

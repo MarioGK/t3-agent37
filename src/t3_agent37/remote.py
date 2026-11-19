@@ -27,7 +27,9 @@ SCRIPT = ROOT / "remote.py"
 PREBUILT = Path("/opt/t3-agent37/versions") / VERSION
 RUNTIME = PREBUILT if (PREBUILT / ".verified").is_file() else ROOT / "versions" / VERSION
 T3 = RUNTIME / "t3"
-PORT = 3773
+# Agent37 may keep the gateway port assigned at original creation even
+# after the template's default changes. Keep the two listeners distinct.
+PORT = 4373 if os.environ.get("AGENT37_GATEWAY_PORT") == "3773" else 3773
 HOST = os.environ.get("T3_AGENT37_BIND", "0.0.0.0")
 DESCRIPTOR = f"http://127.0.0.1:{PORT}/.well-known/t3/environment"
 
@@ -80,7 +82,7 @@ def descriptor():
     except (URLError, ValueError, OSError):
         return None
     if result.get("serverVersion", "").lstrip("v") != VERSION:
-        raise RuntimeError("A different T3 server is already listening on port 3773")
+        raise RuntimeError(f"A different T3 server is already listening on port {PORT}")
     return result
 
 
@@ -115,7 +117,7 @@ def setup(provider):
         for _ in range(60):
             result = descriptor()
             if result is not None:
-                print(json.dumps({"environmentId": result["environmentId"], "version": VERSION}))
+                print(json.dumps({"environmentId": result["environmentId"], "version": VERSION, "port": PORT}))
                 return
             time.sleep(1)
         raise RuntimeError("T3 did not start. See ~/.local/share/t3-agent37/server.log")

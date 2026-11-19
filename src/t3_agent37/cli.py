@@ -27,6 +27,7 @@ from .relay import application
 
 OWNER = "t3-agent37"
 DEFAULT_PORT = 43737
+T3_PORTS = (3773, 4373)
 TEMPLATES = {"codex": "agent37-codex", "claude": "agent37-claude-code", "opencode": "agent37-opencode"}
 
 
@@ -118,29 +119,31 @@ def setup(client, instance, provider):
     proof = json.loads(client.exec(instance, command))
     if not proof.get("environmentId"):
         raise Agent37Error("Sandbox setup did not return a T3 environment ID")
-    return wait_for_t3(client, instance, expected=proof["environmentId"])
+    return wait_for_t3(client, instance, expected=proof["environmentId"], remote_port=proof["port"])
 
 
-def wait_for_t3(client, instance, *, expected=None, timeout=45):
-    origin = protected_origin(instance)
-    request = Request(origin + "/.well-known/t3/environment", headers={"X-Agent37-Key": client.key})
+def wait_for_t3(client, instance, *, expected=None, remote_port=None, timeout=45):
+    ports = (remote_port,) if remote_port is not None else T3_PORTS
     deadline = time.monotonic() + timeout
     while True:
-        try:
-            with client.opener.open(request, timeout=5) as response:
-                visible = json.load(response)
-        except HTTPError as error:
-            status = error.code
-            error.close()
-            if status not in {404, 409, 425, 429, 502, 503, 504}:
-                raise Agent37Error(f"Protected T3 endpoint returned HTTP {status}", status) from None
-        except (URLError, TimeoutError):
-            pass
-        else:
-            identity = visible.get("environmentId")
-            if not identity or (expected and identity != expected):
-                raise Agent37Error("Protected T3 endpoint returned a different environment")
-            return visible
+        for port in ports:
+            origin = protected_origin(instance, port)
+            request = Request(origin + "/.well-known/t3/environment", headers={"X-Agent37-Key": client.key})
+            try:
+                with client.opener.open(request, timeout=5) as response:
+                    visible = json.load(response)
+            except HTTPError as error:
+                status = error.code
+                error.close()
+                if status not in {404, 409, 425, 429, 502, 503, 504}:
+                    raise Agent37Error(f"Protected T3 endpoint returned HTTP {status}", status) from None
+            except (URLError, TimeoutError):
+                continue
+            else:
+                identity = visible.get("environmentId")
+                if not identity or (expected and identity != expected):
+                    raise Agent37Error("Protected T3 endpoint returned a different environment")
+                return visible, port
         if time.monotonic() >= deadline:
             raise Agent37Error("Protected T3 endpoint did not become ready. Check instance status and retry.")
         time.sleep(1)
@@ -174,8 +177,10 @@ def assigned_port(state, identifier, requested=None):
     raise Agent37Error("No free relay port in the requested range")
 
 
-def protected_origin(instance):
-    return f"https://{instance_id(instance)}-3773.agent37.app"
+def protected_origin(instance, port=T3_PORTS[0]):
+    if port not in T3_PORTS:
+        raise Agent37Error("Unexpected T3 service port")
+    return f"https://{instance_id(instance)}-{port}.agent37.app"
 
 
 def pair_link(client, instance, port):
@@ -197,8 +202,9 @@ def open_pairing(link):
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-async def serve(client, instance, port, pairing):
-    runner = web.AppRunner(application(protected_origin(instance), client.key, port), access_log=None)
+async def serve(client, instance, port, remote_port, pairing):
+    origin = protected_origin(instance, remote_port)
+    runner = web.AppRunner(application(origin, client.key, port), access_log=None)
     await runner.setup()
     try:
         await web.TCPSite(runner, "127.0.0.1", port).start()
@@ -265,7 +271,7 @@ def main(argv=None):
         if args.action in {"start", "stop"}:
             target_status = {"start": "running", "stop": "stopped"}[args.action]
             if instance["status"] != target_status:
-                instance = client.lifecycle(identifier, args.action)
+                instance = {**instance, **client.lifecycle(identifier, args.action)}
             print(json.dumps(summary(instance)))
             return 0
         if args.action == "terminal":
@@ -277,14 +283,14 @@ def main(argv=None):
                 raise Agent37Error("This name already uses a different template or provider")
             if instance["status"] == "stopped":
                 client.lifecycle(identifier, "start")
-            proof = setup(client, identifier, args.provider)
+            proof, remote_port = setup(client, identifier, args.provider)
             print(f"Cloud T3 ready ({identifier}, {proof['environmentId']}).", flush=True)
         else:
             if instance["status"] == "stopped":
                 raise Agent37Error("The sandbox is stopped. Run t3-agent37 up first.")
-            wait_for_t3(client, identifier)
+            _, remote_port = wait_for_t3(client, identifier)
         pairing = pair_link(client, identifier, port) if args.action == "create" or args.pair else None
-        asyncio.run(serve(client, identifier, port, pairing))
+        asyncio.run(serve(client, identifier, port, remote_port, pairing))
     except KeyboardInterrupt:
         return 0
     except (Agent37Error, OSError, ValueError, KeyError, sqlite3.Error) as error:

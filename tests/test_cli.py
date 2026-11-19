@@ -101,7 +101,8 @@ def test_protected_endpoint_retries_after_start(monkeypatch):
         BytesIO(b'{"environmentId":"stable"}'),
     ]
     monkeypatch.setattr("t3_agent37.cli.time.sleep", lambda seconds: None)
-    assert wait_for_t3(client, "ab12cd34ef", expected="stable")["environmentId"] == "stable"
+    descriptor, port = wait_for_t3(client, "ab12cd34ef", expected="stable", remote_port=3773)
+    assert descriptor["environmentId"] == "stable" and port == 3773
     assert client.opener.open.call_count == 3
 
 
@@ -114,3 +115,20 @@ def test_protected_endpoint_rejects_mismatched_identity():
     client.opener.open.return_value = BytesIO(b'{"environmentId":"other"}')
     with pytest.raises(Agent37Error, match="different environment"):
         wait_for_t3(client, "ab12cd34ef", expected="stable")
+
+
+def test_reconnect_uses_secondary_port_when_gateway_owns_default():
+    from io import BytesIO
+    from urllib.error import HTTPError
+
+    from t3_agent37.cli import wait_for_t3
+
+    client = Mock(key="placeholder")
+    client.opener.open.side_effect = [
+        HTTPError("", 404, "Gateway", None, BytesIO()),
+        BytesIO(b'{"environmentId":"secondary"}'),
+    ]
+    descriptor, port = wait_for_t3(client, "ab12cd34ef")
+    assert descriptor["environmentId"] == "secondary"
+    assert port == 4373
+    assert client.opener.open.call_args.args[0].host == "ab12cd34ef-4373.agent37.app"
