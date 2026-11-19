@@ -1,0 +1,41 @@
+# TerraScale Agent37 template
+
+With `AGENT37_API_KEY` set, create a sandbox from the private template.
+
+```sh
+t3-agent37 create terrascale-dev --template terrascale-agent37@3 --yes
+```
+
+Supply these variables from your secret store on the workstation.
+
+| Variable | Value |
+| --- | --- |
+| `T3_AGENT37_CLIPROXY_URL` | HTTPS base URL for CLIProxy |
+| `T3_AGENT37_CLIPROXY_KEY` | CLIProxy client API key |
+| `T3_AGENT37_TAILSCALE_CLIENT_ID`, `T3_AGENT37_TAILSCALE_CLIENT_SECRET` | OAuth client with `auth_keys` write access for `tag:agent37` |
+
+T3 loads the CLIProxy text model catalog and defaults to `cliproxy/glm-5.3`.
+Set `T3_AGENT37_CLIPROXY_MODEL` before `create` to pick another model ID.
+Run `t3-agent37 prepare terrascale-dev` to refresh the catalog.
+
+`create` and `up` enroll the sandbox with a single-use ephemeral Tailscale key.
+`down` logs out the device before stopping compute. Inside the sandbox, use
+`socks5h://127.0.0.1:1055` to reach tailnet services. T3 uses the local relay.
+Use `--no-tailscale` on `create` for a CLIProxy-only sandbox.
+
+The image includes T3, OpenCode, Codex, Tailscale, .NET 10 and 11, Go 1.27.4,
+Rust 1.99.1 with rustfmt and Clippy, Python 3.12 with uv, and Node 24 with
+mise. The Node pins are 24.21.0 with npm 11.18.0 and 24.22.1. The image also
+includes Git, GCC, Make, Ruby, ShellCheck, actionlint, the TerraScale `ts`
+CLI, PostgreSQL 16 client, NSS tools, and Playwright with Chromium. Set
+`PLAYWRIGHT_BROWSERS_PATH=/opt/terrascale/playwright` to use the bundled browser.
+
+To publish your own copy, run this from the checkout with Agent37 CLI 0.4.1
+or later. Use the published revision in `--template`.
+
+```sh
+agent37 templates build templates/terrascale --name terrascale-agent37 --default-port 3737
+```
+
+The Agent37 gateway uses port 3737 and T3 uses protected port 3773.
+Give each sandbox access to its repositories at runtime. [Dockerfile](../templates/terrascale/Dockerfile)

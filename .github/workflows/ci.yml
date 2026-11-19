@@ -20,6 +20,7 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
+      - run: sh -n install.sh
       - run: python -m pip install . pytest
       - run: python -m pytest -q
       - if: matrix.python == '3.14'
