@@ -15,6 +15,7 @@ import (
 func TestTerraScaleDryRunWithNoCredentials(t *testing.T) {
 	t.Setenv("AGENT37_API_KEY", "")
 	t.Setenv("T3_AGENT37_CLIPROXY_KEY", "fixture-secret")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	var output bytes.Buffer
 	err := run(context.Background(), []string{"create", "dev", "--template", "terrascale-agent37@3", "--dry-run"}, &output, &output)
 	if err != nil {
@@ -42,6 +43,7 @@ func TestTerraScaleDryRunWithNoCredentials(t *testing.T) {
 }
 
 func TestFlagsCanFollowName(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	opts, err := parse([]string{"create", "dev", "--template", "terrascale-agent37@3", "--no-tailscale", "--yes"}, &bytes.Buffer{})
 	if err != nil || opts.name != "dev" || opts.generatedName || opts.tailscale || opts.provider != "cliproxy" || !opts.yes {
 		t.Fatalf("unexpected options: %+v, %v", opts, err)

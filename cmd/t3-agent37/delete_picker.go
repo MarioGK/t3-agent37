@@ -16,7 +16,7 @@ import (
 	"github.com/charmbracelet/x/term"
 )
 
-func deletePickerAvailable(output io.Writer) bool {
+func terminalAvailable(output io.Writer) bool {
 	file, ok := output.(*os.File)
 	return ok && term.IsTerminal(os.Stdin.Fd()) && term.IsTerminal(file.Fd())
 }

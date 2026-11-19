@@ -35,7 +35,9 @@ t3-agent37 connect agent-1
 confirm before deleting its disk. For scripts, use `delete <name>`. Add
 `--dry-run` to preview. `connect` reopens the local relay.
 
-Set `name_prefix` in `~/.config/t3-agent37/config.json` (Windows uses
+Run `t3-agent37 config` to edit the name prefix, default template, provider,
+and Tailscale enrollment. The editor works offline. Provisioning flags override
+the saved defaults. Settings are stored in `~/.config/t3-agent37/config.json` (Windows uses
 `%APPDATA%\t3-agent37\config.json`). The prefix accepts 1 to 33 lowercase
 letters, digits, or hyphens and must start and end with a letter or digit.
 

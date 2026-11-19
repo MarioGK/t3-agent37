@@ -3,14 +3,11 @@ package main
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
-	"runtime"
 	"strconv"
 	"strings"
 
@@ -18,51 +15,9 @@ import (
 )
 
 const (
-	defaultNamePrefix = "agent"
-	maxNameSuffix     = 999_999_999
-	nameSequenceDB    = "names.sqlite3"
+	maxNameSuffix  = 999_999_999
+	nameSequenceDB = "names.sqlite3"
 )
-
-var prefixPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,31}[a-z0-9])?$`)
-
-type workstationConfig struct {
-	NamePrefix string `json:"name_prefix"`
-	Template   string `json:"template"`
-	Tailscale  *bool  `json:"tailscale"`
-}
-
-func loadWorkstationConfig() (workstationConfig, error) {
-	config := workstationConfig{NamePrefix: defaultNamePrefix}
-	base := os.Getenv("XDG_CONFIG_HOME")
-	if base == "" {
-		var err error
-		if runtime.GOOS == "windows" {
-			base, err = os.UserConfigDir()
-		} else {
-			var home string
-			home, err = os.UserHomeDir()
-			base = filepath.Join(home, ".config")
-		}
-		if err != nil {
-			return config, err
-		}
-	}
-	path := filepath.Join(base, owner, "config.json")
-	data, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return config, nil
-	}
-	if err != nil {
-		return config, err
-	}
-	if err := json.Unmarshal(data, &config); err != nil {
-		return config, fmt.Errorf("invalid config %s: %w", path, err)
-	}
-	if !prefixPattern.MatchString(config.NamePrefix) {
-		return config, fmt.Errorf("name_prefix in %s must contain 1 to 33 lowercase letters, digits, or hyphens and start and end with a letter or digit", path)
-	}
-	return config, nil
-}
 
 func highestNameSuffix(prefix string, instances []agent37.Instance) int {
 	var highest int

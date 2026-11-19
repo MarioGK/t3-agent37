@@ -24,8 +24,8 @@ Run `t3-agent37 prepare terrascale-dev` to refresh the catalog.
 `socks5h://127.0.0.1:1055` to reach tailnet services. T3 uses the local relay.
 Use `--no-tailscale` on `create` for a CLIProxy-only sandbox.
 
-To use the template and join Tailscale on every unnamed `up`, put these
-defaults in `~/.config/t3-agent37/config.json` and load the credentials above.
+Run `t3-agent37 config` to set the default template and Tailscale enrollment
+for new sandboxes. Load the credentials above before provisioning.
 
 ```json
 {"name_prefix": "terra", "template": "terrascale-agent37@3", "tailscale": true}

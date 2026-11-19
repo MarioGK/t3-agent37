@@ -43,7 +43,7 @@ type options struct {
 
 func parse(args []string, output io.Writer) (options, error) {
 	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" || args[0] == "help" {
-		fmt.Fprintln(output, "Usage: t3-agent37 <create|list|ls|up|down|delete|connect|prepare|terminal> [name] [flags]\n       t3-agent37 --version")
+		fmt.Fprintln(output, "Usage: t3-agent37 <create|list|ls|up|down|delete|connect|prepare|terminal|config> [name] [flags]\n       t3-agent37 --version")
 		return options{}, flag.ErrHelp
 	}
 	if len(args) == 1 && (args[0] == "--version" || args[0] == "version") {
@@ -56,7 +56,7 @@ func parse(args []string, output io.Writer) (options, error) {
 		opts.action = "stop"
 	case "ls":
 		opts.action = "list"
-	case "create", "up", "delete", "connect", "start", "stop", "prepare", "terminal", "list":
+	case "create", "up", "delete", "connect", "start", "stop", "prepare", "terminal", "list", "config":
 	default:
 		return opts, fmt.Errorf("unknown command %q", opts.action)
 	}
@@ -65,6 +65,10 @@ func parse(args []string, output io.Writer) (options, error) {
 	flags.Usage = func() {
 		if opts.action == "list" {
 			fmt.Fprintf(output, "Usage: t3-agent37 %s\nList managed Agent37 sandboxes.\n", args[0])
+			return
+		}
+		if opts.action == "config" {
+			fmt.Fprintln(output, "Usage: t3-agent37 config\nEdit sandbox defaults in the terminal.")
 			return
 		}
 		if opts.action == "delete" {
@@ -113,6 +117,12 @@ func parse(args []string, output io.Writer) (options, error) {
 	if err := flags.Parse(args[1:]); err != nil {
 		return opts, err
 	}
+	if opts.action == "config" {
+		if flags.NArg() != 0 {
+			return opts, errors.New("config does not take any arguments")
+		}
+		return opts, nil
+	}
 	if opts.action == "up" {
 		if flags.NArg() == 0 {
 			opts.action = "create"
@@ -157,17 +167,19 @@ func parse(args []string, output io.Writer) (options, error) {
 		return opts, errors.New("port must be between 1024 and 65535")
 	}
 	if opts.action == "create" {
-		var config workstationConfig
-		if opts.generatedName {
-			var err error
-			config, err = loadWorkstationConfig()
-			if err != nil {
-				return opts, err
-			}
-			opts.namePrefix = config.NamePrefix
-			if !flags.Changed("template") {
-				opts.template = config.Template
-			}
+		if opts.yes == opts.dryRun {
+			return opts, errors.New("choose exactly one of --yes and --dry-run")
+		}
+		config, err := loadWorkstationConfig()
+		if err != nil {
+			return opts, err
+		}
+		opts.namePrefix = config.NamePrefix
+		if !flags.Changed("template") {
+			opts.template = config.Template
+		}
+		if !flags.Changed("provider") {
+			opts.provider = config.Provider
 		}
 		terra := terraTemplate(opts.template)
 		if opts.provider == "" {
@@ -192,9 +204,6 @@ func parse(args []string, output io.Writer) (options, error) {
 				opts.tailscale = *config.Tailscale
 			}
 			opts.tailscale = opts.tailscale && !noTailscale
-		}
-		if opts.yes == opts.dryRun {
-			return opts, errors.New("choose exactly one of --yes and --dry-run")
 		}
 	}
 	return opts, nil
@@ -494,6 +503,9 @@ func run(ctx context.Context, args []string, output, diagnostic io.Writer) error
 	if err != nil {
 		return err
 	}
+	if opts.action == "config" {
+		return editConfig(ctx, diagnostic)
+	}
 	var state string
 	if opts.generatedName {
 		state, err = statePath()
@@ -510,7 +522,7 @@ func run(ctx context.Context, args []string, output, diagnostic io.Writer) error
 		}
 		return jsonOutput(output, createPayload(opts, nil), true)
 	}
-	if opts.pickDelete && !deletePickerAvailable(diagnostic) {
+	if opts.pickDelete && !terminalAvailable(diagnostic) {
 		return errors.New("interactive deletion requires a terminal. Use delete <name> to select a sandbox")
 	}
 	key, err := agent37APIKey()
