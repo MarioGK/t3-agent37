@@ -43,7 +43,10 @@ def test_dry_run_ignores_missing_key(monkeypatch, capsys):
     assert output["template"] == "agent37-opencode"
     assert output["budget"] == {"credit_micros": 1_000_000}
     assert output["public_ports"] == []
-    assert output["auto_sleep"] is False
+    assert output["type"] == "default"
+    assert output["resources"] == {"cpu": 4, "memory": 8}
+    assert output["auto_sleep"] is True
+    assert output["idle_timeout_seconds"] == 900
 
 
 def test_external_pair_url_rejected():

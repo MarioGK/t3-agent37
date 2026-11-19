@@ -48,7 +48,11 @@ def request_body(name, template, provider="codex"):
     payload = {
         "name": name, "template": template,
         "metadata": {"managed_by": OWNER, "environment": name, "provider": provider},
-        "public_ports": [], "auto_sleep": False,
+        "type": "default",
+        "resources": {"cpu": 4, "memory": 8},
+        "public_ports": [],
+        "auto_sleep": True,
+        "idle_timeout_seconds": 900,
         "env": {"AGENT37_MANAGED_PLUGIN_COMPOSIO_ENABLED": "false"},
     }
     if provider == "opencode":

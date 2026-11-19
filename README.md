@@ -13,8 +13,8 @@ supports macOS.
 Download the wheel from the GitHub release and install it with uv:
 
 ```bash
-gh release download v0.1.3 --repo MarioGK/t3-agent37 --pattern '*.whl'
-uv tool install ./t3_agent37-0.1.3-py3-none-any.whl
+gh release download v0.1.4 --repo MarioGK/t3-agent37 --pattern '*.whl'
+uv tool install ./t3_agent37-0.1.4-py3-none-any.whl
 t3-agent37 --version
 ```
 
@@ -36,7 +36,9 @@ doesn't open, paste the printed pairing URL in **Settings → Environments →
 Add environment**. Keep the relay running while using T3 and protect the
 one-time pairing link.
 
-By default, the CLI sets up OpenCode with the Agent37-managed
+New sandboxes use Agent37's Default instance type with 4 vCPU and 8 GB
+of RAM. Agent37 puts the sandbox to sleep after 15 minutes without
+instance traffic. The CLI sets up OpenCode with the Agent37-managed
 `agent37/default` model and selects it for new T3 threads. Each new sandbox
 gets $1 in one-time model headroom from the existing workspace wallet.
 Add the cloud checkout in T3 and start a thread.
@@ -87,10 +89,9 @@ Stop the relay with Ctrl+C. To pause compute after work has finished, run
 `t3-agent37 down terrascale-pilot`. The Agent37 disk continues to accrue
 storage charges. Review active threads before stopping the instance.
 
-The CLI uses explicit start and stop. Wake-on-send and cached
-threads during sleep are follow-up milestones. Native T3 pairing remains
-in place, and the relay uses only loopback and Agent37's protected HTTPS
-and WebSocket endpoint.
+Traffic routed through Agent37 wakes a sleeping sandbox. T3 background
+traffic can keep it awake. The local relay uses loopback and connects
+to Agent37's protected HTTPS and WebSocket endpoint.
 
 [T3 remote access](https://github.com/pingdotgg/t3code/blob/main/docs/user/remote-access.md)
 [Agent37 instance URLs](https://www.agent37.com/docs/agents-api/urls)
