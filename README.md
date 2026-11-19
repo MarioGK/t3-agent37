@@ -59,12 +59,13 @@ Publish it from this checkout with Agent37 CLI 0.4.1 or later and the API
 key for the TerraScale workspace in the child process environment:
 
 ```bash
-agent37 templates build templates/terrascale --name terrascale-agent37 --default-port 3773
+agent37 templates build templates/terrascale --name terrascale-agent37 --default-port 3737
 t3-agent37 create terrascale-pilot --template terrascale-agent37@1 --yes
 ```
 
-Replace `@1` with the revision returned by the build. Register only the
-template context. The template contains no TerraScale checkouts or login
+Replace `@1` with the revision returned by the build. Agent37's Codex
+gateway uses port 3737. The CLI starts T3 on the separate protected port
+3773. Register only the template context. The template contains no TerraScale checkouts or login
 credentials. Give each instance access to its own repositories at runtime.
 
 ## Resume or stop
