@@ -10,26 +10,60 @@ permissions:
   contents: read
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
+  build:
+    runs-on: ${{ matrix.runner }}
     strategy:
+      fail-fast: false
       matrix:
-        python: ['3.11', '3.14']
+        include:
+          - { os: linux, arch: amd64, runner: ubuntu-latest }
+          - { os: linux, arch: arm64, runner: ubuntu-24.04-arm }
+          - { os: darwin, arch: amd64, runner: macos-15-intel }
+          - { os: darwin, arch: arm64, runner: macos-15 }
+          - { os: windows, arch: amd64, runner: windows-latest }
+          - { os: windows, arch: arm64, runner: windows-11-arm }
+    env:
+      CGO_ENABLED: '0'
+      GOOS: ${{ matrix.os }}
+      GOARCH: ${{ matrix.arch }}
+      ASSET: t3-agent37-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }}
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-go@v7
         with:
-          python-version: ${{ matrix.python }}
-      - run: sh -n install.sh
-      - run: python -m pip install . pytest
-      - run: python -m pytest -q
-      - if: matrix.python == '3.14'
-        run: python tests/native_smoke.py
-      - run: t3-agent37 create ci-pilot --dry-run
+          go-version-file: go.mod
+      - if: matrix.os != 'windows'
+        run: sh -n install.sh
+      - if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          $tokens = $parseErrors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile(
+              (Join-Path $PWD 'install.ps1'), [ref]$tokens, [ref]$parseErrors)
+          if ($parseErrors) { throw ($parseErrors -join "`n") }
+      - run: go test ./...
+      - name: Smoke test the pinned T3 relay
+        if: matrix.os == 'linux' && matrix.arch == 'amd64'
+        env:
+          T3_AGENT37_NATIVE_SMOKE: '1'
+        run: go test ./internal/agent37 -run '^TestNativeT3RelaySmoke$' -v
+      - name: Build and smoke test the executable
+        shell: bash
+        run: |
+          version=$(tr -d '\r\n' < VERSION)
+          mkdir -p dist
+          go build -trimpath -ldflags "-s -w -X main.version=$version" -o "dist/$ASSET" ./cmd/t3-agent37
+          test "$(./dist/"$ASSET" --version)" = "$version"
+          ./dist/"$ASSET" create ci-pilot --dry-run
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.ASSET }}
+          path: dist/${{ env.ASSET }}
+          if-no-files-found: error
 
   release:
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
-    needs: test
+    needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -40,24 +74,30 @@ jobs:
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/download-artifact@v8
         with:
-          python-version: '3.12'
-      - name: Build and validate packages
+          pattern: t3-agent37-*
+          merge-multiple: true
+          path: dist
+      - name: Publish versioned executables
+        shell: bash
         run: |
-          python -m pip install build twine
-          python -m build
-          python -m twine check dist/*
-          python -m venv /tmp/release-smoke
-          /tmp/release-smoke/bin/pip install dist/*.whl
-          version=$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
-          test "$(/tmp/release-smoke/bin/t3-agent37 --version)" = "$version"
-          /tmp/release-smoke/bin/t3-agent37 create release-smoke --dry-run
-      - name: Publish new version
-        run: |
-          version=$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
-          if gh release view "v$version" >/dev/null 2>&1; then
-            exit 0
+          version=$(tr -d '\r\n' < VERSION)
+          tag="v$version"
+          (
+            cd dist
+            sha256sum t3-agent37-{linux,darwin}-{amd64,arm64} t3-agent37-windows-{amd64,arm64}.exe > SHA256SUMS
+          )
+          if draft=$(gh release view "$tag" --json isDraft --jq .isDraft 2>/dev/null); then
+            if [ "$draft" = true ]; then
+              test "$(gh release view "$tag" --json targetCommitish --jq .targetCommitish)" = "$GITHUB_SHA"
+              gh release upload "$tag" dist/t3-agent37-* dist/SHA256SUMS --clobber
+              gh release edit "$tag" --draft=false --latest
+            fi
+          else
+            gh release create "$tag" dist/t3-agent37-* dist/SHA256SUMS \
+              --target "$GITHUB_SHA" --title "$tag" --generate-notes --latest
           fi
-          (cd dist && sha256sum *.whl *.tar.gz > SHA256SUMS)
-          gh release create "v$version" dist/* --target "$GITHUB_SHA" --title "v$version" --generate-notes
+          expected=$(cd dist && printf '%s\n' SHA256SUMS t3-agent37-* | sort)
+          actual=$(gh release view "$tag" --json assets --jq '.assets[].name' | sort)
+          test "$actual" = "$expected"

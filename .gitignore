@@ -1,6 +1,4 @@
 __pycache__/
-*.egg-info/
-.venv/
-build/
-dist/
-.pytest_cache/
+/dist/
+/t3-agent37
+/t3-agent37.exe

@@ -1,4 +1,0 @@
-include install.sh
-include docs/terrascale.md
-include templates/terrascale/Dockerfile
-include tests/native_smoke.py
