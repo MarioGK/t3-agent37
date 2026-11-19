@@ -10,7 +10,7 @@ Requires Python 3.11 or later, the T3 desktop app, and a funded Agent37
 workspace. This release is tested on Linux. The pairing launcher also
 supports macOS.
 
-Download the wheel from the private GitHub release and install it with uv:
+Download the wheel from the GitHub release and install it with uv:
 
 ```bash
 gh release download v0.1.2 --repo MarioGK/t3-agent37 --pattern '*.whl'
