@@ -1,7 +1,6 @@
 package agent37
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -69,7 +68,7 @@ func TestAgent37RoutesAndAuthentication(t *testing.T) {
 			return 404, `{}`
 		}
 	})
-	ctx := context.Background()
+	ctx := t.Context()
 	instances, err := client.List(ctx)
 	if err != nil || len(instances) != 1 || instances[0].Metadata["managed_by"] != "t3-agent37" {
 		t.Fatalf("could not list managed instance: %v", err)
@@ -93,9 +92,8 @@ func TestAgent37ErrorsHideResponseDetails(t *testing.T) {
 	client.http.Transport = testTransport(func(*http.Request) (int, string) {
 		return 403, `{"error":{"code":"forbidden","message":"internal credential"}}`
 	})
-	_, err := client.Get(context.Background(), "ab12cd34ef")
-	var apiError *Error
-	if !errors.As(err, &apiError) || apiError.Status != 403 || apiError.Code != "forbidden" ||
+	_, err := client.Get(t.Context(), "ab12cd34ef")
+	if apiError, ok := errors.AsType[*Error](err); !ok || apiError.Status != 403 || apiError.Code != "forbidden" ||
 		strings.Contains(err.Error(), "internal credential") {
 		t.Fatalf("unexpected API error: %v", err)
 	}
@@ -112,11 +110,11 @@ func TestWaitForT3ProbesAlternatePortAndChecksIdentity(t *testing.T) {
 		}
 		return 200, `{"environmentId":"env-id","serverVersion":"0.1.11","capabilities":{"peerLinks":true}}`
 	})
-	descriptor, port, err := client.WaitForT3(context.Background(), "ab12cd34ef", "env-id", 0)
+	descriptor, port, err := client.WaitForT3(t.Context(), "ab12cd34ef", "env-id", 0)
 	if err != nil || port != 4373 || descriptor.EnvironmentID != "env-id" || descriptor.Capabilities["peerLinks"] != true {
 		t.Fatalf("expected the alternate port and pinned environment, got %#v, %d, %v", descriptor, port, err)
 	}
-	if _, _, err := client.WaitForT3(context.Background(), "ab12cd34ef", "other-id", 4373); err == nil {
+	if _, _, err := client.WaitForT3(t.Context(), "ab12cd34ef", "other-id", 4373); err == nil {
 		t.Fatal("mismatched T3 environment accepted")
 	}
 }

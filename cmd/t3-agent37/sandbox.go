@@ -6,7 +6,6 @@ import (
 	_ "embed"
 	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -45,26 +44,8 @@ type setupProof struct {
 	TailnetURL    string `json:"-"`
 }
 
-func execJSON[T any](ctx context.Context, client *agent37.Client, id, command string) (T, error) {
-	var result T
-	output, err := client.Exec(ctx, id, command)
-	if err != nil {
-		return result, err
-	}
-	if err := json.Unmarshal([]byte(output), &result); err != nil {
-		return result, errors.New("sandbox returned invalid setup data")
-	}
-	return result, nil
-}
-
 func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
-}
-
-func waitForT3(ctx context.Context, client *agent37.Client, id, expected string, port int) (agent37.Descriptor, int, error) {
-	deadline, cancel := context.WithTimeout(ctx, 45*time.Second)
-	defer cancel()
-	return client.WaitForT3(deadline, id, expected, port)
 }
 
 func setup(ctx context.Context, client *agent37.Client, instance agent37.Instance, configured []peers.Peer) (setupProof, error) {
@@ -80,14 +61,14 @@ func setup(ctx context.Context, client *agent37.Client, instance agent37.Instanc
 	if len(configured) != 0 {
 		command += " --peer-links"
 	}
-	proof, err := execJSON[setupProof](ctx, client, instance.ID, command)
+	proof, err := client.ExecJSON[setupProof](ctx, instance.ID, command)
 	if err != nil {
 		return proof, err
 	}
 	if proof.EnvironmentID == "" {
 		return proof, errors.New("sandbox setup did not return a T3 environment ID")
 	}
-	_, _, err = waitForT3(ctx, client, instance.ID, proof.EnvironmentID, proof.Port)
+	_, _, err = client.WaitForT3(ctx, instance.ID, proof.EnvironmentID, proof.Port)
 	return proof, err
 }
 
@@ -113,7 +94,7 @@ func joinTailnetOnce(ctx context.Context, client *agent37.Client, enrollment *pe
 	}
 	hostname := "a37-" + name + "-" + id
 	command := remote + " tailnet-join " + hostname
-	proof, err := execJSON[tailIdentity](ctx, client, id, command)
+	proof, err := client.ExecJSON[tailIdentity](ctx, id, command)
 	if err != nil {
 		return err
 	}
@@ -141,7 +122,7 @@ func joinTailnetOnce(ctx context.Context, client *agent37.Client, enrollment *pe
 		err := client.UploadEnrollmentKey(ctx, id, filename, key)
 		if err == nil {
 			var joined tailIdentity
-			joined, err = execJSON[tailIdentity](ctx, client, id, command+" "+filename)
+			joined, err = client.ExecJSON[tailIdentity](ctx, id, command+" "+filename)
 			if err == nil {
 				err = confirm(joined)
 			}
@@ -159,7 +140,7 @@ func linkFleet(ctx context.Context, client *agent37.Client, id, name string, con
 	if !proof.PeerProxy {
 		return fmt.Errorf("%s needs a fresh boot for T3 peer routing; run down and up when idle", name)
 	}
-	admin, err := execJSON[struct{ Token string }](ctx, client, id, remote+" peer-admin")
+	admin, err := client.ExecJSON[struct{ Token string }](ctx, id, remote+" peer-admin")
 	if err != nil {
 		return err
 	}
@@ -196,7 +177,7 @@ func bootstrap(ctx context.Context, client *agent37.Client, enrollment *peers.En
 		if err := joinTailnet(ctx, client, enrollment, instance.ID, name); err != nil {
 			return proof, err
 		}
-		private, err := execJSON[struct{ URL string }](ctx, client, instance.ID, remote+" tailnet-serve-peer")
+		private, err := client.ExecJSON[struct{ URL string }](ctx, instance.ID, remote+" tailnet-serve-peer")
 		if err != nil {
 			return proof, err
 		}
@@ -324,7 +305,7 @@ func pairLink(ctx context.Context, client *agent37.Client, id, origin string) (s
 	if base.Scheme != "https" || !strings.HasSuffix(base.Hostname(), ".ts.net") {
 		return "", errors.New("T3 pairing requires a private Tailscale HTTPS address")
 	}
-	reply, err := execJSON[struct{ PairURL string }](ctx, client, id, remote+" pair "+shellQuote(origin))
+	reply, err := client.ExecJSON[struct{ PairURL string }](ctx, id, remote+" pair "+shellQuote(origin))
 	if err != nil {
 		return "", err
 	}

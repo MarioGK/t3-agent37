@@ -36,12 +36,13 @@ func validateNamePrefix(prefix string) error {
 
 func loadWorkstationConfig() (workstationConfig, error) {
 	file, err := readWorkstationConfig()
-	if err == nil {
-		if err = validateNamePrefix(file.values.NamePrefix); err != nil {
-			err = fmt.Errorf("invalid name_prefix in %s: %w", file.path, err)
-		}
+	if err != nil {
+		return file.values, err
 	}
-	return file.values, err
+	if err := validateNamePrefix(file.values.NamePrefix); err != nil {
+		return file.values, fmt.Errorf("invalid name_prefix in %s: %w", file.path, err)
+	}
+	return file.values, nil
 }
 
 type configFile struct {
@@ -52,17 +53,12 @@ type configFile struct {
 
 func readWorkstationConfig() (configFile, error) {
 	file := configFile{values: workstationConfig{NamePrefix: defaultNamePrefix}}
-	dir, err := workstationConfigDir()
+	path, err := workstationConfigPath("config.json")
 	if err != nil {
 		return file, err
 	}
-	file.path = filepath.Join(dir, "config.json")
-	if target, err := filepath.EvalSymlinks(file.path); err == nil {
-		file.path = target
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return file, err
-	}
-	data, err := os.ReadFile(file.path)
+	file.path = path
+	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return file, nil
 	}
@@ -74,6 +70,19 @@ func readWorkstationConfig() (configFile, error) {
 	}
 	file.original = data
 	return file, nil
+}
+
+func workstationConfigPath(name string) (string, error) {
+	dir, err := workstationConfigDir()
+	if err != nil {
+		return "", err
+	}
+	path := filepath.Join(dir, name)
+	target, err := filepath.EvalSymlinks(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return path, nil
+	}
+	return target, err
 }
 
 func workstationConfigDir() (string, error) {

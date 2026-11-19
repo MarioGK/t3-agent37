@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -58,11 +57,14 @@ func TestNameCounterContinuesAfterReservation(t *testing.T) {
 	if err := os.Mkdir(state, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	ctx := context.Background()
+	ctx := t.Context()
 	instances := []agent37.Instance{
 		{Name: "terra-2"},
 		{Name: "different", Metadata: map[string]string{"environment": "terra-8"}},
 		{Name: "another-prefix-40"},
+		{Name: "terra-010"},
+		{Name: "terra-+10"},
+		{Name: "terra-1000000000"},
 	}
 	if got, err := reserveSandboxName(ctx, state, "terra", instances); err != nil || got != "terra-9" {
 		t.Fatalf("first reservation = %q, %v", got, err)
@@ -82,11 +84,12 @@ func TestNameCounterContinuesAfterReservation(t *testing.T) {
 
 func TestNameCounterReservesUniqueConcurrentNames(t *testing.T) {
 	state := t.TempDir()
+	ctx := t.Context()
 	const count = 12
 	results := make(chan string, count)
 	for range count {
 		go func() {
-			name, err := reserveSandboxName(context.Background(), state, "agent", nil)
+			name, err := reserveSandboxName(ctx, state, "agent", nil)
 			if err != nil {
 				t.Error(err)
 			}
@@ -97,8 +100,8 @@ func TestNameCounterReservesUniqueConcurrentNames(t *testing.T) {
 	for range count {
 		got[<-results] = true
 	}
-	for number := 1; number <= count; number++ {
-		if name := fmt.Sprintf("agent-%d", number); !got[name] {
+	for index := range count {
+		if name := fmt.Sprintf("agent-%d", index+1); !got[name] {
 			t.Errorf("missing reservation %s", name)
 		}
 	}

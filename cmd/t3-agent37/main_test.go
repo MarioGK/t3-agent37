@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -16,7 +15,7 @@ func TestTerraScaleDryRunWithNoCredentials(t *testing.T) {
 	t.Setenv("T3_AGENT37_CLIPROXY_KEY", "fixture-secret")
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	var output bytes.Buffer
-	err := run(context.Background(), []string{"create", "dev", "--template", "terrascale-agent37@3", "--dry-run"}, &output, &output)
+	err := run(t.Context(), []string{"create", "dev", "--template", "terrascale-agent37@3", "--dry-run"}, &output, &output)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,6 +37,36 @@ func TestTerraScaleDryRunWithNoCredentials(t *testing.T) {
 		payload.Type != "default" || payload.Resources["cpu"] != 4 || payload.Resources["memory"] != 8 ||
 		!payload.AutoSleep || payload.IdleTimeout != 900 || payload.Budget != nil {
 		t.Fatalf("unexpected TerraScale provisioning defaults: %+v", payload)
+	}
+}
+
+func TestCLIProxyEnvUsesEnvironmentAndRuntimeFile(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", base)
+	t.Setenv(proxyURL, "https://proxy.example.com/v1")
+	t.Setenv(proxyKey, "")
+	t.Setenv(proxyModel, "fixture-model")
+	directory := filepath.Join(base, owner)
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	data := []byte(`{
+		"T3_AGENT37_CLIPROXY_URL": "https://file.example.com/v1",
+		"T3_AGENT37_CLIPROXY_KEY": "fixture-key",
+		"AGENT37_API_KEY": "unrelated-fixture-key"
+	}`)
+	if err := os.WriteFile(filepath.Join(directory, "runtime.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env, err := cliproxyEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if env[proxyURL] != "https://proxy.example.com/v1" || env[proxyKey] != "fixture-key" || env[proxyModel] != "fixture-model" {
+		t.Fatal("CLIProxy provisioning did not combine environment overrides with the stored key")
+	}
+	if len(env) != 3 {
+		t.Fatal("CLIProxy provisioning included unrelated runtime credentials")
 	}
 }
 
@@ -69,7 +98,7 @@ func TestCreateWithoutName(t *testing.T) {
 	state := filepath.Join(t.TempDir(), "new-state")
 	t.Setenv("XDG_STATE_HOME", state)
 	var output bytes.Buffer
-	if err := run(context.Background(), []string{"create", "--template", "terrascale-agent37@3", "--dry-run"}, &output, &output); err != nil {
+	if err := run(t.Context(), []string{"create", "--template", "terrascale-agent37@3", "--dry-run"}, &output, &output); err != nil {
 		t.Fatal(err)
 	}
 	var payload struct {
@@ -100,14 +129,14 @@ func TestProvisioningRequiresTailnetBeforeCreatingState(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "Tailscale is required") {
 		t.Fatalf("up accepted a loopback fallback: %v", err)
 	}
-	err = run(context.Background(), []string{"up", "--template", "terrascale-agent37@3"}, &output, &output)
+	err = run(t.Context(), []string{"up", "--template", "terrascale-agent37@3"}, &output, &output)
 	if err == nil || !strings.Contains(err.Error(), "Tailscale enrollment requires") {
 		t.Fatalf("up accepted missing enrollment credentials: %v", err)
 	}
 	if _, err := os.Stat(os.Getenv("XDG_STATE_HOME")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("up reserved state before it found the credential: %v", err)
 	}
-	if _, err := pairLink(context.Background(), nil, "aaaaaaaaaa", "http://127.0.0.1:43738"); err == nil {
+	if _, err := pairLink(t.Context(), nil, "aaaaaaaaaa", "http://127.0.0.1:43738"); err == nil {
 		t.Fatal("pairing accepted a loopback origin")
 	}
 }
@@ -128,7 +157,7 @@ func TestUpWithoutNameCreatesAndNamedUpStarts(t *testing.T) {
 	if _, err := parse([]string{"up", "dev", "--dry-run"}, &output); err == nil {
 		t.Fatal("named up accepted a provisioning flag")
 	}
-	if err := run(context.Background(), []string{"up", "--dry-run", "--template", "terrascale-agent37@3", "--tailscale"}, &output, &output); err != nil {
+	if err := run(t.Context(), []string{"up", "--dry-run", "--template", "terrascale-agent37@3", "--tailscale"}, &output, &output); err != nil {
 		t.Fatal(err)
 	}
 	var payload struct {

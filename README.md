@@ -1,6 +1,6 @@
 # t3-agent37
 
-Run T3 Code in named Agent37 sandboxes. Each release has one executable per platform for Linux, macOS, and Windows on x86-64 and ARM64.
+Run T3 Code in named Agent37 sandboxes. Each release has one executable per platform for Linux, macOS 13+, and Windows on x86-64 and ARM64.
 
 Linux and macOS
 
@@ -56,3 +56,5 @@ Each prefix has its own counter on this workstation. A failed create can leave
 a gap. `up --dry-run` previews the next local name without reserving it.
 
 [TerraScale template, CLIProxy, and Tailscale](docs/terrascale.md) · [Download the latest executable](https://github.com/MarioGK/t3-agent37/releases/latest)
+
+Build from source with Go 1.27.4 or newer. The repository includes the [JetBrains Modern Go skill](.agents/skills/use-modern-go/SKILL.md).

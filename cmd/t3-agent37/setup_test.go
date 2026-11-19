@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"io"
 	"os"
 	"runtime"
@@ -19,7 +18,7 @@ func TestSetupCheckRecognizesCredentialsSavedBySetup(t *testing.T) {
 	for _, name := range []string{agent37KeyName, tailClientID, tailSecret, proxyURL, proxyKey} {
 		t.Setenv(name, "")
 	}
-	ctx := context.Background()
+	ctx := t.Context()
 	var output bytes.Buffer
 	check := func() error {
 		output.Reset()
@@ -77,11 +76,12 @@ func TestSetupVerifyReportsMissingEnrollmentWithoutTerminal(t *testing.T) {
 	t.Setenv("USERPROFILE", home)
 	t.Setenv("XDG_CONFIG_HOME", home)
 	t.Setenv("PATH", "")
+	t.Setenv(agent37KeyName, "")
 	t.Setenv(tailClientID, "")
 	t.Setenv(tailSecret, "")
 	t.Setenv("T3_AGENT37_PEERS_FILE", "")
 	var output bytes.Buffer
-	err := run(context.Background(), []string{"setup", "--verify"}, &output, io.Discard)
+	err := run(t.Context(), []string{"setup", "--verify"}, &output, io.Discard)
 	if err == nil || !strings.Contains(output.String(), "Needs attention Tailscale OAuth client") ||
 		!strings.Contains(output.String(), "Local Tailscale status unavailable") {
 		t.Fatalf("setup --verify without credentials or local client = %v\n%s", err, &output)

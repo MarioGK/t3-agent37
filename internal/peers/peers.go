@@ -24,9 +24,12 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-const accessRequired = "approval-required"
-const descriptorPath = "/.well-known/t3/environment"
-const jsonLimit = 4 << 20
+const (
+	accessRequired        = "approval-required"
+	descriptorPath        = "/.well-known/t3/environment"
+	jsonLimit             = 4 << 20
+	orchestrationProtocol = "2"
+)
 
 var sshAlias = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
 var environmentID = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,127}$`)
@@ -155,7 +158,7 @@ type peerAPI struct {
 
 func newPeerAPI(client *http.Client, name, origin, id, agent37Key string) peerAPI {
 	headers := make(http.Header)
-	headers.Set("X-T3-Orchestration-Protocol", "2")
+	headers.Set("X-T3-Orchestration-Protocol", orchestrationProtocol)
 	if agent37Key != "" {
 		headers.Set("X-Agent37-Key", agent37Key)
 	}
@@ -171,27 +174,29 @@ func (p peerAPI) request(ctx context.Context, method, route, token string, paylo
 		}
 		body = bytes.NewReader(data)
 	}
+	// Keep request and response errors out of diagnostics because they may contain credentials.
+	failure := fmt.Errorf("could not read %s from %s", route, p.name)
 	req, err := http.NewRequestWithContext(ctx, method, p.origin+route, body)
-	if err == nil {
-		req.Header = p.headers.Clone()
-		if token != "" {
-			req.Header.Set("Authorization", "Bearer "+token)
-		}
-		if payload != nil {
-			req.Header.Set("Content-Type", "application/json")
-		}
-		var response *http.Response
-		response, err = p.client.Do(req)
-		if err == nil {
-			defer response.Body.Close()
-			if response.StatusCode < 200 || response.StatusCode >= 300 {
-				return fmt.Errorf("%s returned HTTP %d for %s", p.name, response.StatusCode, route)
-			}
-			err = readJSON(response.Body, result)
-		}
-	}
 	if err != nil {
-		return fmt.Errorf("could not read %s from %s", route, p.name)
+		return failure
+	}
+	req.Header = p.headers.Clone()
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	if payload != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	response, err := p.client.Do(req)
+	if err != nil {
+		return failure
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return fmt.Errorf("%s returned HTTP %d for %s", p.name, response.StatusCode, route)
+	}
+	if err := readJSON(response.Body, result); err != nil {
+		return failure
 	}
 	return nil
 }
@@ -217,31 +222,30 @@ func (p peerAPI) verify(ctx context.Context, attempts int, requirePeerLinks bool
 			PeerLinkPairingCodes bool `json:"peerLinkPairingCodes"`
 		} `json:"capabilities"`
 	}
-	var row descriptor
-	for attempt := 0; ; attempt++ {
-		// A retry replaces the complete object, including any fields omitted by the server.
-		row = descriptor{}
-		err := p.request(ctx, http.MethodGet, descriptorPath, "", nil, &row)
-		if err == nil {
-			break
+	var requestErr error
+	for attempt := range max(attempts, 1) {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(time.Second):
+			}
 		}
-		if attempt+1 == attempts {
-			return err
+		var row descriptor
+		requestErr = p.request(ctx, http.MethodGet, descriptorPath, "", nil, &row)
+		if requestErr != nil {
+			continue
 		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(time.Second):
+		if row.EnvironmentID != p.environmentID {
+			return fmt.Errorf("T3 environment identity changed for %s", p.name)
 		}
+		capabilities := row.Capabilities
+		if requirePeerLinks && (!capabilities.PeerLinks || !capabilities.LinkFence || !capabilities.MCPModeLimitHeader || !capabilities.PeerLinkPairingCodes) {
+			return fmt.Errorf("%s does not support scoped T3 peer links", p.name)
+		}
+		return nil
 	}
-	if row.EnvironmentID != p.environmentID {
-		return fmt.Errorf("T3 environment identity changed for %s", p.name)
-	}
-	capabilities := row.Capabilities
-	if requirePeerLinks && (!capabilities.PeerLinks || !capabilities.LinkFence || !capabilities.MCPModeLimitHeader || !capabilities.PeerLinkPairingCodes) {
-		return fmt.Errorf("%s does not support scoped T3 peer links", p.name)
-	}
-	return nil
+	return requestErr
 }
 
 // VerifyTailnet checks that the private address serves the expected sandbox.
@@ -278,7 +282,7 @@ func (p peerAPI) rpc(ctx context.Context, token, method string, payload, result 
 	wsURL.Scheme = "wss"
 	query := wsURL.Query()
 	query.Set("wsTicket", ticket.Ticket)
-	query.Set("orchestrationProtocol", "2")
+	query.Set("orchestrationProtocol", orchestrationProtocol)
 	wsURL.RawQuery = query.Encode()
 
 	dialer := websocket.Dialer{HandshakeTimeout: 5 * time.Second}
@@ -364,10 +368,11 @@ func ensureLink(ctx context.Context, source peerAPI, sourceToken string, target 
 		return err
 	}
 	access := accessRequired
-	for _, previous := range listed.Links {
-		if previous.EnvironmentID != target.environmentID {
-			continue
-		}
+	index := slices.IndexFunc(listed.Links, func(previous link) bool {
+		return previous.EnvironmentID == target.environmentID
+	})
+	if index >= 0 {
+		previous := listed.Links[index]
 		if previous.Status == "reachable" {
 			return nil
 		}
@@ -375,7 +380,6 @@ func ensureLink(ctx context.Context, source peerAPI, sourceToken string, target 
 			return fmt.Errorf("review the existing T3 link from %s to %s", source.name, target.name)
 		}
 		access = previous.Access
-		break
 	}
 	if access != accessRequired && access != "read-only" {
 		return fmt.Errorf("renew the existing link from %s to %s in T3", source.name, target.name)

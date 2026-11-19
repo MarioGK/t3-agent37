@@ -21,16 +21,17 @@ const (
 )
 
 func highestNameSuffix(prefix string, instances []agent37.Instance) int {
+	stem := prefix + "-"
 	var highest int
 	for _, instance := range instances {
 		for _, name := range []string{instance.Name, instance.Metadata["environment"]} {
-			suffix, ok := strings.CutPrefix(name, prefix+"-")
-			if !ok {
+			suffix, ok := strings.CutPrefix(name, stem)
+			if !ok || strings.HasPrefix(suffix, "0") {
 				continue
 			}
-			number, err := strconv.Atoi(suffix)
-			if err == nil && number > highest && number <= maxNameSuffix && strconv.Itoa(number) == suffix {
-				highest = number
+			number, err := strconv.ParseUint(suffix, 10, 32)
+			if err == nil && number <= maxNameSuffix {
+				highest = max(highest, int(number))
 			}
 		}
 	}

@@ -1,10 +1,12 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -27,11 +29,14 @@ func agent37APIKey() (string, error) {
 	if err != nil || key != "" {
 		return key, err
 	}
-	key, err = runtimeCredential(agent37KeyName)
-	if err == nil && key == "" {
-		err = errors.New("run t3-agent37 setup, set AGENT37_API_KEY, or save a key with agent37 ssh setup")
+	values, err := runtimeCredentials(agent37KeyName)
+	if err != nil {
+		return "", err
 	}
-	return key, err
+	if key = values[agent37KeyName]; key == "" {
+		return "", errors.New("run t3-agent37 setup, set AGENT37_API_KEY, or save a key with agent37 ssh setup")
+	}
+	return key, nil
 }
 
 func existingAgent37APIKey() (string, error) {
@@ -44,20 +49,10 @@ func existingAgent37APIKey() (string, error) {
 	}
 	// Match the path and schema written by the official Agent37 CLI.
 	path := filepath.Join(home, ".config", "agent37", "config.json")
-	info, err := os.Stat(path)
+	data, err := readCredentialFile(path, "Agent37 credentials")
 	if errors.Is(err, os.ErrNotExist) {
 		return "", nil
 	}
-	if err != nil {
-		return "", err
-	}
-	if !info.Mode().IsRegular() {
-		return "", fmt.Errorf("Agent37 credentials at %s must be a regular file", path)
-	}
-	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
-		return "", fmt.Errorf("restrict access to Agent37 credentials at %s with chmod 600", path)
-	}
-	data, err := os.ReadFile(path)
 	if err != nil {
 		return "", err
 	}
@@ -74,15 +69,24 @@ func existingAgent37APIKey() (string, error) {
 	return key, nil
 }
 
-func runtimeCredential(name string) (string, error) {
-	if value := strings.TrimSpace(os.Getenv(name)); value != "" {
-		return value, nil
+func runtimeCredentials(names ...string) (map[string]string, error) {
+	values := make(map[string]string, len(names))
+	var saved map[string]string
+	for _, name := range names {
+		value := strings.TrimSpace(os.Getenv(name))
+		if value == "" {
+			if saved == nil {
+				file, err := readRuntimeConfig()
+				if err != nil {
+					return nil, err
+				}
+				saved = file.values
+			}
+			value = strings.TrimSpace(saved[name])
+		}
+		values[name] = value
 	}
-	file, err := readRuntimeConfig()
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(file.values[name]), nil
+	return values, nil
 }
 
 type runtimeConfig struct {
@@ -92,35 +96,20 @@ type runtimeConfig struct {
 }
 
 func (file runtimeConfig) value(name string) string {
-	if value := strings.TrimSpace(os.Getenv(name)); value != "" {
-		return value
-	}
-	return strings.TrimSpace(file.values[name])
+	return cmp.Or(strings.TrimSpace(os.Getenv(name)), strings.TrimSpace(file.values[name]))
 }
 
 func readRuntimeConfig() (runtimeConfig, error) {
 	file := runtimeConfig{values: make(map[string]string)}
-	dir, err := workstationConfigDir()
+	path, err := workstationConfigPath("runtime.json")
 	if err != nil {
 		return file, err
 	}
-	file.path = filepath.Join(dir, "runtime.json")
-	if target, err := filepath.EvalSymlinks(file.path); err == nil {
-		file.path = target
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return file, err
-	}
-	info, err := os.Stat(file.path)
+	file.path = path
+	data, err := readCredentialFile(path, "runtime credentials")
 	if errors.Is(err, os.ErrNotExist) {
 		return file, nil
 	}
-	if err != nil {
-		return file, err
-	}
-	if !info.Mode().IsRegular() || (runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0) {
-		return file, fmt.Errorf("runtime credentials at %s require an owner-only regular file", file.path)
-	}
-	data, err := os.ReadFile(file.path)
 	if err != nil {
 		return file, err
 	}
@@ -134,15 +123,40 @@ func readRuntimeConfig() (runtimeConfig, error) {
 	return file, nil
 }
 
+func readCredentialFile(path, name string) ([]byte, error) {
+	// Reject named pipes before opening the path.
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s at %s must be a regular file", name, path)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	// Check the open file as the path may have changed since the first check.
+	info, err = file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s at %s must be a regular file", name, path)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
+		return nil, fmt.Errorf("restrict access to %s at %s with chmod 600", name, path)
+	}
+	return io.ReadAll(file)
+}
+
 func verifyTailscaleEnrollment(ctx context.Context) (*peers.Enrollment, error) {
-	clientID, err := runtimeCredential(tailClientID)
+	values, err := runtimeCredentials(tailClientID, tailSecret)
 	if err != nil {
 		return nil, err
 	}
-	clientSecret, err := runtimeCredential(tailSecret)
-	if err != nil {
-		return nil, err
-	}
+	clientID, clientSecret := values[tailClientID], values[tailSecret]
 	if clientID == "" || clientSecret == "" {
 		return nil, fmt.Errorf("Tailscale enrollment requires %s and %s. Run t3-agent37 setup", tailClientID, tailSecret)
 	}

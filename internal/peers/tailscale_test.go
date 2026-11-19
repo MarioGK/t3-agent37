@@ -62,7 +62,7 @@ func TestEnrollmentVerifiesScopeAndRevokesFailedAttempt(t *testing.T) {
 	}
 	client := newHTTPClient(2 * time.Second)
 	defer client.CloseIdleConnections()
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	enrollment, err := verifyEnrollment(ctx, client, base, "fixture-id", "fixture-secret")
 	if err != nil || tokens.Load() != 1 || created.Load() != 0 {
@@ -96,7 +96,7 @@ func TestEnrollmentRedactsRejectedOAuthCredentials(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = verifyEnrollment(context.Background(), server.Client(), base, "fixture-id", "fixture-secret")
+	_, err = verifyEnrollment(t.Context(), server.Client(), base, "fixture-id", "fixture-secret")
 	if err == nil || !strings.Contains(err.Error(), "Auth Keys Write for tag:agent37") ||
 		strings.Contains(err.Error(), "fixture-secret") {
 		t.Fatalf("unexpected scope error: %v", err)

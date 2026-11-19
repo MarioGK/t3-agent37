@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"io"
 	"os"
@@ -13,7 +12,7 @@ import (
 func TestSaveDefaultsAndApplyProvisioningOverrides(t *testing.T) {
 	base := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", base)
-	ctx := context.Background()
+	ctx := t.Context()
 	file, err := readWorkstationConfig()
 	if err != nil || file.values.NamePrefix != "agent" {
 		t.Fatalf("read default config: %v", err)
@@ -62,7 +61,7 @@ func TestSaveDefaultsAndApplyProvisioningOverrides(t *testing.T) {
 
 func TestConfigChecksForTerminalBeforeCredentials(t *testing.T) {
 	t.Setenv("AGENT37_API_KEY", "")
-	err := run(context.Background(), []string{"config"}, io.Discard, io.Discard)
+	err := run(t.Context(), []string{"config"}, io.Discard, io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "requires a terminal") {
 		t.Fatalf("config with redirected output = %v", err)
 	}

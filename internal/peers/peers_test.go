@@ -1,7 +1,6 @@
 package peers
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -51,18 +50,22 @@ func TestConfiguredPeersValidatesPrivateOrigins(t *testing.T) {
 
 func TestDirectTailnetDiscoveryChecksIdentityWithoutPeerCapability(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != descriptorPath || r.Header.Get("X-Agent37-Key") != "" {
+		if r.URL.Path != descriptorPath || r.Header.Get("X-Agent37-Key") != "" ||
+			r.Header.Get("X-T3-Orchestration-Protocol") != "2" {
 			t.Error("direct discovery sent the wrong request")
 		}
 		fmt.Fprint(w, `{"environmentId":"sandbox-proof","capabilities":{}}`)
 	}))
 	defer server.Close()
 	target := newPeerAPI(server.Client(), "sandbox", server.URL, "sandbox-proof", "")
-	if err := target.verify(context.Background(), 1, false); err != nil {
+	if err := target.verify(t.Context(), 1, false); err != nil {
 		t.Fatal(err)
 	}
+	if err := target.verify(t.Context(), 1, true); err == nil {
+		t.Fatal("peer discovery accepted a server without scoped peer links")
+	}
 	target.environmentID = "different-sandbox"
-	if err := target.verify(context.Background(), 1, false); err == nil {
+	if err := target.verify(t.Context(), 1, false); err == nil {
 		t.Fatal("direct discovery accepted the wrong environment")
 	}
 }
@@ -149,7 +152,7 @@ func TestT3PeersLinkWithNativeScopedGrantAndReuseReachableLink(t *testing.T) {
 	defer target.Close()
 	targetURL.Store(target.URL)
 
-	ctx := context.Background()
+	ctx := t.Context()
 	sourceAPI := newPeerAPI(cloud.Client(), "sandbox", cloud.URL, "cloud-id", "fixture-gateway-key")
 	targetAPI := newPeerAPI(target.Client(), "beta", target.URL, "beta-id", "")
 	if err := sourceAPI.verify(ctx, 1, true); err != nil {

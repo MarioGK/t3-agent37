@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,8 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"charm.land/huh/v2"
 	"github.com/MarioGK/t3-agent37/internal/peers"
-	"github.com/charmbracelet/huh"
 )
 
 const (
@@ -39,32 +40,36 @@ func setupWorkstation(ctx context.Context, check, verify bool, output, diagnosti
 	if err != nil {
 		return err
 	}
-	if key == "" {
-		key = runtime.value(agent37KeyName)
+	key = cmp.Or(key, runtime.value(agent37KeyName))
+	if !check && !verify {
+		return editWorkstationSetup(ctx, config, runtime, key, output, diagnostic)
 	}
-	if check || verify {
-		ready := setupStatus(output, config.values, runtime, key)
-		if verify {
-			verified := verifySetupTailscale(ctx, output, runtime)
-			if !ready || !verified {
-				return errors.New("workstation verification is incomplete")
-			}
-			fmt.Fprintln(output, "Run t3-agent37 up to provision a sandbox and verify access.")
-		} else if !ready {
-			return errors.New("workstation setup is incomplete")
-		} else {
-			fmt.Fprintln(output, "Run t3-agent37 setup --verify to check Tailscale.")
+	ready := setupStatus(output, config.values, runtime, key)
+	if verify {
+		verified := verifySetupTailscale(ctx, output, runtime)
+		if !ready || !verified {
+			return errors.New("workstation verification is incomplete")
 		}
+		fmt.Fprintln(output, "Run t3-agent37 up to provision a sandbox and verify access.")
 		return nil
 	}
+	if !ready {
+		return errors.New("workstation setup is incomplete")
+	}
+	fmt.Fprintln(output, "Run t3-agent37 setup --verify to check Tailscale.")
+	return nil
+}
 
+func editWorkstationSetup(ctx context.Context, config configFile, runtime runtimeConfig, key string, output, diagnostic io.Writer) error {
 	values := &config.values
 	usesCLIProxy := func() bool { return sandboxProvider(values.Provider, values.Template) == "cliproxy" }
 	var apiKey, clientID, clientSecret, baseURL, clientKey string
 	var save bool
-	form := huh.NewForm(
-		credentialInput("Agent37 API key", "Create a workspace API key at "+agent37Dashboard, &apiKey).
-			WithHide(key != ""),
+	var groups []*huh.Group
+	if key == "" {
+		groups = append(groups, credentialInput("Agent37 API key", "Create a workspace API key at "+agent37Dashboard, &apiKey))
+	}
+	groups = append(groups,
 		sandboxDefaults(values, "Enter a template with Tailscale installed. Add @revision to pin it.\nTo publish the TerraScale template, see "+templateGuide),
 		providerOptions(values),
 		huh.NewGroup(huh.NewNote().Title("Private Tailscale access").
@@ -90,8 +95,9 @@ func setupWorkstation(ctx context.Context, check, verify bool, output, diagnosti
 			Affirmative("Save").
 			Negative("Cancel").
 			Value(&save)),
-	).WithInput(os.Stdin).WithOutput(diagnostic)
-	err = form.RunWithContext(ctx)
+	)
+	form := huh.NewForm(groups...).WithInput(os.Stdin).WithOutput(diagnostic)
+	err := form.RunWithContext(ctx)
 	if errors.Is(err, huh.ErrUserAborted) || (err == nil && !save) {
 		fmt.Fprintln(diagnostic, "Setup canceled.")
 		return nil
@@ -116,9 +122,7 @@ func setupWorkstation(ctx context.Context, check, verify bool, output, diagnosti
 			return err
 		}
 		fmt.Fprintln(output, "Saved credentials to", runtime.path)
-		if key == "" {
-			key = runtime.value(agent37KeyName)
-		}
+		key = cmp.Or(key, runtime.value(agent37KeyName))
 	}
 	values.Template = strings.TrimSpace(values.Template)
 	values.Tailscale = nil

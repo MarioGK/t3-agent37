@@ -41,8 +41,7 @@ func verifyEnrollment(ctx context.Context, client *http.Client, base *url.URL, c
 	}
 	token, err := config.Token(context.WithValue(ctx, oauth2.HTTPClient, client))
 	if err != nil {
-		var reply *oauth2.RetrieveError
-		if errors.As(err, &reply) {
+		if reply, ok := errors.AsType[*oauth2.RetrieveError](err); ok {
 			var status int
 			if reply.Response != nil {
 				status = reply.Response.StatusCode
@@ -103,8 +102,7 @@ func (enrollment *Enrollment) UseKey(ctx context.Context, use func(string) error
 
 func enrollmentAPIError(action string, err error) error {
 	// The SDK's full error can include the vendor response body.
-	var response tailscale.APIError
-	if errors.As(err, &response) {
+	if response, ok := errors.AsType[tailscale.APIError](err); ok {
 		return fmt.Errorf("could not %s (Tailscale HTTP %d)", action, response.Status)
 	}
 	return fmt.Errorf("could not %s through the Tailscale API", action)

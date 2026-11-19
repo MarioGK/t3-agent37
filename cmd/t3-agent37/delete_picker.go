@@ -11,8 +11,8 @@ import (
 	"strings"
 	"unicode"
 
+	"charm.land/huh/v2"
 	"github.com/MarioGK/t3-agent37/internal/agent37"
-	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/x/term"
 )
 

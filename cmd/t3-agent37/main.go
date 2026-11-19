@@ -1,11 +1,13 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -230,9 +232,7 @@ func terraTemplate(value string) bool {
 func createPayload(opts options, extraEnv map[string]string) map[string]any {
 	metadata := map[string]string{"managed_by": owner, "environment": opts.name, "provider": opts.provider}
 	env := map[string]string{"AGENT37_MANAGED_PLUGIN_COMPOSIO_ENABLED": "false"}
-	for key, value := range extraEnv {
-		env[key] = value
-	}
+	maps.Copy(env, extraEnv)
 	payload := map[string]any{
 		"name": opts.name, "template": opts.template, "metadata": metadata, "type": "default",
 		"resources":    map[string]int{"cpu": 4, "memory": 8},
@@ -248,16 +248,14 @@ func createPayload(opts options, extraEnv map[string]string) map[string]any {
 }
 
 func cliproxyEnv() (map[string]string, error) {
-	result := make(map[string]string)
+	result, err := runtimeCredentials(proxyURL, proxyKey)
+	if err != nil {
+		return nil, err
+	}
 	for _, name := range []string{proxyURL, proxyKey} {
-		value, err := runtimeCredential(name)
-		if err != nil {
-			return nil, err
-		}
-		if value == "" {
+		if result[name] == "" {
 			return nil, fmt.Errorf("load %s for CLIProxy", name)
 		}
-		result[name] = value
 	}
 	if model := os.Getenv(proxyModel); model != "" {
 		result[proxyModel] = model
@@ -266,10 +264,7 @@ func cliproxyEnv() (map[string]string, error) {
 }
 
 func displayProvider(instance agent37.Instance) string {
-	if provider := instance.Metadata["provider"]; provider != "" {
-		return provider
-	}
-	return "codex"
+	return cmp.Or(instance.Metadata["provider"], "codex")
 }
 
 func summary(instance agent37.Instance) map[string]any {
@@ -349,7 +344,7 @@ func getOrCreate(ctx context.Context, client *agent37.Client, opts options, stat
 		}
 	}
 	file, err := os.OpenFile(marker, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if os.IsExist(err) {
+	if errors.Is(err, os.ErrExist) {
 		return agent37.Instance{}, fmt.Errorf("a create operation for %s is pending. Retry to check its state", opts.name)
 	}
 	if err != nil {
@@ -379,8 +374,7 @@ func getOrCreate(ctx context.Context, client *agent37.Client, opts options, stat
 	keepMarker = true // The operation may have reached Agent37 even if the reply is lost.
 	instance, err := client.Create(ctx, createPayload(opts, extra))
 	if err != nil {
-		var response *agent37.Error
-		if errors.As(err, &response) {
+		if response, ok := errors.AsType[*agent37.Error](err); ok {
 			switch response.Status {
 			case 400, 401, 402, 403, 404, 422, 429:
 				keepMarker = false

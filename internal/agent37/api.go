@@ -3,6 +3,7 @@ package agent37
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -145,10 +146,7 @@ func (c *Client) request(ctx context.Context, method, endpoint string, payload a
 	}
 	response, err := c.http.Do(request)
 	if err != nil {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		return errRequest
+		return cmp.Or(ctx.Err(), errRequest)
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
@@ -213,8 +211,7 @@ func (c *Client) Delete(ctx context.Context, id string) error {
 		return err
 	}
 	err := c.request(ctx, http.MethodDelete, apiBase+"/"+id, nil, nil, false)
-	var apiError *Error
-	if errors.As(err, &apiError) && apiError.Status == http.StatusNotFound {
+	if apiError, ok := errors.AsType[*Error](err); ok && apiError.Status == http.StatusNotFound {
 		return nil
 	}
 	return err
@@ -254,6 +251,20 @@ func (c *Client) Exec(ctx context.Context, id, command string) (string, error) {
 		return "", fmt.Errorf("sandbox setup command failed (exit %d)", *result.ExitCode)
 	}
 	return result.Stdout, nil
+}
+
+// ExecJSON decodes the JSON output of a successful sandbox command without
+// exposing its stdout in error messages.
+func (c *Client) ExecJSON[T any](ctx context.Context, id, command string) (T, error) {
+	var result T
+	output, err := c.Exec(ctx, id, command)
+	if err != nil {
+		return result, err
+	}
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		return result, errors.New("sandbox returned invalid setup data")
+	}
+	return result, nil
 }
 
 func (c *Client) UploadEnrollmentKey(ctx context.Context, id, filename, key string) error {
@@ -349,8 +360,7 @@ func (c *Client) WaitForT3(ctx context.Context, id, expected string, remotePort 
 				}
 				return visible, port, nil
 			}
-			var apiError *Error
-			if errors.As(err, &apiError) {
+			if apiError, ok := errors.AsType[*Error](err); ok {
 				switch apiError.Status {
 				case 404, 409, 425, 429, 502, 503, 504:
 				default:
