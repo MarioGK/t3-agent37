@@ -534,16 +534,16 @@ func run(ctx context.Context, args []string, output, diagnostic io.Writer) error
 	if opts.pickDelete && !terminalAvailable(diagnostic) {
 		return errors.New("interactive deletion requires a terminal. Use delete <name> to select a sandbox")
 	}
-	key, err := agent37APIKey()
-	if err != nil {
-		return err
-	}
 	var enrollment *peers.Enrollment
 	if opts.action == "create" {
 		enrollment, err = verifyTailscaleEnrollment(ctx)
 		if err != nil {
 			return err
 		}
+	}
+	key, err := agent37APIKey()
+	if err != nil {
+		return err
 	}
 	client := agent37.New(key)
 	if opts.action == "list" || opts.latest || opts.dryRun || opts.pickDelete {
