@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,6 +9,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/MarioGK/t3-agent37/internal/peers"
 )
 
 const (
@@ -131,17 +134,17 @@ func readRuntimeConfig() (runtimeConfig, error) {
 	return file, nil
 }
 
-func tailscaleCredentials() (string, string, error) {
+func verifyTailscaleEnrollment(ctx context.Context) (*peers.Enrollment, error) {
 	clientID, err := runtimeCredential(tailClientID)
 	if err != nil {
-		return "", "", err
+		return nil, err
 	}
 	clientSecret, err := runtimeCredential(tailSecret)
 	if err != nil {
-		return "", "", err
+		return nil, err
 	}
 	if clientID == "" || clientSecret == "" {
-		return "", "", fmt.Errorf("Tailscale enrollment requires %s and %s. Run t3-agent37 setup", tailClientID, tailSecret)
+		return nil, fmt.Errorf("Tailscale enrollment requires %s and %s. Run t3-agent37 setup", tailClientID, tailSecret)
 	}
-	return clientID, clientSecret, nil
+	return peers.VerifyEnrollment(ctx, clientID, clientSecret)
 }

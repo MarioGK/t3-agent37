@@ -35,6 +35,7 @@ type options struct {
 	yes, dryRun, pair, tailscale     bool
 	deleteSandbox                    bool
 	checkSetup                       bool
+	verifySetup                      bool
 	generatedName                    bool
 	latest                           bool
 	pickDelete                       bool
@@ -71,7 +72,7 @@ func parse(args []string, output io.Writer) (options, error) {
 			return
 		}
 		if opts.action == "setup" {
-			fmt.Fprintln(output, "Usage: t3-agent37 setup [--check]\nSet up the Agent37 template, Tailscale enrollment, and the model provider.")
+			fmt.Fprintln(output, "Usage: t3-agent37 setup [--check | --verify]\nSet up the Agent37 template, Tailscale enrollment, and the model provider.")
 			flags.PrintDefaults()
 			return
 		}
@@ -97,6 +98,7 @@ func parse(args []string, output io.Writer) (options, error) {
 	var noTailscale bool
 	if opts.action == "setup" {
 		flags.BoolVar(&opts.checkSetup, "check", false, "Check workstation configuration without prompts or network requests")
+		flags.BoolVar(&opts.verifySetup, "verify", false, "Check local Tailscale status and verify OAuth access")
 	}
 	if opts.action == "create" {
 		flags.BoolVar(&opts.yes, "yes", false, "Authorize paid provisioning")
@@ -125,6 +127,9 @@ func parse(args []string, output io.Writer) (options, error) {
 	if opts.action == "config" || opts.action == "setup" {
 		if flags.NArg() != 0 {
 			return opts, fmt.Errorf("%s does not take a sandbox name", opts.action)
+		}
+		if opts.checkSetup && opts.verifySetup {
+			return opts, errors.New("choose either --check or --verify")
 		}
 		return opts, nil
 	}
@@ -390,7 +395,7 @@ func getOrCreate(ctx context.Context, client *agent37.Client, opts options, stat
 	return instance, nil
 }
 
-func operate(ctx context.Context, client *agent37.Client, opts options, state string, output, diagnostic io.Writer) error {
+func operate(ctx context.Context, client *agent37.Client, enrollment *peers.Enrollment, opts options, state string, output, diagnostic io.Writer) error {
 	var instance agent37.Instance
 	var configured []peers.Peer
 	var err error
@@ -465,7 +470,7 @@ func operate(ctx context.Context, client *agent37.Client, opts options, state st
 	}
 	var proof setupProof
 	if opts.action == "create" {
-		proof, err = prepareCreated(ctx, client, instance, opts.name, configured, diagnostic)
+		proof, err = prepareCreated(ctx, client, enrollment, instance, opts.name, configured, diagnostic)
 		if err != nil {
 			return err
 		}
@@ -477,7 +482,7 @@ func operate(ctx context.Context, client *agent37.Client, opts options, state st
 		if instance.Status == "stopped" {
 			return errors.New("the sandbox is stopped. Run t3-agent37 up first")
 		}
-		proof, err = bootstrap(ctx, client, instance, opts.name, nil, false, diagnostic)
+		proof, err = bootstrap(ctx, client, nil, instance, opts.name, nil, false, diagnostic)
 		if err != nil {
 			return err
 		}
@@ -508,7 +513,7 @@ func run(ctx context.Context, args []string, output, diagnostic io.Writer) error
 		return editConfig(ctx, diagnostic)
 	}
 	if opts.action == "setup" {
-		return setupWorkstation(ctx, opts.checkSetup, output, diagnostic)
+		return setupWorkstation(ctx, opts.checkSetup, opts.verifySetup, output, diagnostic)
 	}
 	var state string
 	if opts.generatedName {
@@ -529,14 +534,16 @@ func run(ctx context.Context, args []string, output, diagnostic io.Writer) error
 	if opts.pickDelete && !terminalAvailable(diagnostic) {
 		return errors.New("interactive deletion requires a terminal. Use delete <name> to select a sandbox")
 	}
-	if opts.action == "create" {
-		if _, _, err := tailscaleCredentials(); err != nil {
-			return err
-		}
-	}
 	key, err := agent37APIKey()
 	if err != nil {
 		return err
+	}
+	var enrollment *peers.Enrollment
+	if opts.action == "create" {
+		enrollment, err = verifyTailscaleEnrollment(ctx)
+		if err != nil {
+			return err
+		}
 	}
 	client := agent37.New(key)
 	if opts.action == "list" || opts.latest || opts.dryRun || opts.pickDelete {
@@ -613,7 +620,7 @@ func run(ctx context.Context, args []string, output, diagnostic io.Writer) error
 	if opts.generatedName {
 		fmt.Fprintf(output, "Creating sandbox %s.\n", opts.name)
 	}
-	err = operate(ctx, client, opts, state, output, diagnostic)
+	err = operate(ctx, client, enrollment, opts, state, output, diagnostic)
 	unlockErr := lock.Unlock()
 	if err != nil {
 		return err

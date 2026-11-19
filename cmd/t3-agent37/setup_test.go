@@ -65,8 +65,25 @@ func TestSetupCheckRecognizesCredentialsSavedBySetup(t *testing.T) {
 		t.Fatalf("setup --check with invalid CLIProxy URL = %v\n%s", err, &output)
 	}
 	t.Setenv(proxyURL, "https://models.example.com/v1")
-	if err := check(); err != nil || !strings.Contains(output.String(), "Run t3-agent37 up") ||
+	if err := check(); err != nil || !strings.Contains(output.String(), "Run t3-agent37 setup --verify") ||
 		strings.Contains(output.String(), "fixture-") {
 		t.Fatalf("setup --check with complete settings = %v\n%s", err, &output)
+	}
+}
+
+func TestSetupVerifyReportsMissingEnrollmentWithoutTerminal(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", home)
+	t.Setenv("PATH", "")
+	t.Setenv(tailClientID, "")
+	t.Setenv(tailSecret, "")
+	t.Setenv("T3_AGENT37_PEERS_FILE", "")
+	var output bytes.Buffer
+	err := run(context.Background(), []string{"setup", "--verify"}, &output, io.Discard)
+	if err == nil || !strings.Contains(output.String(), "Needs attention Tailscale OAuth client") ||
+		!strings.Contains(output.String(), "Local Tailscale status unavailable") {
+		t.Fatalf("setup --verify without credentials or local client = %v\n%s", err, &output)
 	}
 }

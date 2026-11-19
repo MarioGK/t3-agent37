@@ -2,12 +2,15 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/url"
 	"os"
+	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/MarioGK/t3-agent37/internal/peers"
 	"github.com/charmbracelet/huh"
@@ -16,11 +19,12 @@ import (
 const (
 	templateGuide    = "https://github.com/MarioGK/t3-agent37/blob/main/docs/terrascale.md"
 	tailscaleGuide   = "https://console.tailscale.com/admin/settings/trust-credentials"
+	tailscaleDNS     = "https://login.tailscale.com/admin/dns"
 	agent37Dashboard = "https://www.agent37.com/dashboard/cloud"
 )
 
-func setupWorkstation(ctx context.Context, check bool, output, diagnostic io.Writer) error {
-	if !check && !terminalAvailable(diagnostic) {
+func setupWorkstation(ctx context.Context, check, verify bool, output, diagnostic io.Writer) error {
+	if !check && !verify && !terminalAvailable(diagnostic) {
 		return errors.New("setup requires a terminal. Use setup --check to inspect this workstation")
 	}
 	config, err := readWorkstationConfig()
@@ -38,9 +42,18 @@ func setupWorkstation(ctx context.Context, check bool, output, diagnostic io.Wri
 	if key == "" {
 		key = runtime.value(agent37KeyName)
 	}
-	if check {
-		if !setupStatus(output, config.values, runtime, key) {
+	if check || verify {
+		ready := setupStatus(output, config.values, runtime, key)
+		if verify {
+			verified := verifySetupTailscale(ctx, output, runtime)
+			if !ready || !verified {
+				return errors.New("workstation verification is incomplete")
+			}
+			fmt.Fprintln(output, "Run t3-agent37 up to provision a sandbox and verify access.")
+		} else if !ready {
 			return errors.New("workstation setup is incomplete")
+		} else {
+			fmt.Fprintln(output, "Run t3-agent37 setup --verify to check Tailscale.")
 		}
 		return nil
 	}
@@ -55,15 +68,16 @@ func setupWorkstation(ctx context.Context, check bool, output, diagnostic io.Wri
 		sandboxDefaults(values, "Enter a template with Tailscale installed. Add @revision to pin it.\nTo publish the TerraScale template, see "+templateGuide),
 		providerOptions(values),
 		huh.NewGroup(huh.NewNote().Title("Private Tailscale access").
-			Description("Define tag:agent37 and allow your T3 clients to reach it on port 443.\n"+
-				"Enable MagicDNS and HTTPS certificates in the tailnet DNS settings.\n"+
+			Description("Sign in to Tailscale on the machine running T3 Code.\n"+
+				"Define tag:agent37 and allow your T3 clients to reach it on port 443.\n"+
+				"Enable MagicDNS and HTTPS certificates at "+tailscaleDNS+"\n"+
 				"Create an OAuth client with Auth Keys Write scoped to tag:agent37.\n"+tailscaleGuide).
 			Next(true),
 		).WithHide(runtime.value(tailClientID) != "" && runtime.value(tailSecret) != ""),
-		credentialInput("Tailscale OAuth client ID", "Use the client ID from Trust credentials.", &clientID).
-			WithHide(runtime.value(tailClientID) != ""),
-		credentialInput("Tailscale OAuth client secret", "Use the secret from the same OAuth client.", &clientSecret).
-			WithHide(runtime.value(tailSecret) != ""),
+		credentialInput("Tailscale OAuth client ID", "Use the client ID from Trust credentials. Leave blank to keep the saved value.", &clientID).
+			WithHide(strings.TrimSpace(os.Getenv(tailClientID)) != ""),
+		credentialInput("Tailscale OAuth client secret", "Use the secret from the same OAuth client. Leave blank to keep the saved value.", &clientSecret).
+			WithHide(strings.TrimSpace(os.Getenv(tailSecret)) != ""),
 		huh.NewGroup(huh.NewInput().Title("CLIProxy base URL").
 			Description("Use the HTTPS endpoint for your model catalog.").
 			Value(&baseURL).Validate(validateCLIProxyInput)).
@@ -112,7 +126,9 @@ func setupWorkstation(ctx context.Context, check bool, output, diagnostic io.Wri
 		return err
 	}
 	fmt.Fprintln(output, "Saved sandbox defaults to", config.path)
-	setupStatus(output, *values, runtime, key)
+	if setupStatus(output, *values, runtime, key) {
+		fmt.Fprintln(output, "Run t3-agent37 setup --verify to check Tailscale.")
+	}
 	return nil
 }
 
@@ -166,8 +182,55 @@ func setupStatus(output io.Writer, config workstationConfig, runtime runtimeConf
 	} else {
 		fmt.Fprintln(output, "  Optional T3 peer linking", templateGuide+"#link-t3-servers")
 	}
-	if ready {
-		fmt.Fprintln(output, "Run t3-agent37 up to provision a sandbox and verify access.")
-	}
 	return ready
+}
+
+func verifySetupTailscale(ctx context.Context, output io.Writer, runtime runtimeConfig) bool {
+	localOK := checkLocalTailscale(ctx, output)
+	id, secret := runtime.value(tailClientID), runtime.value(tailSecret)
+	if id == "" || secret == "" {
+		return false
+	}
+	if _, err := peers.VerifyEnrollment(ctx, id, secret); err != nil {
+		fmt.Fprintln(output, "  Needs attention Tailscale OAuth.", err)
+		return false
+	}
+	fmt.Fprintln(output, "  Verified Tailscale OAuth can issue a scoped token for tag:agent37")
+	return localOK
+}
+
+func checkLocalTailscale(ctx context.Context, output io.Writer) bool {
+	path, err := exec.LookPath("tailscale")
+	if err != nil {
+		fmt.Fprintln(output, "  Local Tailscale status unavailable. Check that the T3 Code machine has joined the tailnet.")
+		return true
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	data, err := exec.CommandContext(ctx, path, "status", "--json", "--peers=false").Output()
+	var status struct {
+		BackendState   string
+		CurrentTailnet struct{ MagicDNSEnabled bool }
+		CertDomains    []string
+	}
+	if json.Unmarshal(data, &status) != nil || status.BackendState == "" {
+		fmt.Fprintln(output, "  Needs attention local Tailscale status. Start the Tailscale client and retry.")
+		return false
+	}
+	if status.BackendState != "Running" || err != nil {
+		fmt.Fprintln(output, "  Needs attention local Tailscale connection. Sign in and connect to your tailnet.")
+		return false
+	}
+	fmt.Fprintln(output, "  Verified local Tailscale connection")
+	if status.CurrentTailnet.MagicDNSEnabled {
+		fmt.Fprintln(output, "  Verified MagicDNS")
+	} else {
+		fmt.Fprintln(output, "  Needs attention MagicDNS. Enable it at", tailscaleDNS)
+	}
+	if len(status.CertDomains) > 0 {
+		fmt.Fprintln(output, "  Verified Tailscale HTTPS certificates are enabled")
+	} else {
+		fmt.Fprintln(output, "  Needs attention Tailscale HTTPS certificates. Enable them at", tailscaleDNS)
+	}
+	return status.CurrentTailnet.MagicDNSEnabled && len(status.CertDomains) > 0
 }

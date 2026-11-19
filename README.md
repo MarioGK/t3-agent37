@@ -16,7 +16,7 @@ irm https://raw.githubusercontent.com/MarioGK/t3-agent37/main/install.ps1 | iex
 
 ```sh
 t3-agent37 setup
-t3-agent37 setup --check
+t3-agent37 setup --verify
 t3-agent37 up
 t3-agent37 ls
 t3-agent37 down
@@ -26,9 +26,12 @@ t3-agent37 down
 Tailscale OAuth client, and any CLIProxy settings. It reuses existing credentials
 and saves new ones to an owner-only `runtime.json` beside `config.json`.
 `setup --check` checks local settings without prompts or API calls.
+`setup --verify` also checks Tailscale enrollment credentials, MagicDNS, and
+HTTPS. It can verify OAuth from a headless machine.
 
 `up` creates a sandbox with the next numbered name and serves T3 at its private
-Tailscale HTTPS DNS name. For a separate desktop connection,
+Tailscale HTTPS DNS name. It verifies Tailscale credentials before provisioning
+and mints an ephemeral key when the sandbox needs to join. For a separate desktop connection,
 `connect <name> --pair` prints a link that T3 Code asks you to confirm.
 
 `create dev --yes` creates a sandbox with an explicit name.

@@ -10,7 +10,7 @@ tailnet DNS settings. [Trust credentials](https://console.tailscale.com/admin/se
 · [Tailnet DNS](https://login.tailscale.com/admin/dns)
 
 ```sh
-t3-agent37 setup --check
+t3-agent37 setup --verify
 t3-agent37 create terrascale-dev --template terrascale-agent37@3 --yes
 ```
 
@@ -26,13 +26,19 @@ You can supply these variables from your secret store on the workstation.
 The CLI reads keys saved by setup in an owner-only `runtime.json` beside
 `config.json`. Environment variables take precedence. For the Agent37 key,
 the official `agent37 ssh setup` config also takes precedence over `runtime.json`.
+Rerun `setup` to replace a saved OAuth credential. Leave both fields blank
+to keep the saved pair.
 
 T3 loads the CLIProxy text model catalog and defaults to `cliproxy/glm-5.3`.
 Set `T3_AGENT37_CLIPROXY_MODEL` before `create` to pick another model ID.
 Run `t3-agent37 prepare terrascale-dev` to refresh the catalog.
 
-`create` and `up` enroll the sandbox with a single-use ephemeral Tailscale key
-and serve T3 at its private `https://<hostname>.<tailnet>.ts.net` address.
+`setup --verify` requests a scoped Tailscale token and checks MagicDNS and HTTPS
+if the local Tailscale CLI is available. `setup --check` runs offline.
+`create` and `up` verify OAuth before provisioning. The workstation keeps
+the OAuth secret and sends the guest a single-use, preauthorized ephemeral key
+valid for ten minutes. The CLI revokes the key on a failed join. T3 uses the
+private `https://<hostname>.<tailnet>.ts.net` address.
 `connect <name> --pair` prints a pairing link for that address.
 `down` logs out the device before deleting the newest managed sandbox.
 `down <name>` logs out the device and stops that sandbox. Inside the sandbox, use

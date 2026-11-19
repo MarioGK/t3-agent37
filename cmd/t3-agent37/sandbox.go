@@ -97,14 +97,14 @@ type tailIdentity struct {
 	EnrollmentRequired bool   `json:"enrollmentRequired"`
 }
 
-func joinTailnet(ctx context.Context, client *agent37.Client, id, name string) error {
-	if err := joinTailnetOnce(ctx, client, id, name); err != nil {
+func joinTailnet(ctx context.Context, client *agent37.Client, enrollment *peers.Enrollment, id, name string) error {
+	if err := joinTailnetOnce(ctx, client, enrollment, id, name); err != nil {
 		return fmt.Errorf("could not enroll %s in Tailscale: %w", name, err)
 	}
 	return nil
 }
 
-func joinTailnetOnce(ctx context.Context, client *agent37.Client, id, name string) error {
+func joinTailnetOnce(ctx context.Context, client *agent37.Client, enrollment *peers.Enrollment, id, name string) error {
 	if err := agent37.ValidateID(id); err != nil {
 		return err
 	}
@@ -117,34 +117,42 @@ func joinTailnetOnce(ctx context.Context, client *agent37.Client, id, name strin
 	if err != nil {
 		return err
 	}
-	if proof.EnrollmentRequired {
-		clientID, clientSecret, err := tailscaleCredentials()
+	confirm := func(identity tailIdentity) error {
+		if identity.EnrollmentRequired || identity.ID == "" || identity.Hostname != hostname {
+			return errors.New("Tailscale did not confirm the sandbox identity")
+		}
+		return nil
+	}
+	if !proof.EnrollmentRequired {
+		return confirm(proof)
+	}
+	if enrollment == nil {
+		enrollment, err = verifyTailscaleEnrollment(ctx)
 		if err != nil {
 			return err
 		}
-		key, err := peers.EnrollmentKey(ctx, clientID, clientSecret)
-		if err != nil {
-			return err
-		}
-		var nonce [16]byte
-		if _, err = rand.Read(nonce[:]); err != nil {
-			return err
-		}
-		filename := "tailscale-enrollment-" + hex.EncodeToString(nonce[:])
-		if err = client.UploadEnrollmentKey(ctx, id, filename, key); err == nil {
-			proof, err = execJSON[tailIdentity](ctx, client, id, command+" "+filename)
+	}
+	var nonce [16]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return err
+	}
+	filename := "tailscale-enrollment-" + hex.EncodeToString(nonce[:])
+	return enrollment.UseKey(ctx, func(key string) error {
+		err := client.UploadEnrollmentKey(ctx, id, filename, key)
+		if err == nil {
+			var joined tailIdentity
+			joined, err = execJSON[tailIdentity](ctx, client, id, command+" "+filename)
+			if err == nil {
+				err = confirm(joined)
+			}
 		}
 		if err != nil {
 			cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 			defer cancel()
 			_, _ = client.Exec(cleanup, id, "unlink \"$HOME/.local/share/t3-agent37/"+filename+"\"")
-			return err
 		}
-	}
-	if proof.ID == "" || proof.Hostname != hostname {
-		return errors.New("Tailscale did not confirm the sandbox identity")
-	}
-	return nil
+		return err
+	})
 }
 
 func linkFleet(ctx context.Context, client *agent37.Client, id, name string, configured []peers.Peer, proof setupProof, diagnostic io.Writer) error {
@@ -170,7 +178,7 @@ func linkFleet(ctx context.Context, client *agent37.Client, id, name string, con
 	return nil
 }
 
-func bootstrap(ctx context.Context, client *agent37.Client, instance agent37.Instance, name string, configured []peers.Peer, mayRestart bool, diagnostic io.Writer) (setupProof, error) {
+func bootstrap(ctx context.Context, client *agent37.Client, enrollment *peers.Enrollment, instance agent37.Instance, name string, configured []peers.Peer, mayRestart bool, diagnostic io.Writer) (setupProof, error) {
 	proof, err := setup(ctx, client, instance, configured)
 	if err != nil {
 		return proof, err
@@ -185,7 +193,7 @@ func bootstrap(ctx context.Context, client *agent37.Client, instance agent37.Ins
 		}
 	}
 	if instance.Metadata["tailnet"] == "tailscale" {
-		if err := joinTailnet(ctx, client, instance.ID, name); err != nil {
+		if err := joinTailnet(ctx, client, enrollment, instance.ID, name); err != nil {
 			return proof, err
 		}
 		private, err := execJSON[struct{ URL string }](ctx, client, instance.ID, remote+" tailnet-serve-peer")
@@ -204,11 +212,6 @@ func bootstrap(ctx context.Context, client *agent37.Client, instance agent37.Ins
 }
 
 func wake(ctx context.Context, client *agent37.Client, instance agent37.Instance) (agent37.Instance, error) {
-	if instance.Status == "stopped" && instance.Metadata["tailnet"] == "tailscale" {
-		if _, _, err := tailscaleCredentials(); err != nil {
-			return instance, err
-		}
-	}
 	update, err := client.Lifecycle(ctx, instance.ID, "start")
 	if update.Status != "" {
 		instance.Status = update.Status
@@ -235,6 +238,14 @@ func stopSandbox(ctx context.Context, client *agent37.Client, instance agent37.I
 
 func startSandbox(ctx context.Context, client *agent37.Client, instance agent37.Instance, name string, configured []peers.Peer, diagnostic io.Writer) (agent37.Instance, string, error) {
 	wasStopped := instance.Status == "stopped"
+	var enrollment *peers.Enrollment
+	if wasStopped && instance.Metadata["tailnet"] == "tailscale" {
+		var err error
+		enrollment, err = verifyTailscaleEnrollment(ctx)
+		if err != nil {
+			return instance, "", err
+		}
+	}
 	if instance.Status != "running" {
 		var err error
 		instance, err = wake(ctx, client, instance)
@@ -243,7 +254,7 @@ func startSandbox(ctx context.Context, client *agent37.Client, instance agent37.
 		}
 	}
 	if instance.Metadata["tailnet"] == "tailscale" {
-		proof, err := bootstrap(ctx, client, instance, name, configured, wasStopped, diagnostic)
+		proof, err := bootstrap(ctx, client, enrollment, instance, name, configured, wasStopped, diagnostic)
 		if err != nil {
 			return instance, proof.TailnetURL, err
 		}
@@ -253,7 +264,7 @@ func startSandbox(ctx context.Context, client *agent37.Client, instance agent37.
 	return instance, "", nil
 }
 
-func prepareCreated(ctx context.Context, client *agent37.Client, instance agent37.Instance, name string, configured []peers.Peer, diagnostic io.Writer) (setupProof, error) {
+func prepareCreated(ctx context.Context, client *agent37.Client, enrollment *peers.Enrollment, instance agent37.Instance, name string, configured []peers.Peer, diagnostic io.Writer) (setupProof, error) {
 	if displayProvider(instance) == "opencode" {
 		if err := client.RequireManagedBudget(ctx, instance.ID, false); err != nil {
 			return setupProof{}, err
@@ -267,7 +278,7 @@ func prepareCreated(ctx context.Context, client *agent37.Client, instance agent3
 			return setupProof{}, err
 		}
 	}
-	return bootstrap(ctx, client, instance, name, configured, wasStopped, diagnostic)
+	return bootstrap(ctx, client, enrollment, instance, name, configured, wasStopped, diagnostic)
 }
 
 func prepare(ctx context.Context, client *agent37.Client, instance agent37.Instance, name string, output, diagnostic io.Writer) error {
