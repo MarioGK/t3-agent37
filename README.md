@@ -15,6 +15,7 @@ irm https://raw.githubusercontent.com/MarioGK/t3-agent37/main/install.ps1 | iex
 ```
 
 Set `AGENT37_API_KEY`, then confirm pairing in T3 when creating a sandbox.
+`t3-agent37 create --yes` generates and prints a name for you.
 
 ```sh
 t3-agent37 create dev --yes

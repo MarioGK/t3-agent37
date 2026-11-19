@@ -41,12 +41,35 @@ func TestTerraScaleDryRunWithNoCredentials(t *testing.T) {
 
 func TestFlagsCanFollowName(t *testing.T) {
 	opts, err := parse([]string{"create", "dev", "--template", "terrascale-agent37@3", "--no-tailscale", "--yes"}, &bytes.Buffer{})
-	if err != nil || opts.tailscale || opts.provider != "cliproxy" || !opts.yes {
+	if err != nil || opts.name != "dev" || opts.generatedName || opts.tailscale || opts.provider != "cliproxy" || !opts.yes {
 		t.Fatalf("unexpected options: %+v, %v", opts, err)
 	}
 	opts, err = parse([]string{"connect", "--port", "49373", "dev", "--pair"}, &bytes.Buffer{})
 	if err != nil || opts.port != 49373 || !opts.pair {
 		t.Fatalf("unexpected connect options: %+v, %v", opts, err)
+	}
+}
+
+func TestCreateWithoutName(t *testing.T) {
+	var output bytes.Buffer
+	if err := run(context.Background(), []string{"create", "--dry-run"}, &output, &output); err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		Name     string
+		Metadata map[string]string
+	}
+	if err := json.Unmarshal(output.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if !namePattern.MatchString(payload.Name) || payload.Metadata["environment"] != payload.Name {
+		t.Fatalf("invalid generated sandbox name or metadata: %+v", payload)
+	}
+	if _, err := parse([]string{"up"}, &bytes.Buffer{}); err == nil {
+		t.Fatal("up accepted a missing name")
+	}
+	if _, err := parse([]string{"create", "", "--dry-run"}, &bytes.Buffer{}); err == nil {
+		t.Fatal("create accepted an empty explicit name")
 	}
 }
 

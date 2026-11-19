@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	cryptorand "crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -29,11 +31,21 @@ var templates = map[string]string{
 	"opencode": "agent37-opencode", "cliproxy": "agent37-opencode",
 }
 
+var nameAdjectives = [...]string{"brisk", "calm", "clear", "crisp", "keen", "quiet", "steady", "swift"}
+var nameAnimals = [...]string{"badger", "falcon", "fox", "heron", "lynx", "otter", "raven", "tern"}
+
+func randomSandboxName() string {
+	adjective := nameAdjectives[rand.IntN(len(nameAdjectives))]
+	animal := nameAnimals[rand.IntN(len(nameAnimals))]
+	return adjective + "-" + animal + "-" + strings.ToLower(cryptorand.Text()[:10])
+}
+
 type options struct {
 	action, name, provider, template string
 	port                             int
 	yes, dryRun, pair, tailscale     bool
 	deleteSandbox                    bool
+	generatedName                    bool
 }
 
 func parse(args []string, output io.Writer) (options, error) {
@@ -59,6 +71,9 @@ func parse(args []string, output io.Writer) (options, error) {
 	flags.SetOutput(output)
 	flags.Usage = func() {
 		fmt.Fprintf(output, "Usage: t3-agent37 %s [name] [flags]\n", args[0])
+		if opts.action == "create" {
+			fmt.Fprintln(output, "Omit the name to generate one.")
+		}
 		flags.PrintDefaults()
 	}
 	var noTailscale bool
@@ -86,10 +101,14 @@ func parse(args []string, output io.Writer) (options, error) {
 	if opts.action == "list" && flags.NArg() == 0 {
 		return opts, nil
 	}
-	if opts.action == "list" || flags.NArg() != 1 || !namePattern.MatchString(flags.Arg(0)) {
+	switch {
+	case opts.action == "create" && flags.NArg() == 0:
+		opts.generatedName = true
+	case opts.action != "list" && flags.NArg() == 1 && namePattern.MatchString(flags.Arg(0)):
+		opts.name = flags.Arg(0)
+	default:
 		return opts, errors.New("expected a name with 1 to 43 lowercase letters, digits, or hyphens")
 	}
-	opts.name = flags.Arg(0)
 	if opts.action == "stop" && opts.yes != opts.deleteSandbox {
 		return opts, errors.New("use --delete and --yes together to permanently delete the sandbox")
 	}
@@ -119,6 +138,9 @@ func parse(args []string, output io.Writer) (options, error) {
 		}
 		if opts.yes == opts.dryRun {
 			return opts, errors.New("choose exactly one of --yes and --dry-run")
+		}
+		if opts.generatedName {
+			opts.name = randomSandboxName()
 		}
 	}
 	return opts, nil
@@ -215,6 +237,9 @@ func getOrCreate(ctx context.Context, client *agent37.Client, opts options, stat
 	existing, err := lookup(ctx, client, opts.name)
 	if err != nil || existing.ID != "" {
 		if existing.ID != "" {
+			if opts.generatedName {
+				return existing, fmt.Errorf("generated name %s is already in use. Run create again", opts.name)
+			}
 			_ = os.Remove(marker)
 		}
 		return existing, err
@@ -234,6 +259,9 @@ func getOrCreate(ctx context.Context, client *agent37.Client, opts options, stat
 		}
 	}()
 	existing, err = lookup(ctx, client, opts.name)
+	if existing.ID != "" && opts.generatedName {
+		return existing, fmt.Errorf("generated name %s is already in use. Run create again", opts.name)
+	}
 	if err != nil || existing.ID != "" {
 		return existing, err
 	}
@@ -407,6 +435,9 @@ func run(ctx context.Context, args []string, output, diagnostic io.Writer) error
 	}
 	if !locked {
 		return errors.New("could not acquire the sandbox lifecycle lock")
+	}
+	if opts.generatedName {
+		fmt.Fprintf(output, "Creating sandbox %s.\n", opts.name)
 	}
 	relay, err := operate(ctx, client, opts, state, output, diagnostic)
 	unlockErr := lock.Unlock()

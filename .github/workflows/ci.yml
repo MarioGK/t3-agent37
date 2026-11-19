@@ -54,7 +54,7 @@ jobs:
           mkdir -p dist
           go build -trimpath -ldflags "-s -w -X main.version=$version" -o "dist/$ASSET" ./cmd/t3-agent37
           test "$(./dist/"$ASSET" --version)" = "$version"
-          ./dist/"$ASSET" create ci-pilot --dry-run
+          ./dist/"$ASSET" create --dry-run
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ env.ASSET }}
