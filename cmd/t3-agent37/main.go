@@ -32,10 +32,12 @@ var templates = map[string]string{
 type options struct {
 	action, name, provider, template string
 	namePrefix                       string
+	targetID                         string
 	port                             int
 	yes, dryRun, pair, tailscale     bool
 	deleteSandbox                    bool
 	generatedName                    bool
+	latest                           bool
 }
 
 func parse(args []string, output io.Writer) (options, error) {
@@ -72,6 +74,10 @@ func parse(args []string, output io.Writer) (options, error) {
 			fmt.Fprintln(output, "Run without a name to provision a new sandbox and open T3 pairing.")
 			fmt.Fprintln(output, "Pass a sandbox name to start it.")
 		}
+		if args[0] == "down" {
+			fmt.Fprintln(output, "Omit the name to permanently delete the newest managed sandbox and its disk.")
+			fmt.Fprintln(output, "Pass a sandbox name to stop it.")
+		}
 		flags.PrintDefaults()
 	}
 	var noTailscale bool
@@ -91,6 +97,9 @@ func parse(args []string, output io.Writer) (options, error) {
 	if opts.action == "stop" {
 		flags.BoolVar(&opts.deleteSandbox, "delete", false, "Permanently delete the managed sandbox and its disk")
 		flags.BoolVar(&opts.yes, "yes", false, "Confirm permanent deletion")
+		if args[0] == "down" {
+			flags.BoolVar(&opts.dryRun, "dry-run", false, "Show which sandbox bare down would delete")
+		}
 	}
 	if opts.action == "create" || opts.action == "up" || opts.action == "connect" {
 		flags.IntVar(&opts.port, "port", 0, "Local relay port")
@@ -112,7 +121,16 @@ func parse(args []string, output io.Writer) (options, error) {
 	if opts.action == "list" && flags.NArg() == 0 {
 		return opts, nil
 	}
+	if opts.action == "stop" && opts.yes != opts.deleteSandbox {
+		return opts, errors.New("use --delete and --yes together to permanently delete the sandbox")
+	}
 	switch {
+	case args[0] == "down" && flags.NArg() == 0:
+		if flags.Changed("delete") && !opts.deleteSandbox {
+			return opts, errors.New("specify a sandbox name to stop it and keep its disk")
+		}
+		opts.latest = true
+		opts.deleteSandbox = true
 	case opts.action == "create" && flags.NArg() == 0:
 		opts.generatedName = true
 	case opts.action != "list" && flags.NArg() == 1 && namePattern.MatchString(flags.Arg(0)):
@@ -120,8 +138,8 @@ func parse(args []string, output io.Writer) (options, error) {
 	default:
 		return opts, errors.New("expected a name with 1 to 43 lowercase letters, digits, or hyphens")
 	}
-	if opts.action == "stop" && opts.yes != opts.deleteSandbox {
-		return opts, errors.New("use --delete and --yes together to permanently delete the sandbox")
+	if opts.action == "stop" && opts.dryRun && !opts.latest {
+		return opts, errors.New("omit the name to preview which sandbox bare down would delete")
 	}
 	if flags.Changed("port") && (opts.port < 1024 || opts.port > 65535) {
 		return opts, errors.New("port must be between 1024 and 65535")
@@ -244,8 +262,7 @@ func lookup(ctx context.Context, client *agent37.Client, name string) (agent37.I
 	}
 	var found agent37.Instance
 	for _, instance := range instances {
-		if instance.Status == "deleted" || instance.Metadata["managed_by"] != owner ||
-			instance.Metadata["environment"] != name {
+		if !isManaged(instance) || instance.Metadata["environment"] != name {
 			continue
 		}
 		if found.ID != "" {
@@ -254,6 +271,36 @@ func lookup(ctx context.Context, client *agent37.Client, name string) (agent37.I
 		found = instance
 	}
 	return found, nil
+}
+
+func isManaged(instance agent37.Instance) bool {
+	return instance.Status != "deleted" && instance.Metadata["managed_by"] == owner
+}
+
+func latestManaged(instances []agent37.Instance) (agent37.Instance, error) {
+	var latest agent37.Instance
+	tied := false
+	for _, instance := range instances {
+		if !isManaged(instance) {
+			continue
+		}
+		if instance.Created <= 0 {
+			return agent37.Instance{}, errors.New("Agent37 omitted a creation time. Use down <name> --delete --yes to select the sandbox")
+		}
+		if instance.Created > latest.Created {
+			latest, tied = instance, false
+		} else if instance.Created == latest.Created {
+			tied = true
+		}
+	}
+	if tied {
+		return agent37.Instance{}, errors.New("the newest managed sandboxes share a creation time. Use down <name> --delete --yes to select the sandbox")
+	}
+	if latest.Created != 0 &&
+		(agent37.ValidateID(latest.ID) != nil || !namePattern.MatchString(latest.Metadata["environment"])) {
+		return agent37.Instance{}, errors.New("Agent37 returned an invalid identity for the newest managed sandbox")
+	}
+	return latest, nil
 }
 
 func getOrCreate(ctx context.Context, client *agent37.Client, opts options, state string) (agent37.Instance, error) {
@@ -337,6 +384,11 @@ func operate(ctx context.Context, client *agent37.Client, opts options, state st
 			}
 		}
 		instance, err = getOrCreate(ctx, client, opts, state)
+	} else if opts.targetID != "" {
+		instance, err = client.Get(ctx, opts.targetID)
+		if err == nil && (instance.ID != opts.targetID || !isManaged(instance) || instance.Metadata["environment"] != opts.name) {
+			return nil, errors.New("the selected sandbox changed. Run down again to choose a target")
+		}
 	} else {
 		instance, err = lookup(ctx, client, opts.name)
 	}
@@ -433,7 +485,7 @@ func run(ctx context.Context, args []string, output, diagnostic io.Writer) error
 			return err
 		}
 	}
-	if opts.dryRun {
+	if opts.dryRun && opts.action == "create" {
 		if opts.generatedName {
 			opts.name, err = previewSandboxName(ctx, state, opts.namePrefix)
 			if err != nil {
@@ -447,18 +499,35 @@ func run(ctx context.Context, args []string, output, diagnostic io.Writer) error
 		return err
 	}
 	client := agent37.New(key)
-	if opts.action == "list" {
+	if opts.action == "list" || opts.latest {
 		instances, err := client.List(ctx)
 		if err != nil {
 			return err
 		}
-		rows := make([]map[string]any, 0)
-		for _, instance := range instances {
-			if instance.Status != "deleted" && instance.Metadata["managed_by"] == owner {
-				rows = append(rows, summary(instance))
+		if opts.action == "list" {
+			rows := make([]map[string]any, 0)
+			for _, instance := range instances {
+				if isManaged(instance) {
+					rows = append(rows, summary(instance))
+				}
 			}
+			return jsonOutput(output, rows, true)
 		}
-		return jsonOutput(output, rows, true)
+		instance, err := latestManaged(instances)
+		if err != nil {
+			return err
+		}
+		if instance.ID == "" {
+			fmt.Fprintln(output, "No managed Agent37 sandboxes.")
+			return nil
+		}
+		if opts.dryRun {
+			target := summary(instance)
+			target["action"] = "delete"
+			return jsonOutput(output, target, true)
+		}
+		opts.name = instance.Metadata["environment"]
+		opts.targetID = instance.ID
 	}
 	if state == "" {
 		state, err = statePath()

@@ -19,7 +19,8 @@ Set `T3_AGENT37_CLIPROXY_MODEL` before `create` to pick another model ID.
 Run `t3-agent37 prepare terrascale-dev` to refresh the catalog.
 
 `create` and `up` enroll the sandbox with a single-use ephemeral Tailscale key.
-`down` logs out the device before stopping compute. Inside the sandbox, use
+`down` logs out the device before deleting the newest managed sandbox.
+`down <name>` logs out the device and stops that sandbox. Inside the sandbox, use
 `socks5h://127.0.0.1:1055` to reach tailnet services. T3 uses the local relay.
 Use `--no-tailscale` on `create` for a CLIProxy-only sandbox.
 

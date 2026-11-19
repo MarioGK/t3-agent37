@@ -45,6 +45,7 @@ type Instance struct {
 	Name      string            `json:"name"`
 	Template  string            `json:"template"`
 	Status    string            `json:"status"`
+	Created   int64             `json:"created"`
 	Metadata  map[string]string `json:"metadata"`
 	extraMeta map[string]json.RawMessage
 }
@@ -56,10 +57,13 @@ func (i *Instance) UnmarshalJSON(data []byte) error {
 	row := struct {
 		*fields
 		Metadata map[string]json.RawMessage `json:"metadata"`
+		Created  json.RawMessage            `json:"created"`
 	}{fields: (*fields)(i)}
 	if err := json.Unmarshal(data, &row); err != nil {
 		return err
 	}
+	i.Created = 0
+	_ = json.Unmarshal(row.Created, &i.Created)
 	i.Metadata = make(map[string]string, len(row.Metadata))
 	i.extraMeta = nil
 	for key, raw := range row.Metadata {
