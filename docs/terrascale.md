@@ -1,21 +1,31 @@
 # TerraScale Agent37 template
 
-With `AGENT37_API_KEY` set, create a sandbox from the private template.
+Run `t3-agent37 setup` and choose `terrascale-agent37@3` if your Agent37
+workspace has access. You can also [publish your own copy](#publish-the-template).
+Choose CLIProxy as the model provider, or use Automatic with the TerraScale
+template. For Tailscale, define `tag:agent37` in your tailnet policy and grant your
+T3 clients access to that tag on TCP 443. Create an OAuth client with **Auth Keys
+Write** scoped to `tag:agent37`. Enable MagicDNS and HTTPS certificates in the
+tailnet DNS settings. [Trust credentials](https://console.tailscale.com/admin/settings/trust-credentials)
+· [Tailnet DNS](https://login.tailscale.com/admin/dns)
 
 ```sh
+t3-agent37 setup --check
 t3-agent37 create terrascale-dev --template terrascale-agent37@3 --yes
 ```
 
-Supply these variables from your secret store on the workstation.
+You can supply these variables from your secret store on the workstation.
 
 | Variable | Value |
 | --- | --- |
+| `AGENT37_API_KEY` | Agent37 workspace API key |
 | `T3_AGENT37_CLIPROXY_URL` | HTTPS base URL for CLIProxy |
 | `T3_AGENT37_CLIPROXY_KEY` | CLIProxy client API key |
 | `T3_AGENT37_TAILSCALE_CLIENT_ID`, `T3_AGENT37_TAILSCALE_CLIENT_SECRET` | OAuth client with `auth_keys` write access for `tag:agent37` |
 
-The CLI also reads these keys from an owner-only `runtime.json` beside
-`config.json`. Environment variables take precedence.
+The CLI reads keys saved by setup in an owner-only `runtime.json` beside
+`config.json`. Environment variables take precedence. For the Agent37 key,
+the official `agent37 ssh setup` config also takes precedence over `runtime.json`.
 
 T3 loads the CLIProxy text model catalog and defaults to `cliproxy/glm-5.3`.
 Set `T3_AGENT37_CLIPROXY_MODEL` before `create` to pick another model ID.
@@ -27,13 +37,6 @@ and serve T3 at its private `https://<hostname>.<tailnet>.ts.net` address.
 `down` logs out the device before deleting the newest managed sandbox.
 `down <name>` logs out the device and stops that sandbox. Inside the sandbox, use
 `socks5h://127.0.0.1:1055` to reach tailnet services.
-Run `t3-agent37 config` to set a Tailscale-ready default template.
-Enrollment credentials are required before provisioning starts.
-
-```json
-{"name_prefix": "terra", "template": "terrascale-agent37@3", "tailscale": true}
-```
-
 ## Link T3 servers
 
 To link a Tailscale-enabled sandbox on `create` and `up`, save the peers in
@@ -51,6 +54,8 @@ Environments enabled. The sandbox joins with private Tailscale HTTPS Serve.
 The CLI adds both directions with approval-required access and reuses
 reachable links without opening the desktop app. Set `T3_AGENT37_PEERS_FILE`
 to an empty string to skip sync.
+
+## Publish the template
 
 The image includes T3, OpenCode, Codex, Tailscale, .NET 10 and 11, Go 1.27.4,
 Rust 1.99.1 with rustfmt and Clippy, Python 3.12 with uv, and Node 24 with

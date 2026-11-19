@@ -95,30 +95,9 @@ func workstationConfigDir() (string, error) {
 }
 
 func (file configFile) save(ctx context.Context) error {
-	dir := filepath.Dir(file.path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	lock := flock.New(file.path + ".lock")
-	locked, err := lock.TryLockContext(ctx, 100*time.Millisecond)
-	if err != nil {
-		return err
-	}
-	if !locked {
-		return errors.New("could not lock the configuration file")
-	}
-	defer lock.Unlock()
-	current, err := os.ReadFile(file.path)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	if !bytes.Equal(current, file.original) {
-		return errors.New("the config changed while the editor was open. Run config again")
-	}
-
 	var existing map[string]json.RawMessage
-	if current != nil {
-		if err := json.Unmarshal(current, &existing); err != nil {
+	if file.original != nil {
+		if err := json.Unmarshal(file.original, &existing); err != nil {
 			return err
 		}
 	}
@@ -134,7 +113,30 @@ func (file configFile) save(ctx context.Context) error {
 		delete(existing, key)
 	}
 	maps.Copy(fields, existing)
+	return saveConfigJSON(ctx, file.path, file.original, fields)
+}
 
+func saveConfigJSON(ctx context.Context, path string, original []byte, values any) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	lock := flock.New(path + ".lock")
+	locked, err := lock.TryLockContext(ctx, 100*time.Millisecond)
+	if err != nil {
+		return err
+	}
+	if !locked {
+		return errors.New("could not lock the configuration file")
+	}
+	defer lock.Unlock()
+	current, err := os.ReadFile(path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if !bytes.Equal(current, original) {
+		return fmt.Errorf("config changed at %s while the editor was open. Rerun the command", path)
+	}
 	temp, err := os.CreateTemp(dir, ".t3-agent37-config-*")
 	if err != nil {
 		return err
@@ -142,10 +144,10 @@ func (file configFile) save(ctx context.Context) error {
 	defer os.Remove(temp.Name())
 	encoder := json.NewEncoder(temp)
 	encoder.SetIndent("", "  ")
-	writeErr := encoder.Encode(fields)
+	writeErr := encoder.Encode(values)
 	closeErr := temp.Close()
 	if err := errors.Join(writeErr, closeErr); err != nil {
 		return err
 	}
-	return os.Rename(temp.Name(), file.path)
+	return os.Rename(temp.Name(), path)
 }

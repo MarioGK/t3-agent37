@@ -34,6 +34,7 @@ type options struct {
 	targetID                         string
 	yes, dryRun, pair, tailscale     bool
 	deleteSandbox                    bool
+	checkSetup                       bool
 	generatedName                    bool
 	latest                           bool
 	pickDelete                       bool
@@ -41,7 +42,7 @@ type options struct {
 
 func parse(args []string, output io.Writer) (options, error) {
 	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" || args[0] == "help" {
-		fmt.Fprintln(output, "Usage: t3-agent37 <create|list|ls|up|down|delete|connect|prepare|terminal|config> [name] [flags]\n       t3-agent37 --version")
+		fmt.Fprintln(output, "Usage: t3-agent37 <setup|create|list|ls|up|down|delete|connect|prepare|terminal|config> [name] [flags]\n       t3-agent37 --version")
 		return options{}, flag.ErrHelp
 	}
 	if len(args) == 1 && (args[0] == "--version" || args[0] == "version") {
@@ -54,7 +55,7 @@ func parse(args []string, output io.Writer) (options, error) {
 		opts.action = "stop"
 	case "ls":
 		opts.action = "list"
-	case "create", "up", "delete", "connect", "start", "stop", "prepare", "terminal", "list", "config":
+	case "create", "up", "delete", "connect", "start", "stop", "prepare", "terminal", "list", "config", "setup":
 	default:
 		return opts, fmt.Errorf("unknown command %q", opts.action)
 	}
@@ -67,6 +68,11 @@ func parse(args []string, output io.Writer) (options, error) {
 		}
 		if opts.action == "config" {
 			fmt.Fprintln(output, "Usage: t3-agent37 config\nEdit sandbox defaults in the terminal.")
+			return
+		}
+		if opts.action == "setup" {
+			fmt.Fprintln(output, "Usage: t3-agent37 setup [--check]\nSet up the Agent37 template, Tailscale enrollment, and the model provider.")
+			flags.PrintDefaults()
 			return
 		}
 		if opts.action == "delete" {
@@ -89,6 +95,9 @@ func parse(args []string, output io.Writer) (options, error) {
 		flags.PrintDefaults()
 	}
 	var noTailscale bool
+	if opts.action == "setup" {
+		flags.BoolVar(&opts.checkSetup, "check", false, "Check workstation configuration without prompts or network requests")
+	}
 	if opts.action == "create" {
 		flags.BoolVar(&opts.yes, "yes", false, "Authorize paid provisioning")
 	}
@@ -113,9 +122,9 @@ func parse(args []string, output io.Writer) (options, error) {
 	if err := flags.Parse(args[1:]); err != nil {
 		return opts, err
 	}
-	if opts.action == "config" {
+	if opts.action == "config" || opts.action == "setup" {
 		if flags.NArg() != 0 {
-			return opts, errors.New("config does not take any arguments")
+			return opts, fmt.Errorf("%s does not take a sandbox name", opts.action)
 		}
 		return opts, nil
 	}
@@ -174,19 +183,13 @@ func parse(args []string, output io.Writer) (options, error) {
 		if !flags.Changed("provider") {
 			opts.provider = config.Provider
 		}
-		terra := terraTemplate(opts.template)
-		if opts.provider == "" {
-			opts.provider = "opencode"
-			if terra {
-				opts.provider = "cliproxy"
-			}
-		}
+		opts.provider = sandboxProvider(opts.provider, opts.template)
 		_, supported := providers[opts.provider]
 		if !supported {
 			return opts, fmt.Errorf("unknown provider %q", opts.provider)
 		}
 		if opts.template == "" {
-			return opts, errors.New("choose a Tailscale-ready template in t3-agent37 config or with --template")
+			return opts, errors.New("choose a Tailscale-ready template in t3-agent37 setup or with --template")
 		}
 		if noTailscale || (flags.Changed("tailscale") && !opts.tailscale) ||
 			(!flags.Changed("tailscale") && config.Tailscale != nil && !*config.Tailscale) {
@@ -195,6 +198,16 @@ func parse(args []string, output io.Writer) (options, error) {
 		opts.tailscale = true
 	}
 	return opts, nil
+}
+
+func sandboxProvider(provider, template string) string {
+	if provider != "" {
+		return provider
+	}
+	if terraTemplate(strings.TrimSpace(template)) {
+		return "cliproxy"
+	}
+	return "opencode"
 }
 
 func terraTemplate(value string) bool {
@@ -231,7 +244,7 @@ func createPayload(opts options, extraEnv map[string]string) map[string]any {
 
 func cliproxyEnv() (map[string]string, error) {
 	result := make(map[string]string)
-	for _, name := range []string{"T3_AGENT37_CLIPROXY_URL", "T3_AGENT37_CLIPROXY_KEY"} {
+	for _, name := range []string{proxyURL, proxyKey} {
 		value, err := runtimeCredential(name)
 		if err != nil {
 			return nil, err
@@ -241,8 +254,8 @@ func cliproxyEnv() (map[string]string, error) {
 		}
 		result[name] = value
 	}
-	if model := os.Getenv("T3_AGENT37_CLIPROXY_MODEL"); model != "" {
-		result["T3_AGENT37_CLIPROXY_MODEL"] = model
+	if model := os.Getenv(proxyModel); model != "" {
+		result[proxyModel] = model
 	}
 	return result, nil
 }
@@ -493,6 +506,9 @@ func run(ctx context.Context, args []string, output, diagnostic io.Writer) error
 	}
 	if opts.action == "config" {
 		return editConfig(ctx, diagnostic)
+	}
+	if opts.action == "setup" {
+		return setupWorkstation(ctx, opts.checkSetup, output, diagnostic)
 	}
 	var state string
 	if opts.generatedName {

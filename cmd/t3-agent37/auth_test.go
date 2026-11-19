@@ -10,6 +10,7 @@ func TestAgent37APIKeyUsesOfficialConfigAndRespectsEnvironment(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", home)
 	t.Setenv("AGENT37_API_KEY", "")
 	if _, err := agent37APIKey(); err == nil {
 		t.Fatal("accepted a missing credential")
