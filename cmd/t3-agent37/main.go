@@ -31,6 +31,7 @@ var templates = map[string]string{
 
 type options struct {
 	action, name, provider, template string
+	namePrefix                       string
 	port                             int
 	yes, dryRun, pair, tailscale     bool
 	deleteSandbox                    bool
@@ -126,6 +127,18 @@ func parse(args []string, output io.Writer) (options, error) {
 		return opts, errors.New("port must be between 1024 and 65535")
 	}
 	if opts.action == "create" {
+		var config workstationConfig
+		if opts.generatedName {
+			var err error
+			config, err = loadWorkstationConfig()
+			if err != nil {
+				return opts, err
+			}
+			opts.namePrefix = config.NamePrefix
+			if !flags.Changed("template") {
+				opts.template = config.Template
+			}
+		}
 		terra := terraTemplate(opts.template)
 		if opts.provider == "" {
 			opts.provider = "opencode"
@@ -144,7 +157,11 @@ func parse(args []string, output io.Writer) (options, error) {
 			return opts, errors.New("choose --tailscale or --no-tailscale")
 		}
 		if !flags.Changed("tailscale") {
-			opts.tailscale = terra && !noTailscale
+			opts.tailscale = terra
+			if config.Tailscale != nil {
+				opts.tailscale = *config.Tailscale
+			}
+			opts.tailscale = opts.tailscale && !noTailscale
 		}
 		if opts.yes == opts.dryRun {
 			return opts, errors.New("choose exactly one of --yes and --dry-run")
@@ -409,12 +426,8 @@ func run(ctx context.Context, args []string, output, diagnostic io.Writer) error
 	if err != nil {
 		return err
 	}
-	var prefix, state string
+	var state string
 	if opts.generatedName {
-		prefix, err = configuredNamePrefix()
-		if err != nil {
-			return err
-		}
 		state, err = statePath()
 		if err != nil {
 			return err
@@ -422,7 +435,7 @@ func run(ctx context.Context, args []string, output, diagnostic io.Writer) error
 	}
 	if opts.dryRun {
 		if opts.generatedName {
-			opts.name, err = previewSandboxName(ctx, state, prefix)
+			opts.name, err = previewSandboxName(ctx, state, opts.namePrefix)
 			if err != nil {
 				return err
 			}
@@ -461,7 +474,7 @@ func run(ctx context.Context, args []string, output, diagnostic io.Writer) error
 		if err != nil {
 			return err
 		}
-		opts.name, err = reserveSandboxName(ctx, state, prefix, instances)
+		opts.name, err = reserveSandboxName(ctx, state, opts.namePrefix, instances)
 		if err != nil {
 			return err
 		}

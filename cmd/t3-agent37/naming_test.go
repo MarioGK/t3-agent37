@@ -21,14 +21,35 @@ func TestConfiguredNamePrefix(t *testing.T) {
 	if err := os.WriteFile(config, []byte(`{"name_prefix":"terra-dev"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := configuredNamePrefix(); err != nil || got != "terra-dev" {
-		t.Fatalf("configured prefix = %q, %v", got, err)
+	if got, err := loadWorkstationConfig(); err != nil || got.NamePrefix != "terra-dev" {
+		t.Fatalf("configured prefix = %q, %v", got.NamePrefix, err)
 	}
 	if err := os.WriteFile(config, []byte(`{"name_prefix":"Bad prefix"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := configuredNamePrefix(); err == nil {
+	if _, err := loadWorkstationConfig(); err == nil {
 		t.Fatal("invalid prefix was accepted")
+	}
+}
+
+func TestUpUsesTailnetDefaultsFromConfig(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", base)
+	directory := filepath.Join(base, owner)
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	data := []byte(`{"name_prefix":"terra","template":"terrascale-agent37@3","tailscale":true}`)
+	if err := os.WriteFile(filepath.Join(directory, "config.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opts, err := parse([]string{"up"}, os.Stderr)
+	if err != nil || opts.namePrefix != "terra" || opts.template != "terrascale-agent37@3" || opts.provider != "cliproxy" || !opts.tailscale {
+		t.Fatalf("configured up = %+v, %v", opts, err)
+	}
+	opts, err = parse([]string{"up", "--template", "agent37-opencode", "--no-tailscale"}, os.Stderr)
+	if err != nil || opts.template != "agent37-opencode" || opts.tailscale {
+		t.Fatalf("up with explicit overrides = %+v, %v", opts, err)
 	}
 }
 

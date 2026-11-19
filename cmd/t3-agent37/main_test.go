@@ -90,6 +90,9 @@ func TestCreateWithoutName(t *testing.T) {
 }
 
 func TestUpWithoutNameCreatesAndNamedUpStarts(t *testing.T) {
+	t.Setenv("AGENT37_API_KEY", "")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	var output bytes.Buffer
 	opts, err := parse([]string{"up"}, &output)
 	if err != nil || opts.action != "create" || !opts.generatedName || !opts.yes || opts.dryRun {
@@ -102,9 +105,6 @@ func TestUpWithoutNameCreatesAndNamedUpStarts(t *testing.T) {
 	if _, err := parse([]string{"up", "dev", "--dry-run"}, &output); err == nil {
 		t.Fatal("named up accepted a provisioning flag")
 	}
-	t.Setenv("AGENT37_API_KEY", "")
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	if err := run(context.Background(), []string{"up", "--dry-run", "--template", "terrascale-agent37@3", "--no-tailscale"}, &output, &output); err != nil {
 		t.Fatal(err)
 	}

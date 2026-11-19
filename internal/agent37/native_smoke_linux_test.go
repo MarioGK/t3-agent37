@@ -130,6 +130,9 @@ func TestNativeT3RelaySmoke(t *testing.T) {
 	if upstream.EnvironmentID != downstream.EnvironmentID {
 		t.Fatal("T3 environment identity changed through relay")
 	}
+	if upstream.Capabilities["accessTokenRenewal"] == true && downstream.Capabilities["accessTokenRenewal"] != false {
+		t.Fatal("the loopback relay advertised URL-bound token renewal")
+	}
 
 	pairCtx, pairCancel := context.WithTimeout(ctx, 15*time.Second)
 	defer pairCancel()

@@ -25,7 +25,14 @@ const (
 
 var prefixPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,31}[a-z0-9])?$`)
 
-func configuredNamePrefix() (string, error) {
+type workstationConfig struct {
+	NamePrefix string `json:"name_prefix"`
+	Template   string `json:"template"`
+	Tailscale  *bool  `json:"tailscale"`
+}
+
+func loadWorkstationConfig() (workstationConfig, error) {
+	config := workstationConfig{NamePrefix: defaultNamePrefix}
 	base := os.Getenv("XDG_CONFIG_HOME")
 	if base == "" {
 		var err error
@@ -37,27 +44,24 @@ func configuredNamePrefix() (string, error) {
 			base = filepath.Join(home, ".config")
 		}
 		if err != nil {
-			return "", err
+			return config, err
 		}
 	}
 	path := filepath.Join(base, owner, "config.json")
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return defaultNamePrefix, nil
+		return config, nil
 	}
 	if err != nil {
-		return "", err
+		return config, err
 	}
-	config := struct {
-		NamePrefix string `json:"name_prefix"`
-	}{NamePrefix: defaultNamePrefix}
 	if err := json.Unmarshal(data, &config); err != nil {
-		return "", fmt.Errorf("invalid config %s: %w", path, err)
+		return config, fmt.Errorf("invalid config %s: %w", path, err)
 	}
 	if !prefixPattern.MatchString(config.NamePrefix) {
-		return "", fmt.Errorf("name_prefix in %s must contain 1 to 33 lowercase letters, digits, or hyphens and start and end with a letter or digit", path)
+		return config, fmt.Errorf("name_prefix in %s must contain 1 to 33 lowercase letters, digits, or hyphens and start and end with a letter or digit", path)
 	}
-	return config.NamePrefix, nil
+	return config, nil
 }
 
 func highestNameSuffix(prefix string, instances []agent37.Instance) int {

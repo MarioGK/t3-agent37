@@ -3,6 +3,7 @@ package agent37
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,39 @@ import (
 
 	"github.com/gorilla/websocket"
 )
+
+func TestRelayAdvertisesBearerPairingForItsLoopbackOrigin(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Accept-Encoding") != "identity" {
+			t.Error("the relay did not request an uncompressed descriptor")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("ETag", `"origin"`)
+		_, _ = io.WriteString(w, `{"environmentId":"example","capabilities":{"accessTokenRenewal":true,"linkedEnvironments":true}}`)
+	}))
+	defer upstream.Close()
+	relay := httptest.NewUnstartedServer(nil)
+	handler, err := RelayHandler(upstream.URL, "fixture-key", relay.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	relay.Config.Handler = handler
+	relay.Start()
+	defer relay.Close()
+	response, err := relay.Client().Get(relay.URL + "/.well-known/t3/environment")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var descriptor Descriptor
+	if err := json.NewDecoder(response.Body).Decode(&descriptor); err != nil {
+		t.Fatal(err)
+	}
+	if descriptor.EnvironmentID != "example" || descriptor.Capabilities["accessTokenRenewal"] != false ||
+		descriptor.Capabilities["linkedEnvironments"] != true || response.Header.Get("ETag") != "" {
+		t.Fatal("relay discovery advertised the wrong pairing capabilities")
+	}
+}
 
 func TestRelayTransportNegotiatesHTTP1WithTLS(t *testing.T) {
 	upstream := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

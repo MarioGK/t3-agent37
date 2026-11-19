@@ -17,6 +17,7 @@ irm https://raw.githubusercontent.com/MarioGK/t3-agent37/main/install.ps1 | iex
 Set `AGENT37_API_KEY` or use the key saved by `agent37 ssh setup` in
 `~/.config/agent37/config.json`. Run `up` to create a sandbox with the next
 numbered name and open T3 pairing.
+T3 Code asks for confirmation the first time you add a sandbox.
 
 ```sh
 t3-agent37 up

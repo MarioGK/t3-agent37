@@ -1,6 +1,8 @@
 package agent37
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
 	"log"
@@ -13,7 +15,52 @@ import (
 	"time"
 )
 
-const maxRelayBody = 64 << 20
+const (
+	maxRelayBody   = 64 << 20
+	descriptorPath = "/.well-known/t3/environment"
+	maxDescriptor  = 64 << 10
+)
+
+// The protected gateway changes the request URL that the upstream sees.
+// T3 supports bearer sessions when this relay cannot forward URL-bound proofs.
+func adaptRelayDescriptor(response *http.Response) error {
+	if response.Request.Method != http.MethodGet ||
+		response.Request.URL.Path != descriptorPath || response.StatusCode != http.StatusOK {
+		return nil
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(response.Body, maxDescriptor+1))
+	if err != nil || len(body) > maxDescriptor {
+		return errors.New("invalid T3 relay descriptor")
+	}
+	var descriptor map[string]json.RawMessage
+	if err := json.Unmarshal(body, &descriptor); err != nil || descriptor == nil {
+		return errors.New("invalid T3 relay descriptor")
+	}
+	if raw, ok := descriptor["capabilities"]; ok {
+		var capabilities map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &capabilities); err != nil {
+			return errors.New("invalid T3 relay capabilities")
+		}
+		if _, advertised := capabilities["accessTokenRenewal"]; advertised {
+			capabilities["accessTokenRenewal"] = json.RawMessage("false")
+			descriptor["capabilities"], err = json.Marshal(capabilities)
+			if err != nil {
+				return err
+			}
+			body, err = json.Marshal(descriptor)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	response.Body = io.NopCloser(bytes.NewReader(body))
+	response.ContentLength = int64(len(body))
+	response.Header.Set("Content-Length", strconv.Itoa(len(body)))
+	response.Header.Del("ETag")
+	response.Header.Del("Last-Modified")
+	return nil
+}
 
 func relayTransport() *http.Transport {
 	// Restrict TLS negotiation to HTTP/1.1 for T3's WebSocket upgrade.
@@ -60,11 +107,16 @@ func RelayHandler(origin, key, localHost string) (http.Handler, error) {
 				}
 			}
 			request.Out.Header.Set("X-Agent37-Key", key)
+			if request.Out.URL.Path == descriptorPath {
+				request.Out.Header.Set("Accept-Encoding", "identity")
+				request.Out.Header.Del("If-None-Match")
+				request.Out.Header.Del("If-Modified-Since")
+			}
 		},
 		ModifyResponse: func(response *http.Response) error {
 			response.Header.Del("X-Agent37-Key")
 			response.Header.Del("Forwarded")
-			return nil
+			return adaptRelayDescriptor(response)
 		},
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
 			var tooLarge *http.MaxBytesError
