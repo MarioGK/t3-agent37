@@ -18,6 +18,7 @@ import (
 )
 
 func TestEnrollmentVerifiesScopeAndRevokesFailedAttempt(t *testing.T) {
+	tags := []string{"tag:sandbox", "tag:terra"}
 	var tokens, created, revoked atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -27,7 +28,7 @@ func TestEnrollmentVerifiesScopeAndRevokesFailedAttempt(t *testing.T) {
 			if err := r.ParseForm(); err != nil || r.URL.RawQuery != "" ||
 				r.PostForm.Get("client_id") != "fixture-id" || r.PostForm.Get("client_secret") != "fixture-secret" ||
 				r.PostForm.Get("grant_type") != "client_credentials" ||
-				r.PostForm.Get("scope") != "auth_keys" || r.PostForm.Get("tags") != "tag:agent37" {
+				r.PostForm.Get("scope") != "auth_keys" || r.PostForm.Get("tags") != "tag:sandbox tag:terra" {
 				t.Error("invalid scoped OAuth token request")
 			}
 			fmt.Fprint(w, `{"access_token":"fixture-token","token_type":"Bearer","expires_in":3600}`)
@@ -39,7 +40,7 @@ func TestEnrollmentVerifiesScopeAndRevokesFailedAttempt(t *testing.T) {
 			}
 			device := request.Capabilities.Devices.Create
 			if !device.Ephemeral || device.Reusable || !device.Preauthorized ||
-				!slices.Equal(device.Tags, []string{"tag:agent37"}) || request.ExpirySeconds != 600 {
+				!slices.Equal(device.Tags, tags) || request.ExpirySeconds != 600 {
 				t.Error("enrollment key is not limited to ephemeral use")
 			}
 			fmt.Fprint(w, `{"id":"fixture-key-id","key":"tskey-auth-fixture"}`)
@@ -64,7 +65,7 @@ func TestEnrollmentVerifiesScopeAndRevokesFailedAttempt(t *testing.T) {
 	defer client.CloseIdleConnections()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	enrollment, err := verifyEnrollment(ctx, client, base, "fixture-id", "fixture-secret")
+	enrollment, err := verifyEnrollment(ctx, client, base, "fixture-id", "fixture-secret", tags)
 	if err != nil || tokens.Load() != 1 || created.Load() != 0 {
 		t.Fatalf("preflight should request a token without creating a key: %v", err)
 	}
@@ -96,9 +97,45 @@ func TestEnrollmentRedactsRejectedOAuthCredentials(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = verifyEnrollment(t.Context(), server.Client(), base, "fixture-id", "fixture-secret")
+	_, err = verifyEnrollment(t.Context(), server.Client(), base, "fixture-id", "fixture-secret", []string{DefaultEnrollmentTag})
 	if err == nil || !strings.Contains(err.Error(), "Auth Keys Write for tag:agent37") ||
 		strings.Contains(err.Error(), "fixture-secret") {
 		t.Fatalf("unexpected scope error: %v", err)
+	}
+}
+
+func TestEnrollmentExplainsDeniedTagsWithoutExposingResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprint(w, `{"message":"requested tags [tag:agent37] are invalid or not permitted","detail":"fixture-secret"}`)
+	}))
+	defer server.Close()
+	base, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = verifyEnrollment(t.Context(), server.Client(), base, "fixture-id", "fixture-secret", []string{DefaultEnrollmentTag})
+	if !errors.Is(err, ErrEnrollmentAuthorization) || !strings.Contains(err.Error(), "denied the requested tags tag:agent37") ||
+		strings.Contains(err.Error(), "fixture-secret") {
+		t.Fatalf("unexpected tag error: %v", err)
+	}
+}
+
+func TestParseEnrollmentTags(t *testing.T) {
+	for _, example := range []struct {
+		input string
+		want  []string
+	}{
+		{"", []string{DefaultEnrollmentTag}},
+		{"tag:Sandbox, tag:terra, tag:sandbox", []string{"tag:sandbox", "tag:terra"}},
+		{"tag:agent37,", nil},
+		{"tag:agent37 tag:sandbox", nil},
+		{"tag:1invalid", nil},
+	} {
+		tags, err := ParseEnrollmentTags(example.input)
+		if (err != nil) != (example.want == nil) || !slices.Equal(tags, example.want) {
+			t.Errorf("ParseEnrollmentTags(%q) = %v, %v", example.input, tags, err)
+		}
 	}
 }

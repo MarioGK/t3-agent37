@@ -22,12 +22,12 @@ t3-agent37 ls
 t3-agent37 down
 ```
 
-`setup` walks through the Agent37 API key, a Tailscale-ready template, a scoped
-Tailscale OAuth client, and any CLIProxy settings. It reuses existing credentials
+`setup` opens Tailscale Trust credentials and walks through the Agent37 API key,
+a Tailscale-ready template, OAuth tags, and CLIProxy. It reuses saved credentials
 and saves new ones to an owner-only `runtime.json` beside `config.json`.
 `setup --check` checks local settings without prompts or API calls.
-`setup --verify` also checks Tailscale enrollment credentials, MagicDNS, and
-HTTPS. It can verify OAuth from a headless machine.
+`setup --verify` also checks the OAuth grant, MagicDNS, and HTTPS. Use
+`--no-browser` to keep setup in the terminal.
 
 `up` creates a sandbox with the next numbered name and serves T3 at its private
 Tailscale HTTPS DNS name. It verifies Tailscale credentials before provisioning

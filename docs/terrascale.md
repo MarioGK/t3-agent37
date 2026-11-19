@@ -4,8 +4,10 @@ Run `t3-agent37 setup` and choose `terrascale-agent37@3` if your Agent37
 workspace has access. You can also [publish your own copy](#publish-the-template).
 Choose CLIProxy as the model provider, or use Automatic with the TerraScale
 template. For Tailscale, define `tag:agent37` in your tailnet policy and grant your
-T3 clients access to that tag on TCP 443. Create an OAuth client with **Auth Keys
-Write** scoped to `tag:agent37`. Enable MagicDNS and HTTPS certificates in the
+T3 clients access to that tag on TCP 443. Setup opens **Trust credentials**.
+Select **Credential → OAuth**, set **Auth Keys** to **Write**, and select
+`tag:agent37`. For an existing OAuth client, enter its granted tags in the wizard.
+Use commas between multiple tags. Enable MagicDNS and HTTPS certificates in the
 tailnet DNS settings. [Trust credentials](https://console.tailscale.com/admin/settings/trust-credentials)
 · [Tailnet DNS](https://login.tailscale.com/admin/dns)
 
@@ -33,8 +35,10 @@ T3 loads the CLIProxy text model catalog and defaults to `cliproxy/glm-5.3`.
 Set `T3_AGENT37_CLIPROXY_MODEL` before `create` to pick another model ID.
 Run `t3-agent37 prepare terrascale-dev` to refresh the catalog.
 
-`setup --verify` requests a scoped Tailscale token and checks MagicDNS and HTTPS
-if the local Tailscale CLI is available. `setup --check` runs offline.
+`setup --verify` requests a Tailscale token for the configured tag set and
+checks MagicDNS and HTTPS if the local Tailscale CLI is available. On an OAuth
+authorization failure, it opens Trust credentials from an interactive
+terminal. `--no-browser` keeps setup in the terminal. `setup --check` runs offline.
 `create` and `up` verify OAuth before provisioning. The workstation keeps
 the OAuth secret and sends the guest a single-use, preauthorized ephemeral key
 valid for ten minutes. The CLI revokes the key on a failed join. T3 uses the

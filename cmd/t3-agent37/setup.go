@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"time"
 
@@ -20,12 +21,14 @@ import (
 const (
 	templateGuide    = "https://github.com/MarioGK/t3-agent37/blob/main/docs/terrascale.md"
 	tailscaleGuide   = "https://console.tailscale.com/admin/settings/trust-credentials"
+	tailscalePolicy  = "https://console.tailscale.com/admin/acls"
 	tailscaleDNS     = "https://login.tailscale.com/admin/dns"
 	agent37Dashboard = "https://www.agent37.com/dashboard/cloud"
 )
 
-func setupWorkstation(ctx context.Context, check, verify bool, output, diagnostic io.Writer) error {
-	if !check && !verify && !terminalAvailable(diagnostic) {
+func setupWorkstation(ctx context.Context, opts options, output, diagnostic io.Writer) error {
+	interactive := terminalAvailable(diagnostic)
+	if !opts.checkSetup && !opts.verifySetup && !interactive {
 		return errors.New("setup requires a terminal. Use setup --check to inspect this workstation")
 	}
 	config, err := readWorkstationConfig()
@@ -41,12 +44,19 @@ func setupWorkstation(ctx context.Context, check, verify bool, output, diagnosti
 		return err
 	}
 	key = cmp.Or(key, runtime.value(agent37KeyName))
-	if !check && !verify {
+	openBrowser := interactive && !opts.noSetupBrowser
+	if !opts.checkSetup && !opts.verifySetup {
+		if openBrowser {
+			openTailscaleConsole(diagnostic)
+		}
 		return editWorkstationSetup(ctx, config, runtime, key, output, diagnostic)
 	}
 	ready := setupStatus(output, config.values, runtime, key)
-	if verify {
-		verified := verifySetupTailscale(ctx, output, runtime)
+	if opts.verifySetup {
+		verified, needsConsole := verifySetupTailscale(ctx, output, config.values.TailscaleTags, runtime)
+		if openBrowser && needsConsole {
+			openTailscaleConsole(diagnostic)
+		}
 		if !ready || !verified {
 			return errors.New("workstation verification is incomplete")
 		}
@@ -62,6 +72,7 @@ func setupWorkstation(ctx context.Context, check, verify bool, output, diagnosti
 
 func editWorkstationSetup(ctx context.Context, config configFile, runtime runtimeConfig, key string, output, diagnostic io.Writer) error {
 	values := &config.values
+	tagInput := cmp.Or(values.TailscaleTags, peers.DefaultEnrollmentTag)
 	usesCLIProxy := func() bool { return sandboxProvider(values.Provider, values.Template) == "cliproxy" }
 	var apiKey, clientID, clientSecret, baseURL, clientKey string
 	var save bool
@@ -73,12 +84,18 @@ func editWorkstationSetup(ctx context.Context, config configFile, runtime runtim
 		sandboxDefaults(values, "Enter a template with Tailscale installed. Add @revision to pin it.\nTo publish the TerraScale template, see "+templateGuide),
 		providerOptions(values),
 		huh.NewGroup(huh.NewNote().Title("Private Tailscale access").
-			Description("Sign in to Tailscale on the machine running T3 Code.\n"+
-				"Define tag:agent37 and allow your T3 clients to reach it on port 443.\n"+
-				"Enable MagicDNS and HTTPS certificates at "+tailscaleDNS+"\n"+
-				"Create an OAuth client with Auth Keys Write scoped to tag:agent37.\n"+tailscaleGuide).
+			Description("In Trust credentials, edit your OAuth client or choose Credential → OAuth.\n"+
+				"Set Auth Keys to Write and select the tags this sandbox will use.\n"+
+				"Define new tags and grant T3 access on port 443 at "+tailscalePolicy+"\n"+
+				"Enable MagicDNS and HTTPS certificates at "+tailscaleDNS+"\n"+tailscaleGuide).
 			Next(true),
-		).WithHide(runtime.value(tailClientID) != "" && runtime.value(tailSecret) != ""),
+		),
+		huh.NewGroup(huh.NewInput().Title("Tailscale enrollment tags").
+			Description("Enter the OAuth client's exact tag set, separated by commas.").
+			Value(&tagInput).Validate(func(value string) error {
+			_, err := peers.ParseEnrollmentTags(value)
+			return err
+		})),
 		credentialInput("Tailscale OAuth client ID", "Use the client ID from Trust credentials. Leave blank to keep the saved value.", &clientID).
 			WithHide(strings.TrimSpace(os.Getenv(tailClientID)) != ""),
 		credentialInput("Tailscale OAuth client secret", "Use the secret from the same OAuth client. Leave blank to keep the saved value.", &clientSecret).
@@ -105,6 +122,10 @@ func editWorkstationSetup(ctx context.Context, config configFile, runtime runtim
 	if err != nil {
 		return err
 	}
+	tags, err := peers.ParseEnrollmentTags(tagInput)
+	if err != nil {
+		return err
+	}
 
 	updates := map[string]string{agent37KeyName: apiKey, tailClientID: clientID, tailSecret: clientSecret}
 	if usesCLIProxy() {
@@ -126,6 +147,7 @@ func editWorkstationSetup(ctx context.Context, config configFile, runtime runtim
 	}
 	values.Template = strings.TrimSpace(values.Template)
 	values.Tailscale = nil
+	values.TailscaleTags = strings.Join(tags, ",")
 	if err := config.save(ctx); err != nil {
 		return err
 	}
@@ -169,8 +191,14 @@ func setupStatus(output io.Writer, config workstationConfig, runtime runtimeConf
 	report(strings.TrimSpace(config.Template) != "", "Agent37 template", "Choose a Tailscale-ready template. "+templateGuide)
 	report(validateNamePrefix(config.NamePrefix) == nil, "Sandbox name prefix", "Use t3-agent37 config to set a valid prefix.")
 	report(config.Tailscale == nil || *config.Tailscale, "Tailscale enrollment", "Run t3-agent37 setup to enable it.")
+	tags, tagErr := peers.ParseEnrollmentTags(config.TailscaleTags)
+	if tagErr != nil {
+		report(false, "Tailscale enrollment tags", tagErr.Error()+". Run t3-agent37 setup.")
+	} else {
+		fmt.Fprintln(output, "  Configured Tailscale enrollment tags", strings.Join(tags, ", "))
+	}
 	report(runtime.value(tailClientID) != "" && runtime.value(tailSecret) != "", "Tailscale OAuth client",
-		"Create a client with Auth Keys Write for tag:agent37. "+tailscaleGuide)
+		"Create a client with Auth Keys Write and the configured tags. "+tailscaleGuide)
 	provider := sandboxProvider(config.Provider, config.Template)
 	_, supported := providers[provider]
 	report(supported, "Model provider", "Choose a supported provider in t3-agent37 config.")
@@ -189,18 +217,50 @@ func setupStatus(output io.Writer, config workstationConfig, runtime runtimeConf
 	return ready
 }
 
-func verifySetupTailscale(ctx context.Context, output io.Writer, runtime runtimeConfig) bool {
+func verifySetupTailscale(ctx context.Context, output io.Writer, configuredTags string, runtime runtimeConfig) (verified, needsConsole bool) {
 	localOK := checkLocalTailscale(ctx, output)
 	id, secret := runtime.value(tailClientID), runtime.value(tailSecret)
 	if id == "" || secret == "" {
-		return false
+		return false, true
 	}
-	if _, err := peers.VerifyEnrollment(ctx, id, secret); err != nil {
-		fmt.Fprintln(output, "  Needs attention Tailscale OAuth.", err)
-		return false
+	tags, err := peers.ParseEnrollmentTags(configuredTags)
+	if err != nil {
+		return false, false
 	}
-	fmt.Fprintln(output, "  Verified Tailscale OAuth can issue a scoped token for tag:agent37")
-	return localOK
+	if _, err := peers.VerifyEnrollment(ctx, id, secret, tags); err != nil {
+		fmt.Fprintln(output, "  Needs attention", err)
+		return false, errors.Is(err, peers.ErrEnrollmentAuthorization)
+	}
+	fmt.Fprintln(output, "  Verified Tailscale OAuth can issue a scoped token for", strings.Join(tags, ", "))
+	return localOK, false
+}
+
+func openTailscaleConsole(diagnostic io.Writer) {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", tailscaleGuide)
+	case "windows":
+		cmd = exec.Command("rundll32.exe", "url.dll,FileProtocolHandler", tailscaleGuide)
+	default:
+		cmd = exec.Command("xdg-open", tailscaleGuide)
+	}
+	if err := cmd.Start(); err != nil {
+		fmt.Fprintln(diagnostic, "Open Tailscale Trust credentials at", tailscaleGuide)
+		return
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			fmt.Fprintln(diagnostic, "Open Tailscale Trust credentials at", tailscaleGuide)
+			return
+		}
+	case <-time.After(500 * time.Millisecond):
+		// Some launchers stay alive with the browser they start.
+	}
+	fmt.Fprintln(diagnostic, "Opening Tailscale Trust credentials at", tailscaleGuide)
 }
 
 func checkLocalTailscale(ctx context.Context, output io.Writer) bool {

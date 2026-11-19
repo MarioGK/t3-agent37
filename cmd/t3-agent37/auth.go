@@ -160,5 +160,13 @@ func verifyTailscaleEnrollment(ctx context.Context) (*peers.Enrollment, error) {
 	if clientID == "" || clientSecret == "" {
 		return nil, fmt.Errorf("Tailscale enrollment requires %s and %s. Run t3-agent37 setup", tailClientID, tailSecret)
 	}
-	return peers.VerifyEnrollment(ctx, clientID, clientSecret)
+	config, err := readWorkstationConfig()
+	if err != nil {
+		return nil, err
+	}
+	tags, err := peers.ParseEnrollmentTags(config.values.TailscaleTags)
+	if err != nil {
+		return nil, fmt.Errorf("invalid Tailscale tags. Run t3-agent37 setup: %w", err)
+	}
+	return peers.VerifyEnrollment(ctx, clientID, clientSecret, tags)
 }

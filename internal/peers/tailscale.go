@@ -2,10 +2,13 @@ package peers
 
 import (
 	"context"
+	json "encoding/json/v2"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -14,29 +17,51 @@ import (
 	"tailscale.com/client/tailscale/v2"
 )
 
-const agent37Tag = "tag:agent37"
+const DefaultEnrollmentTag = "tag:agent37"
+
+var tagPattern = regexp.MustCompile(`^tag:[a-z][a-z0-9-]*$`)
+
+var ErrEnrollmentAuthorization = errors.New("Tailscale OAuth authorization failed")
 
 type Enrollment struct {
 	keys *tailscale.KeysResource
+	tags []string
+}
+
+func ParseEnrollmentTags(value string) ([]string, error) {
+	if strings.TrimSpace(value) == "" {
+		return []string{DefaultEnrollmentTag}, nil
+	}
+	var tags []string
+	for part := range strings.SplitSeq(value, ",") {
+		tag := strings.ToLower(strings.TrimSpace(part))
+		if !tagPattern.MatchString(tag) {
+			return nil, errors.New("use comma-separated Tailscale tags such as tag:agent37,tag:dev")
+		}
+		if !slices.Contains(tags, tag) {
+			tags = append(tags, tag)
+		}
+	}
+	return tags, nil
 }
 
 // VerifyEnrollment exchanges the workstation credentials for a scoped API token.
 // It contacts Tailscale without creating a device or an enrollment key.
-func VerifyEnrollment(ctx context.Context, clientID, clientSecret string) (*Enrollment, error) {
+func VerifyEnrollment(ctx context.Context, clientID, clientSecret string, tags []string) (*Enrollment, error) {
 	client := newHTTPClient(15 * time.Second)
 	client.CheckRedirect = func(*http.Request, []*http.Request) error {
 		return errors.New("unexpected Tailscale API redirect")
 	}
-	return verifyEnrollment(ctx, client, &url.URL{Scheme: "https", Host: "api.tailscale.com"}, clientID, clientSecret)
+	return verifyEnrollment(ctx, client, &url.URL{Scheme: "https", Host: "api.tailscale.com"}, clientID, clientSecret, tags)
 }
 
-func verifyEnrollment(ctx context.Context, client *http.Client, base *url.URL, clientID, clientSecret string) (*Enrollment, error) {
+func verifyEnrollment(ctx context.Context, client *http.Client, base *url.URL, clientID, clientSecret string, tags []string) (*Enrollment, error) {
 	config := clientcredentials.Config{
 		ClientID:       clientID,
 		ClientSecret:   clientSecret,
 		TokenURL:       base.JoinPath("api/v2/oauth/token").String(),
 		Scopes:         []string{"auth_keys"},
-		EndpointParams: url.Values{"tags": {agent37Tag}},
+		EndpointParams: url.Values{"tags": {strings.Join(tags, " ")}},
 		AuthStyle:      oauth2.AuthStyleInParams,
 	}
 	token, err := config.Token(context.WithValue(ctx, oauth2.HTTPClient, client))
@@ -48,10 +73,12 @@ func verifyEnrollment(ctx context.Context, client *http.Client, base *url.URL, c
 			}
 			switch {
 			case reply.ErrorCode == "invalid_client" || status == http.StatusUnauthorized:
-				return nil, errors.New("Tailscale rejected the OAuth client ID or secret. Check the credentials and rerun setup --verify")
+				return nil, fmt.Errorf("%w. Check the OAuth client ID and secret in t3-agent37 setup", ErrEnrollmentAuthorization)
+			case status == http.StatusBadRequest && oauthRejectedTags(reply):
+				return nil, fmt.Errorf("%w. Tailscale denied the requested tags %s. In t3-agent37 setup, enter the tags granted to the OAuth client or grant it Auth Keys Write with these tags in Trust credentials", ErrEnrollmentAuthorization, strings.Join(tags, ", "))
 			case reply.ErrorCode == "invalid_scope" || reply.ErrorCode == "unauthorized_client" ||
 				reply.ErrorCode == "invalid_grant" || status == http.StatusForbidden:
-				return nil, errors.New("Tailscale denied enrollment. Grant the OAuth client Auth Keys Write for tag:agent37")
+				return nil, fmt.Errorf("%w. Grant the OAuth client Auth Keys Write for %s", ErrEnrollmentAuthorization, strings.Join(tags, ", "))
 			case status != 0:
 				return nil, fmt.Errorf("Tailscale OAuth returned HTTP %d. Retry setup --verify", status)
 			}
@@ -63,7 +90,17 @@ func verifyEnrollment(ctx context.Context, client *http.Client, base *url.URL, c
 	apiHTTP := *client
 	apiHTTP.Transport = &oauth2.Transport{Source: oauth2.StaticTokenSource(token), Base: client.Transport}
 	api := &tailscale.Client{BaseURL: base, HTTP: &apiHTTP, UserAgent: "t3-agent37"}
-	return &Enrollment{keys: api.Keys()}, nil
+	return &Enrollment{keys: api.Keys(), tags: slices.Clone(tags)}, nil
+}
+
+func oauthRejectedTags(reply *oauth2.RetrieveError) bool {
+	var body struct {
+		Message string `json:"message"`
+	}
+	_ = json.Unmarshal(reply.Body, &body)
+	message := strings.ToLower(body.Message + " " + reply.ErrorDescription)
+	// Match the provider's diagnostic without printing its response body.
+	return strings.Contains(message, "requested tags") && strings.Contains(message, "invalid or not permitted")
 }
 
 // UseKey mints one ephemeral key for a synchronous enrollment attempt.
@@ -76,7 +113,7 @@ func (enrollment *Enrollment) UseKey(ctx context.Context, use func(string) error
 	device := &request.Capabilities.Devices.Create
 	device.Ephemeral = true
 	device.Preauthorized = true
-	device.Tags = []string{agent37Tag}
+	device.Tags = enrollment.tags
 	key, err := enrollment.keys.CreateAuthKey(ctx, request)
 	if err != nil {
 		return enrollmentAPIError("create an ephemeral enrollment key", err)

@@ -38,6 +38,7 @@ type options struct {
 	deleteSandbox                    bool
 	checkSetup                       bool
 	verifySetup                      bool
+	noSetupBrowser                   bool
 	generatedName                    bool
 	latest                           bool
 	pickDelete                       bool
@@ -74,7 +75,7 @@ func parse(args []string, output io.Writer) (options, error) {
 			return
 		}
 		if opts.action == "setup" {
-			fmt.Fprintln(output, "Usage: t3-agent37 setup [--check | --verify]\nSet up the Agent37 template, Tailscale enrollment, and the model provider.")
+			fmt.Fprintln(output, "Usage: t3-agent37 setup [--check | --verify] [--no-browser]\nSet up the Agent37 template, Tailscale enrollment, and the model provider.")
 			flags.PrintDefaults()
 			return
 		}
@@ -101,6 +102,7 @@ func parse(args []string, output io.Writer) (options, error) {
 	if opts.action == "setup" {
 		flags.BoolVar(&opts.checkSetup, "check", false, "Check workstation configuration without prompts or network requests")
 		flags.BoolVar(&opts.verifySetup, "verify", false, "Check local Tailscale status and verify OAuth access")
+		flags.BoolVar(&opts.noSetupBrowser, "no-browser", false, "Keep setup in the terminal")
 	}
 	if opts.action == "create" {
 		flags.BoolVar(&opts.yes, "yes", false, "Authorize paid provisioning")
@@ -507,7 +509,7 @@ func run(ctx context.Context, args []string, output, diagnostic io.Writer) error
 		return editConfig(ctx, diagnostic)
 	}
 	if opts.action == "setup" {
-		return setupWorkstation(ctx, opts.checkSetup, opts.verifySetup, output, diagnostic)
+		return setupWorkstation(ctx, opts, output, diagnostic)
 	}
 	var state string
 	if opts.generatedName {
