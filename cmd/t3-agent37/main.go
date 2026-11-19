@@ -48,11 +48,9 @@ func parse(args []string, output io.Writer) (options, error) {
 	}
 	opts := options{action: args[0]}
 	switch opts.action {
-	case "up":
-		opts.action = "start"
 	case "down":
 		opts.action = "stop"
-	case "create", "connect", "start", "stop", "prepare", "terminal", "list":
+	case "create", "up", "connect", "start", "stop", "prepare", "terminal", "list":
 	default:
 		return opts, fmt.Errorf("unknown command %q", opts.action)
 	}
@@ -63,13 +61,19 @@ func parse(args []string, output io.Writer) (options, error) {
 		if opts.action == "create" {
 			fmt.Fprintln(output, "Omit the name to use the next numbered name.")
 		}
+		if opts.action == "up" {
+			fmt.Fprintln(output, "Run without a name to provision a new sandbox and open T3 pairing.")
+			fmt.Fprintln(output, "Pass a sandbox name to start it.")
+		}
 		flags.PrintDefaults()
 	}
 	var noTailscale bool
 	if opts.action == "create" {
+		flags.BoolVar(&opts.yes, "yes", false, "Authorize paid provisioning")
+	}
+	if opts.action == "create" || opts.action == "up" {
 		flags.StringVar(&opts.provider, "provider", "", "Provider: opencode, cliproxy, codex or claude")
 		flags.StringVar(&opts.template, "template", "", "Agent37 template, optionally pinned by revision")
-		flags.BoolVar(&opts.yes, "yes", false, "Authorize paid provisioning")
 		flags.BoolVar(&opts.dryRun, "dry-run", false, "Print the request without using the API")
 		flags.BoolVar(&opts.tailscale, "tailscale", false, "Enroll the sandbox in Tailscale")
 		flags.BoolVar(&noTailscale, "no-tailscale", false, "Skip Tailscale enrollment")
@@ -81,11 +85,22 @@ func parse(args []string, output io.Writer) (options, error) {
 		flags.BoolVar(&opts.deleteSandbox, "delete", false, "Permanently delete the managed sandbox and its disk")
 		flags.BoolVar(&opts.yes, "yes", false, "Confirm permanent deletion")
 	}
-	if opts.action == "create" || opts.action == "connect" {
+	if opts.action == "create" || opts.action == "up" || opts.action == "connect" {
 		flags.IntVar(&opts.port, "port", 0, "Local relay port")
 	}
 	if err := flags.Parse(args[1:]); err != nil {
 		return opts, err
+	}
+	if opts.action == "up" {
+		if flags.NArg() == 0 {
+			opts.action = "create"
+			opts.yes = !opts.dryRun
+		} else {
+			if flags.NFlag() != 0 {
+				return opts, errors.New("up accepts provisioning flags only when you omit the sandbox name")
+			}
+			opts.action = "start"
+		}
 	}
 	if opts.action == "list" && flags.NArg() == 0 {
 		return opts, nil

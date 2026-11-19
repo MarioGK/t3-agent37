@@ -39,6 +39,23 @@ HOST = os.environ.get("T3_AGENT37_BIND", "0.0.0.0")
 DESCRIPTOR = f"http://127.0.0.1:{PORT}/.well-known/t3/environment"
 
 
+def unpack_runtime(package, destination):
+    # Some Agent37 images run Python 3.11 without tarfile extraction filters.
+    # The pinned archive only needs regular files and directories.
+    for member in package:
+        relative = Path(member.name)
+        if relative.is_absolute() or ".." in relative.parts or not (member.isdir() or member.isfile()):
+            raise RuntimeError("Unexpected file in T3 release archive")
+        target = destination / relative
+        if member.isdir():
+            target.mkdir(parents=True, exist_ok=True)
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with package.extractfile(member) as source, target.open("xb") as output:
+            shutil.copyfileobj(source, output)
+        target.chmod(0o755 if member.mode & 0o111 else 0o644)
+
+
 def install_runtime():
     if (RUNTIME / ".verified").is_file() and T3.is_file():
         return
@@ -61,7 +78,7 @@ def install_runtime():
         unpacked = stage / "unpacked"
         unpacked.mkdir()
         with tarfile.open(archive) as package:
-            package.extractall(unpacked, filter="data")
+            unpack_runtime(package, unpacked)
         children = list(unpacked.iterdir())
         if len(children) != 1 or not (children[0] / "t3").is_file():
             raise RuntimeError("Unexpected T3 release layout")

@@ -73,11 +73,41 @@ func TestCreateWithoutName(t *testing.T) {
 	if _, err := os.Stat(state); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("dry-run wrote state or could not check it: %v", err)
 	}
-	if _, err := parse([]string{"up"}, &bytes.Buffer{}); err == nil {
-		t.Fatal("up accepted a missing name")
-	}
 	if _, err := parse([]string{"create", "", "--dry-run"}, &bytes.Buffer{}); err == nil {
 		t.Fatal("create accepted an empty explicit name")
+	}
+}
+
+func TestUpWithoutNameCreatesAndNamedUpStarts(t *testing.T) {
+	var output bytes.Buffer
+	opts, err := parse([]string{"up"}, &output)
+	if err != nil || opts.action != "create" || !opts.generatedName || !opts.yes || opts.dryRun {
+		t.Fatalf("bare up = %+v, %v", opts, err)
+	}
+	opts, err = parse([]string{"up", "dev"}, &output)
+	if err != nil || opts.action != "start" || opts.name != "dev" || opts.generatedName {
+		t.Fatalf("named up = %+v, %v", opts, err)
+	}
+	if _, err := parse([]string{"up", "dev", "--dry-run"}, &output); err == nil {
+		t.Fatal("named up accepted a provisioning flag")
+	}
+	t.Setenv("AGENT37_API_KEY", "")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	if err := run(context.Background(), []string{"up", "--dry-run", "--template", "terrascale-agent37@3", "--no-tailscale"}, &output, &output); err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		Name     string
+		Template string
+		Metadata map[string]string
+	}
+	if err := json.Unmarshal(output.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Name != "agent-1" || payload.Template != "terrascale-agent37@3" ||
+		payload.Metadata["provider"] != "cliproxy" || payload.Metadata["tailnet"] != "" {
+		t.Fatalf("unexpected up preview: %+v", payload)
 	}
 }
 

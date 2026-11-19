@@ -14,16 +14,17 @@ Windows PowerShell
 irm https://raw.githubusercontent.com/MarioGK/t3-agent37/main/install.ps1 | iex
 ```
 
-Set `AGENT37_API_KEY`, then confirm pairing in T3 when creating a sandbox.
-`t3-agent37 create --yes` prints the next name, such as `agent-1` or `agent-2`.
+Set `AGENT37_API_KEY`. Run `up` to create a sandbox with the next numbered
+name and open T3 pairing. Use the printed name to stop or resume the sandbox.
 
 ```sh
-t3-agent37 create dev --yes
-t3-agent37 down dev
-t3-agent37 up dev
-t3-agent37 connect dev
+t3-agent37 up
+t3-agent37 down agent-1
+t3-agent37 up agent-1
+t3-agent37 connect agent-1
 ```
 
+`create dev --yes` creates a sandbox with an explicit name.
 `down` stops compute and keeps the disk. Add `--delete --yes` to erase it. `connect` reopens the local relay.
 
 Set `name_prefix` in `~/.config/t3-agent37/config.json` (Windows uses
@@ -35,6 +36,6 @@ letters, digits, or hyphens and must start and end with a letter or digit.
 ```
 
 Each prefix has its own counter on this workstation. A failed create can leave
-a gap. `create --dry-run` previews the next local name without reserving it.
+a gap. `up --dry-run` previews the next local name without reserving it.
 
 [TerraScale template, CLIProxy, and Tailscale](docs/terrascale.md) · [Download the latest executable](https://github.com/MarioGK/t3-agent37/releases/latest)

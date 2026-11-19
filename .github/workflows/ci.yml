@@ -47,6 +47,9 @@ jobs:
         env:
           T3_AGENT37_NATIVE_SMOKE: '1'
         run: go test ./internal/agent37 -run '^TestNativeT3RelaySmoke$' -v
+      - name: Test guest archive extraction
+        if: matrix.os == 'linux' && matrix.arch == 'amd64'
+        run: python3 -B -m unittest discover -s cmd/t3-agent37/guest
       - name: Build and smoke test the executable
         shell: bash
         run: |
@@ -54,7 +57,7 @@ jobs:
           mkdir -p dist
           go build -trimpath -ldflags "-s -w -X main.version=$version" -o "dist/$ASSET" ./cmd/t3-agent37
           test "$(./dist/"$ASSET" --version)" = "$version"
-          ./dist/"$ASSET" create --dry-run
+          ./dist/"$ASSET" up --dry-run
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ env.ASSET }}
