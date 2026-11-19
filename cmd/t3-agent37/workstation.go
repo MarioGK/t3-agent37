@@ -22,7 +22,7 @@ import (
 
 const defaultPort = 43737
 
-func stateDir() (string, error) {
+func statePath() (string, error) {
 	base := os.Getenv("XDG_STATE_HOME")
 	if base == "" && runtime.GOOS == "windows" {
 		base = os.Getenv("LOCALAPPDATA")
@@ -34,8 +34,7 @@ func stateDir() (string, error) {
 		}
 		base = filepath.Join(home, ".local", "state")
 	}
-	state := filepath.Join(base, owner)
-	return state, os.MkdirAll(state, 0o700)
+	return filepath.Join(base, owner), nil
 }
 
 // Reuse the existing SQLite registry so installations upgraded from Python

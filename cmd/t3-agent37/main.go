@@ -2,12 +2,10 @@ package main
 
 import (
 	"context"
-	cryptorand "crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"math/rand/v2"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -29,15 +27,6 @@ var namePattern = regexp.MustCompile("^[a-z0-9][a-z0-9-]{0,42}$")
 var templates = map[string]string{
 	"codex": "agent37-codex", "claude": "agent37-claude-code",
 	"opencode": "agent37-opencode", "cliproxy": "agent37-opencode",
-}
-
-var nameAdjectives = [...]string{"brisk", "calm", "clear", "crisp", "keen", "quiet", "steady", "swift"}
-var nameAnimals = [...]string{"badger", "falcon", "fox", "heron", "lynx", "otter", "raven", "tern"}
-
-func randomSandboxName() string {
-	adjective := nameAdjectives[rand.IntN(len(nameAdjectives))]
-	animal := nameAnimals[rand.IntN(len(nameAnimals))]
-	return adjective + "-" + animal + "-" + strings.ToLower(cryptorand.Text()[:10])
 }
 
 type options struct {
@@ -72,7 +61,7 @@ func parse(args []string, output io.Writer) (options, error) {
 	flags.Usage = func() {
 		fmt.Fprintf(output, "Usage: t3-agent37 %s [name] [flags]\n", args[0])
 		if opts.action == "create" {
-			fmt.Fprintln(output, "Omit the name to generate one.")
+			fmt.Fprintln(output, "Omit the name to use the next numbered name.")
 		}
 		flags.PrintDefaults()
 	}
@@ -138,9 +127,6 @@ func parse(args []string, output io.Writer) (options, error) {
 		}
 		if opts.yes == opts.dryRun {
 			return opts, errors.New("choose exactly one of --yes and --dry-run")
-		}
-		if opts.generatedName {
-			opts.name = randomSandboxName()
 		}
 	}
 	return opts, nil
@@ -234,22 +220,21 @@ func lookup(ctx context.Context, client *agent37.Client, name string) (agent37.I
 
 func getOrCreate(ctx context.Context, client *agent37.Client, opts options, state string) (agent37.Instance, error) {
 	marker := filepath.Join(state, opts.name+".pending")
-	existing, err := lookup(ctx, client, opts.name)
-	if err != nil || existing.ID != "" {
-		if existing.ID != "" {
-			if opts.generatedName {
-				return existing, fmt.Errorf("generated name %s is already in use. Run create again", opts.name)
+	if !opts.generatedName {
+		existing, err := lookup(ctx, client, opts.name)
+		if err != nil || existing.ID != "" {
+			if existing.ID != "" {
+				_ = os.Remove(marker)
 			}
-			_ = os.Remove(marker)
+			return existing, err
 		}
-		return existing, err
 	}
 	file, err := os.OpenFile(marker, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if os.IsExist(err) {
-		return existing, fmt.Errorf("a create operation for %s is pending; retry to check its state", opts.name)
+		return agent37.Instance{}, fmt.Errorf("a create operation for %s is pending. Retry to check its state", opts.name)
 	}
 	if err != nil {
-		return existing, err
+		return agent37.Instance{}, err
 	}
 	_ = file.Close()
 	keepMarker := false
@@ -258,7 +243,7 @@ func getOrCreate(ctx context.Context, client *agent37.Client, opts options, stat
 			_ = os.Remove(marker)
 		}
 	}()
-	existing, err = lookup(ctx, client, opts.name)
+	existing, err := lookup(ctx, client, opts.name)
 	if existing.ID != "" && opts.generatedName {
 		return existing, fmt.Errorf("generated name %s is already in use. Run create again", opts.name)
 	}
@@ -403,7 +388,24 @@ func run(ctx context.Context, args []string, output, diagnostic io.Writer) error
 	if err != nil {
 		return err
 	}
+	var prefix, state string
+	if opts.generatedName {
+		prefix, err = configuredNamePrefix()
+		if err != nil {
+			return err
+		}
+		state, err = statePath()
+		if err != nil {
+			return err
+		}
+	}
 	if opts.dryRun {
+		if opts.generatedName {
+			opts.name, err = previewSandboxName(ctx, state, prefix)
+			if err != nil {
+				return err
+			}
+		}
 		return jsonOutput(output, createPayload(opts, nil), true)
 	}
 	key := os.Getenv("AGENT37_API_KEY")
@@ -424,9 +426,24 @@ func run(ctx context.Context, args []string, output, diagnostic io.Writer) error
 		}
 		return jsonOutput(output, rows, true)
 	}
-	state, err := stateDir()
-	if err != nil {
+	if state == "" {
+		state, err = statePath()
+		if err != nil {
+			return err
+		}
+	}
+	if err := os.MkdirAll(state, 0o700); err != nil {
 		return err
+	}
+	if opts.generatedName {
+		instances, err := client.List(ctx)
+		if err != nil {
+			return err
+		}
+		opts.name, err = reserveSandboxName(ctx, state, prefix, instances)
+		if err != nil {
+			return err
+		}
 	}
 	lock := flock.New(filepath.Join(state, opts.name+".lifecycle.lock"))
 	locked, err := lock.TryLockContext(ctx, 100*time.Millisecond)

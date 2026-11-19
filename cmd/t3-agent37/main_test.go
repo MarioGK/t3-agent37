@@ -5,7 +5,9 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -51,6 +53,9 @@ func TestFlagsCanFollowName(t *testing.T) {
 }
 
 func TestCreateWithoutName(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	state := filepath.Join(t.TempDir(), "new-state")
+	t.Setenv("XDG_STATE_HOME", state)
 	var output bytes.Buffer
 	if err := run(context.Background(), []string{"create", "--dry-run"}, &output, &output); err != nil {
 		t.Fatal(err)
@@ -62,8 +67,11 @@ func TestCreateWithoutName(t *testing.T) {
 	if err := json.Unmarshal(output.Bytes(), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if !namePattern.MatchString(payload.Name) || payload.Metadata["environment"] != payload.Name {
+	if payload.Name != "agent-1" || payload.Metadata["environment"] != payload.Name {
 		t.Fatalf("invalid generated sandbox name or metadata: %+v", payload)
+	}
+	if _, err := os.Stat(state); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("dry-run wrote state or could not check it: %v", err)
 	}
 	if _, err := parse([]string{"up"}, &bytes.Buffer{}); err == nil {
 		t.Fatal("up accepted a missing name")
