@@ -86,11 +86,17 @@ func TestDeletionCommandsSelectManagedTargets(t *testing.T) {
 	}
 }
 
-func TestDeleteRequiresAName(t *testing.T) {
-	for _, args := range [][]string{{"delete"}, {"delete", "--dry-run"}, {"delete", "two", "names"}} {
-		if _, err := parse(args, io.Discard); err == nil {
-			t.Fatalf("delete accepted an ambiguous target: %v", args)
-		}
+func TestBareDeleteUsesPickerInATerminal(t *testing.T) {
+	opts, err := parse([]string{"delete"}, io.Discard)
+	if err != nil || !opts.pickDelete || !opts.deleteSandbox {
+		t.Fatalf("bare delete = %+v, %v", opts, err)
+	}
+	err = run(context.Background(), []string{"delete"}, io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "requires a terminal") {
+		t.Fatalf("bare delete with redirected input/output = %v", err)
+	}
+	if _, err := parse([]string{"delete", "two", "names"}, io.Discard); err == nil {
+		t.Fatal("delete accepted multiple names")
 	}
 }
 

@@ -38,6 +38,7 @@ type options struct {
 	deleteSandbox                    bool
 	generatedName                    bool
 	latest                           bool
+	pickDelete                       bool
 }
 
 func parse(args []string, output io.Writer) (options, error) {
@@ -67,8 +68,8 @@ func parse(args []string, output io.Writer) (options, error) {
 			return
 		}
 		if opts.action == "delete" {
-			fmt.Fprintln(output, "Usage: t3-agent37 delete <name> [flags]")
-			fmt.Fprintln(output, "Permanently delete a managed sandbox and its disk.")
+			fmt.Fprintln(output, "Usage: t3-agent37 delete [name] [flags]")
+			fmt.Fprintln(output, "Choose a sandbox to delete or pass its name.")
 		} else {
 			fmt.Fprintf(output, "Usage: t3-agent37 %s [name] [flags]\n", args[0])
 		}
@@ -130,6 +131,8 @@ func parse(args []string, output io.Writer) (options, error) {
 		return opts, errors.New("use --delete and --yes together to permanently delete the sandbox")
 	}
 	switch {
+	case opts.action == "delete" && flags.NArg() == 0:
+		opts.pickDelete = true
 	case args[0] == "down" && flags.NArg() == 0:
 		if flags.Changed("delete") && !opts.deleteSandbox {
 			return opts, errors.New("specify a sandbox name to stop it and keep its disk")
@@ -400,7 +403,7 @@ func operate(ctx context.Context, client *agent37.Client, opts options, state st
 	} else if opts.targetID != "" {
 		instance, err = client.Get(ctx, opts.targetID)
 		if err == nil && (instance.ID != opts.targetID || !isManaged(instance) || instance.Metadata["environment"] != opts.name) {
-			return nil, errors.New("the selected sandbox changed. Run down again to choose a target")
+			return nil, errors.New("the selected sandbox changed. Choose a target again")
 		}
 	} else {
 		instance, err = lookup(ctx, client, opts.name)
@@ -507,12 +510,15 @@ func run(ctx context.Context, args []string, output, diagnostic io.Writer) error
 		}
 		return jsonOutput(output, createPayload(opts, nil), true)
 	}
+	if opts.pickDelete && !deletePickerAvailable(diagnostic) {
+		return errors.New("interactive deletion requires a terminal. Use delete <name> to select a sandbox")
+	}
 	key, err := agent37APIKey()
 	if err != nil {
 		return err
 	}
 	client := agent37.New(key)
-	if opts.action == "list" || opts.latest || opts.dryRun {
+	if opts.action == "list" || opts.latest || opts.dryRun || opts.pickDelete {
 		instances, err := client.List(ctx)
 		if err != nil {
 			return err
@@ -527,9 +533,15 @@ func run(ctx context.Context, args []string, output, diagnostic io.Writer) error
 			return jsonOutput(output, rows, true)
 		}
 		var instance agent37.Instance
-		if opts.latest {
+		switch {
+		case opts.pickDelete:
+			instance, err = pickSandboxToDelete(ctx, instances, opts.dryRun, diagnostic)
+			if err == nil && instance.ID == "" {
+				return nil
+			}
+		case opts.latest:
 			instance, err = latestManaged(instances)
-		} else {
+		default:
 			instance, err = namedManaged(instances, opts.name)
 		}
 		if err != nil {
