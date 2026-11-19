@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,6 +21,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -34,12 +36,23 @@ const (
 
 var sshAlias = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
 var environmentID = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,127}$`)
+var unixUser = regexp.MustCompile(`^[a-z_][a-z0-9_-]*$`)
 
 // Peer describes a trusted workstation SSH alias and the same T3 server's private API.
 type Peer struct {
-	Host          string `json:"ssh"`
-	URL           string `json:"url"`
-	EnvironmentID string `json:"environmentId"`
+	Host          string      `json:"ssh"`
+	URL           string      `json:"url"`
+	EnvironmentID string      `json:"environmentId"`
+	Incus         *IncusOwner `json:"incus,omitempty"`
+}
+
+// IncusOwner is an optional owner-command route through a trusted SSH host.
+type IncusOwner struct {
+	Host     string `json:"ssh"`
+	Instance string `json:"instance"`
+	User     string `json:"user"`
+	UID      uint32 `json:"uid"`
+	GID      uint32 `json:"gid"`
 }
 
 // Configured reads the peer file or returns an empty list if it has not been configured.
@@ -97,6 +110,11 @@ func Configured() ([]Peer, error) {
 		if !sshAlias.MatchString(peer.Host) || !environmentID.MatchString(peer.EnvironmentID) || seen[peer.EnvironmentID] {
 			return nil, errors.New("invalid T3 peer configuration")
 		}
+		if relay := peer.Incus; relay != nil &&
+			(!sshAlias.MatchString(relay.Host) || !sshAlias.MatchString(relay.Instance) ||
+				!unixUser.MatchString(relay.User) || relay.UID == 0 || relay.GID == 0) {
+			return nil, fmt.Errorf("invalid Incus owner route for T3 peer %s", peer.Host)
+		}
 		peer.URL, err = privateOrigin(peer.URL)
 		if err != nil {
 			return nil, err
@@ -127,9 +145,21 @@ func privateOrigin(raw string) (string, error) {
 func issueOverSSH(ctx context.Context, peer Peer) (string, error) {
 	// The SSH stream is captured and the owner session is never passed in argv.
 	const script = `set -eu
-for binary in "$HOME/.t3/bin/t3" "$HOME/.local/bin/t3" "$HOME/.local/share/mise/shims/t3"; do
+base=${T3CODE_HOME:-$HOME/.t3}
+export MISE_AUTO_INSTALL=0
+pid=$(systemctl --user show --value -p MainPID "t3code-$(id -un).service" 2>/dev/null || :)
+native=
+case "$pid" in
+    ''|0|*[!0-9]*) ;;
+    *) native=$(readlink "/proc/$pid/exe" 2>/dev/null || :) ;;
+esac
+cached=
+for path in "$base"/runtime/versions/*/t3; do
+    if test -x "$path"; then cached=$path; fi
+done
+for binary in "$native" "$cached" "$HOME/.t3/bin/t3" "$HOME/.local/bin/t3" "$HOME/.local/share/mise/shims/t3"; do
     if test -x "$binary"; then
-        exec "$binary" auth session issue --json --ttl 5m --label t3-agent37-peer-sync \
+        exec "$binary" auth session issue --base-dir "$base" --json --ttl 5m --label t3-agent37-peer-sync \
             --scope access:read --scope access:write --scope orchestration:read --scope orchestration:operate
     fi
 done
@@ -137,7 +167,17 @@ exit 127
 `
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	command := exec.CommandContext(ctx, "ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=5", peer.Host, "sh", "-s")
+	host := peer.Host
+	remote := []string{"sh", "-s"}
+	if relay := peer.Incus; relay != nil {
+		host = relay.Host
+		remote = append([]string{"incus", "exec", relay.Instance,
+			"--user", strconv.FormatUint(uint64(relay.UID), 10), "--group", strconv.FormatUint(uint64(relay.GID), 10),
+			"--env", "HOME=/home/" + relay.User, "--env", "PATH=/run/current-system/sw/bin:/usr/local/bin:/usr/bin:/bin",
+			"--"}, remote...)
+	}
+	args := []string{"-T", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=5", host}
+	command := exec.CommandContext(ctx, "ssh", append(args, remote...)...)
 	command.Stdin = strings.NewReader(script)
 	output, err := command.Output()
 	var response struct {
@@ -157,12 +197,9 @@ type peerAPI struct {
 	headers       http.Header
 }
 
-func newPeerAPI(client *http.Client, name, origin, id, agent37Key string) peerAPI {
+func newPeerAPI(client *http.Client, name, origin, id string) peerAPI {
 	headers := make(http.Header)
 	headers.Set("X-T3-Orchestration-Protocol", orchestrationProtocol)
-	if agent37Key != "" {
-		headers.Set("X-Agent37-Key", agent37Key)
-	}
 	return peerAPI{client: client, name: name, origin: origin, environmentID: id, headers: headers}
 }
 
@@ -257,7 +294,7 @@ func VerifyTailnet(ctx context.Context, name, environmentID, address string) (st
 	}
 	client := newHTTPClient(5 * time.Second)
 	defer client.CloseIdleConnections()
-	target := newPeerAPI(client, name, origin, environmentID, "")
+	target := newPeerAPI(client, name, origin, environmentID)
 	timeout := fmt.Errorf("%s joined Tailscale, but its private HTTPS endpoint did not become ready within one minute", name)
 	ready, cancel := context.WithTimeoutCause(ctx, time.Minute, timeout)
 	defer cancel()
@@ -290,16 +327,26 @@ func (p peerAPI) rpc(ctx context.Context, token, method string, payload, result 
 	wsURL.RawQuery = query.Encode()
 
 	dialer := websocket.Dialer{HandshakeTimeout: 5 * time.Second}
+	tlsConfig := &tls.Config{}
 	if transport, ok := p.client.Transport.(*http.Transport); ok {
 		dialer.NetDialContext = transport.DialContext
-		dialer.TLSClientConfig = transport.TLSClientConfig
+		if transport.TLSClientConfig != nil {
+			tlsConfig = transport.TLSClientConfig.Clone()
+		}
 	}
-	ws, response, err := dialer.DialContext(ctx, wsURL.String(), p.headers)
+	// Gorilla writes an HTTP/1.1 Upgrade. Tailscale Serve also advertises
+	// HTTP/2, which the ticket request's HTTP transport may have negotiated.
+	tlsConfig.NextProtos = []string{"http/1.1"}
+	dialer.TLSClientConfig = tlsConfig
+	headers := p.headers.Clone()
+	headers.Set("Origin", p.origin)
+	ws, response, err := dialer.DialContext(ctx, wsURL.String(), headers)
 	if err != nil {
 		if response != nil {
 			response.Body.Close()
+			return fmt.Errorf("%s (WebSocket HTTP %d)", failure, response.StatusCode)
 		}
-		return errors.New(failure)
+		return fmt.Errorf("%s (WebSocket connection failed)", failure)
 	}
 	defer ws.Close()
 	stop := context.AfterFunc(ctx, func() { _ = ws.Close() })
@@ -313,7 +360,7 @@ func (p peerAPI) rpc(ctx context.Context, token, method string, payload, result 
 	if ws.WriteJSON(map[string]any{
 		"_tag": "Request", "id": "1", "tag": method, "payload": payload, "headers": []any{},
 	}) != nil {
-		return errors.New(failure)
+		return fmt.Errorf("%s (WebSocket send failed)", failure)
 	}
 	for {
 		var message struct {
@@ -324,13 +371,20 @@ func (p peerAPI) rpc(ctx context.Context, token, method string, payload, result 
 				Value json.RawMessage `json:"value"`
 				Cause []struct {
 					Error struct {
+						Tag    string `json:"_tag"`
 						Reason string `json:"reason"`
 					} `json:"error"`
 				} `json:"cause"`
 			} `json:"exit"`
 		}
-		if ws.ReadJSON(&message) != nil {
-			return errors.New(failure)
+		if err := ws.ReadJSON(&message); err != nil {
+			if closeError, ok := errors.AsType[*websocket.CloseError](err); ok {
+				return fmt.Errorf("%s (WebSocket closed with code %d)", failure, closeError.Code)
+			}
+			if ctx.Err() != nil {
+				return fmt.Errorf("%s (timed out)", failure)
+			}
+			return fmt.Errorf("%s (WebSocket response failed)", failure)
 		}
 		if message.Tag == "Ping" {
 			if ws.WriteJSON(map[string]string{"_tag": "Pong"}) != nil {
@@ -345,15 +399,18 @@ func (p peerAPI) rpc(ctx context.Context, token, method string, payload, result 
 			if json.Unmarshal(message.Exit.Value, result) == nil {
 				return nil
 			}
-			return errors.New(failure)
+			return fmt.Errorf("%s (invalid result)", failure)
 		}
 		for _, cause := range message.Exit.Cause {
+			if cause.Error.Tag == "EnvironmentAuthorizationError" {
+				return fmt.Errorf("%s (session scope denied)", failure)
+			}
 			switch reason := cause.Error.Reason; reason {
 			case "disabled", "unreachable", "incompatible", "self", "pairing_rejected", "storage":
 				return fmt.Errorf("%s (%s)", failure, strings.ReplaceAll(reason, "_", " "))
 			}
 		}
-		return errors.New(failure)
+		return fmt.Errorf("%s (T3 rejected the request)", failure)
 	}
 }
 
@@ -414,34 +471,44 @@ func ensureLink(ctx context.Context, source peerAPI, sourceToken string, target 
 	return nil
 }
 
-// Sync verifies both sandbox endpoints and sets up directed links to and from each peer.
-func Sync(ctx context.Context, configured []Peer, name, sandboxID, privateURL, protectedURL, agent37Key, cloudToken string) error {
+// Sync creates both directed links for each reachable peer over private HTTPS.
+func Sync(ctx context.Context, configured []Peer, name, sandboxID, privateURL, sandboxToken string) ([]string, error) {
 	privateURL, err := privateOrigin(privateURL)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	client := newHTTPClient(35 * time.Second)
 	defer client.CloseIdleConnections()
 
-	cloud := newPeerAPI(client, name, protectedURL, sandboxID, agent37Key)
-	private := newPeerAPI(client, name, privateURL, sandboxID, "")
-	if err := cloud.verify(ctx, 1, true); err != nil {
-		return err
+	sandbox := newPeerAPI(client, name, privateURL, sandboxID)
+	if err := sandbox.verify(ctx, 3, true); err != nil {
+		return nil, err
 	}
-	if err := private.verify(ctx, 6, true); err != nil {
-		return err
+
+	failuresByPeer := make([]error, len(configured))
+	var group sync.WaitGroup
+	for i, peer := range configured {
+		group.Go(func() {
+			peerCtx, cancel := context.WithTimeout(ctx, time.Minute)
+			defer cancel()
+			target := newPeerAPI(client, peer.Host, peer.URL, peer.EnvironmentID)
+			failuresByPeer[i] = syncPeer(peerCtx, sandbox, sandboxToken, target, peer, privateURL)
+		})
 	}
+	group.Wait()
+	var linked []string
 	var failures []string
-	for _, peer := range configured {
-		target := newPeerAPI(client, peer.Host, peer.URL, peer.EnvironmentID, "")
-		if err := syncPeer(ctx, cloud, cloudToken, target, peer, privateURL); err != nil {
+	for i, peer := range configured {
+		if err := failuresByPeer[i]; err != nil {
 			failures = append(failures, fmt.Sprintf("%s: %s", peer.Host, err))
+		} else {
+			linked = append(linked, peer.Host)
 		}
 	}
 	if len(failures) != 0 {
-		return fmt.Errorf("T3 peer links incomplete: %s", strings.Join(failures, "; "))
+		return linked, errors.New(strings.Join(failures, "; "))
 	}
-	return nil
+	return linked, nil
 }
 
 func syncPeer(ctx context.Context, cloud peerAPI, cloudToken string, target peerAPI, peer Peer, privateURL string) error {

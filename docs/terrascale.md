@@ -63,10 +63,18 @@ To link a Tailscale-enabled sandbox on `create` and `up`, save the peers in
 
 Use the environment ID from `/.well-known/t3/environment` on each peer and
 an SSH alias that reaches the T3 owner. Each server must have Linked
-Environments enabled. The sandbox joins with private Tailscale HTTPS Serve.
-The CLI adds both directions with approval-required access and reuses
-reachable links without opening the desktop app. Set `T3_AGENT37_PEERS_FILE`
-to an empty string to skip sync.
+Environments enabled. Registration runs over private Tailscale HTTPS and
+adds approval-required links in both directions without opening the desktop
+app. A pending peer leaves the sandbox ready to use. Run `up <name>` after
+the peer recovers to add the missing links and reuse the working ones.
+
+For a peer running inside Incus, an optional `incus` object directs the
+owner command through an SSH host with Incus access. Set `ssh`, `instance`,
+`user`, `uid`, and `gid` in the object. Use the T3 owner's account in the
+guest, with its home at `/home/<user>`. The peer's top-level `url` still
+points to its private Tailscale HTTPS address.
+
+Set `T3_AGENT37_PEERS_FILE` to an empty string to skip sync.
 
 ## Publish the template
 

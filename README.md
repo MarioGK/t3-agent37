@@ -33,7 +33,10 @@ enrollment tags and verifies access. Add `--dry-run` to preview.
 
 `up` creates a sandbox with the next numbered name and serves T3 at its private
 Tailscale HTTPS DNS name. It verifies Tailscale credentials before provisioning
-and mints an ephemeral key when the sandbox needs to join. For a separate desktop connection,
+and mints an ephemeral key when the sandbox needs to join. It automatically
+registers with [configured T3 servers](docs/terrascale.md#link-t3-servers)
+without prompts. Run `up <name>` to retry pending links.
+For a separate desktop connection,
 `connect <name> --pair` prints a link that T3 Code asks you to confirm.
 
 `create dev --yes` creates a sandbox with an explicit name.

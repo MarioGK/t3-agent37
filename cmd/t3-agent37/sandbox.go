@@ -144,19 +144,11 @@ func linkFleet(ctx context.Context, client *agent37.Client, id, name string, con
 	if err != nil {
 		return err
 	}
-	protected, err := agent37.ProtectedOrigin(id, proof.Port)
-	if err != nil {
-		return err
+	hosts, err := peers.Sync(ctx, configured, name, proof.EnvironmentID, proof.TailnetURL, admin.Token)
+	if len(hosts) != 0 {
+		fmt.Fprintf(diagnostic, "Linked %s with %s.\n", name, strings.Join(hosts, ", "))
 	}
-	if err := peers.Sync(ctx, configured, name, proof.EnvironmentID, proof.TailnetURL, protected, client.Key, admin.Token); err != nil {
-		return err
-	}
-	hosts := make([]string, 0, len(configured))
-	for _, peer := range configured {
-		hosts = append(hosts, peer.Host)
-	}
-	fmt.Fprintf(diagnostic, "Linked %s with %s.\n", name, strings.Join(hosts, ", "))
-	return nil
+	return err
 }
 
 func bootstrap(ctx context.Context, client *agent37.Client, enrollment *peers.Enrollment, instance agent37.Instance, name string, configured []peers.Peer, mayRestart bool, diagnostic io.Writer) (setupProof, error) {
@@ -187,7 +179,9 @@ func bootstrap(ctx context.Context, client *agent37.Client, enrollment *peers.En
 		}
 	}
 	if len(configured) != 0 {
-		return proof, linkFleet(ctx, client, instance.ID, name, configured, proof, diagnostic)
+		if err := linkFleet(ctx, client, instance.ID, name, configured, proof, diagnostic); err != nil {
+			fmt.Fprintf(diagnostic, "T3 peer registration pending for %s. %v\n", name, err)
+		}
 	}
 	return proof, nil
 }

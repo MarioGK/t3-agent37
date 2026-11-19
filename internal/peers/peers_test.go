@@ -30,7 +30,8 @@ func TestConfiguredPeersValidatesPrivateOrigins(t *testing.T) {
 		t.Fatal(err)
 	}
 	list, err := Configured()
-	if err != nil || len(list) != 1 || list[0] != (Peer{"beta", "https://beta.test.ts.net:18456", "beta-id"}) {
+	expected := Peer{Host: "beta", URL: "https://beta.test.ts.net:18456", EnvironmentID: "beta-id"}
+	if err != nil || len(list) != 1 || list[0] != expected {
 		t.Fatalf("configured peers: %v, %v", list, err)
 	}
 	for _, origin := range []string{
@@ -57,7 +58,7 @@ func TestDirectTailnetDiscoveryChecksIdentityWithoutPeerCapability(t *testing.T)
 		fmt.Fprint(w, `{"environmentId":"sandbox-proof","capabilities":{}}`)
 	}))
 	defer server.Close()
-	target := newPeerAPI(server.Client(), "sandbox", server.URL, "sandbox-proof", "")
+	target := newPeerAPI(server.Client(), "sandbox", server.URL, "sandbox-proof")
 	if err := target.verify(t.Context(), 1, false); err != nil {
 		t.Fatal(err)
 	}
@@ -74,9 +75,9 @@ func TestT3PeersLinkWithNativeScopedGrantAndReuseReachableLink(t *testing.T) {
 	upgrader := websocket.Upgrader{}
 	var targetURL atomic.Value
 	var linked atomic.Bool
-	cloud := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("X-Agent37-Key") != "fixture-gateway-key" {
-			t.Error("cloud request omitted Agent37 key")
+	cloud := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Agent37-Key") != "" {
+			t.Error("private sandbox request received an Agent37 key")
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
@@ -84,13 +85,13 @@ func TestT3PeersLinkWithNativeScopedGrantAndReuseReachableLink(t *testing.T) {
 		case descriptorPath:
 			fmt.Fprint(w, `{"environmentId":"cloud-id","capabilities":{"peerLinks":true,"linkFence":true,"mcpModeLimitHeader":true,"peerLinkPairingCodes":true,"serverInstallation":{"kind":"standalone"}}}`)
 		case "/api/auth/websocket-ticket/rpc":
-			if r.Method != http.MethodPost || r.Header.Get("Authorization") != "Bearer fixture-owner-token" {
+			if r.ProtoMajor != 2 || r.Method != http.MethodPost || r.Header.Get("Authorization") != "Bearer fixture-owner-token" {
 				t.Error("wrong ticket authentication")
 			}
 			fmt.Fprint(w, `{"ticket":"fixture-ticket"}`)
 		case "/ws":
 			if r.URL.Query().Get("orchestrationProtocol") != "2" || r.URL.Query().Get("wsTicket") != "fixture-ticket" ||
-				r.Header.Get("Authorization") != "" {
+				r.Header.Get("Authorization") != "" || r.Header.Get("Origin") != "https://"+r.Host {
 				t.Error("wrong websocket authentication")
 			}
 			ws, err := upgrader.Upgrade(w, r, nil)
@@ -129,6 +130,8 @@ func TestT3PeersLinkWithNativeScopedGrantAndReuseReachableLink(t *testing.T) {
 			http.NotFound(w, r)
 		}
 	}))
+	cloud.EnableHTTP2 = true
+	cloud.StartTLS()
 	defer cloud.Close()
 
 	var grants atomic.Int32
@@ -153,8 +156,8 @@ func TestT3PeersLinkWithNativeScopedGrantAndReuseReachableLink(t *testing.T) {
 	targetURL.Store(target.URL)
 
 	ctx := t.Context()
-	sourceAPI := newPeerAPI(cloud.Client(), "sandbox", cloud.URL, "cloud-id", "fixture-gateway-key")
-	targetAPI := newPeerAPI(target.Client(), "beta", target.URL, "beta-id", "")
+	sourceAPI := newPeerAPI(cloud.Client(), "sandbox", cloud.URL, "cloud-id")
+	targetAPI := newPeerAPI(target.Client(), "beta", target.URL, "beta-id")
 	if err := sourceAPI.verify(ctx, 1, true); err != nil {
 		t.Fatal(err)
 	}
