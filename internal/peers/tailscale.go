@@ -22,6 +22,9 @@ const DefaultEnrollmentTag = "tag:agent37"
 var tagPattern = regexp.MustCompile(`^tag:[a-z][a-z0-9-]*$`)
 
 var ErrEnrollmentAuthorization = errors.New("Tailscale OAuth authorization failed")
+var ErrEnrollmentTagDenied = fmt.Errorf("%w. Tailscale denied the requested tags", ErrEnrollmentAuthorization)
+
+var tailscaleAPI = url.URL{Scheme: "https", Host: "api.tailscale.com"}
 
 type Enrollment struct {
 	keys *tailscale.KeysResource
@@ -48,23 +51,19 @@ func ParseEnrollmentTags(value string) ([]string, error) {
 // VerifyEnrollment exchanges the workstation credentials for a scoped API token.
 // It contacts Tailscale without creating a device or an enrollment key.
 func VerifyEnrollment(ctx context.Context, clientID, clientSecret string, tags []string) (*Enrollment, error) {
+	return verifyEnrollment(ctx, tailscaleHTTPClient(), &tailscaleAPI, clientID, clientSecret, tags)
+}
+
+func tailscaleHTTPClient() *http.Client {
 	client := newHTTPClient(15 * time.Second)
 	client.CheckRedirect = func(*http.Request, []*http.Request) error {
 		return errors.New("unexpected Tailscale API redirect")
 	}
-	return verifyEnrollment(ctx, client, &url.URL{Scheme: "https", Host: "api.tailscale.com"}, clientID, clientSecret, tags)
+	return client
 }
 
 func verifyEnrollment(ctx context.Context, client *http.Client, base *url.URL, clientID, clientSecret string, tags []string) (*Enrollment, error) {
-	config := clientcredentials.Config{
-		ClientID:       clientID,
-		ClientSecret:   clientSecret,
-		TokenURL:       base.JoinPath("api/v2/oauth/token").String(),
-		Scopes:         []string{"auth_keys"},
-		EndpointParams: url.Values{"tags": {strings.Join(tags, " ")}},
-		AuthStyle:      oauth2.AuthStyleInParams,
-	}
-	token, err := config.Token(context.WithValue(ctx, oauth2.HTTPClient, client))
+	api, err := tailscaleOAuthClient(ctx, client, base, clientID, clientSecret, "auth_keys", tags)
 	if err != nil {
 		if reply, ok := errors.AsType[*oauth2.RetrieveError](err); ok {
 			var status int
@@ -75,7 +74,7 @@ func verifyEnrollment(ctx context.Context, client *http.Client, base *url.URL, c
 			case reply.ErrorCode == "invalid_client" || status == http.StatusUnauthorized:
 				return nil, fmt.Errorf("%w. Check the OAuth client ID and secret in t3-agent37 setup", ErrEnrollmentAuthorization)
 			case status == http.StatusBadRequest && oauthRejectedTags(reply):
-				return nil, fmt.Errorf("%w. Tailscale denied the requested tags %s. In t3-agent37 setup, enter the tags granted to the OAuth client or grant it Auth Keys Write with these tags in Trust credentials", ErrEnrollmentAuthorization, strings.Join(tags, ", "))
+				return nil, fmt.Errorf("%w %s. Run t3-agent37 setup --repair-tailscale to add missing tag definitions or check the tags assigned to the OAuth client in Trust credentials", ErrEnrollmentTagDenied, strings.Join(tags, ", "))
 			case reply.ErrorCode == "invalid_scope" || reply.ErrorCode == "unauthorized_client" ||
 				reply.ErrorCode == "invalid_grant" || status == http.StatusForbidden:
 				return nil, fmt.Errorf("%w. Grant the OAuth client Auth Keys Write for %s", ErrEnrollmentAuthorization, strings.Join(tags, ", "))
@@ -85,12 +84,28 @@ func verifyEnrollment(ctx context.Context, client *http.Client, base *url.URL, c
 		}
 		return nil, errors.New("could not verify the Tailscale OAuth client. Check network access to api.tailscale.com and retry")
 	}
-	// Use the verified token for the rest of this command. Request contexts on
-	// SDK calls also allow revocation after the original join was canceled.
+	return &Enrollment{keys: api.Keys(), tags: slices.Clone(tags)}, nil
+}
+
+func tailscaleOAuthClient(ctx context.Context, client *http.Client, base *url.URL, id, secret, scope string, tags []string) (*tailscale.Client, error) {
+	config := clientcredentials.Config{
+		ClientID:     id,
+		ClientSecret: secret,
+		TokenURL:     base.JoinPath("api/v2/oauth/token").String(),
+		Scopes:       []string{scope},
+		AuthStyle:    oauth2.AuthStyleInParams,
+	}
+	if len(tags) != 0 {
+		config.EndpointParams = url.Values{"tags": {strings.Join(tags, " ")}}
+	}
+	token, err := config.Token(context.WithValue(ctx, oauth2.HTTPClient, client))
+	if err != nil {
+		return nil, err
+	}
+	// Per-request contexts allow key revocation even after a join was canceled.
 	apiHTTP := *client
 	apiHTTP.Transport = &oauth2.Transport{Source: oauth2.StaticTokenSource(token), Base: client.Transport}
-	api := &tailscale.Client{BaseURL: base, HTTP: &apiHTTP, UserAgent: "t3-agent37"}
-	return &Enrollment{keys: api.Keys(), tags: slices.Clone(tags)}, nil
+	return &tailscale.Client{BaseURL: base, HTTP: &apiHTTP, UserAgent: "t3-agent37"}, nil
 }
 
 func oauthRejectedTags(reply *oauth2.RetrieveError) bool {

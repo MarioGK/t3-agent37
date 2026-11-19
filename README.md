@@ -28,6 +28,8 @@ and saves new ones to an owner-only `runtime.json` beside `config.json`.
 `setup --check` checks local settings without prompts or API calls.
 `setup --verify` also checks the OAuth grant, MagicDNS, and HTTPS. Use
 `--no-browser` to keep setup in the terminal.
+With a policy-writing OAuth client, `setup --repair-tailscale` defines missing
+enrollment tags and verifies access. Add `--dry-run` to preview.
 
 `up` creates a sandbox with the next numbered name and serves T3 at its private
 Tailscale HTTPS DNS name. It verifies Tailscale credentials before provisioning

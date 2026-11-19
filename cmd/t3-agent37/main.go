@@ -38,6 +38,7 @@ type options struct {
 	deleteSandbox                    bool
 	checkSetup                       bool
 	verifySetup                      bool
+	repairSetup                      bool
 	noSetupBrowser                   bool
 	generatedName                    bool
 	latest                           bool
@@ -75,7 +76,7 @@ func parse(args []string, output io.Writer) (options, error) {
 			return
 		}
 		if opts.action == "setup" {
-			fmt.Fprintln(output, "Usage: t3-agent37 setup [--check | --verify] [--no-browser]\nSet up the Agent37 template, Tailscale enrollment, and the model provider.")
+			fmt.Fprintln(output, "Usage: t3-agent37 setup [--check | --verify | --repair-tailscale] [--no-browser]\nSet up the Agent37 template, Tailscale enrollment, and the model provider.")
 			flags.PrintDefaults()
 			return
 		}
@@ -102,6 +103,8 @@ func parse(args []string, output io.Writer) (options, error) {
 	if opts.action == "setup" {
 		flags.BoolVar(&opts.checkSetup, "check", false, "Check workstation configuration without prompts or network requests")
 		flags.BoolVar(&opts.verifySetup, "verify", false, "Check local Tailscale status and verify OAuth access")
+		flags.BoolVar(&opts.repairSetup, "repair-tailscale", false, "Use the OAuth client to define missing enrollment tags")
+		flags.BoolVar(&opts.dryRun, "dry-run", false, "Preview Tailscale tag repair without saving the policy")
 		flags.BoolVar(&opts.noSetupBrowser, "no-browser", false, "Keep setup in the terminal")
 	}
 	if opts.action == "create" {
@@ -134,6 +137,12 @@ func parse(args []string, output io.Writer) (options, error) {
 		}
 		if opts.checkSetup && opts.verifySetup {
 			return opts, errors.New("choose either --check or --verify")
+		}
+		if opts.repairSetup && (opts.checkSetup || opts.verifySetup) {
+			return opts, errors.New("--repair-tailscale already verifies OAuth. Run it on its own")
+		}
+		if opts.dryRun && !opts.repairSetup {
+			return opts, errors.New("--dry-run requires --repair-tailscale")
 		}
 		return opts, nil
 	}
@@ -509,6 +518,9 @@ func run(ctx context.Context, args []string, output, diagnostic io.Writer) error
 		return editConfig(ctx, diagnostic)
 	}
 	if opts.action == "setup" {
+		if opts.repairSetup {
+			return repairTailscaleSetup(ctx, opts.dryRun, output)
+		}
 		return setupWorkstation(ctx, opts, output, diagnostic)
 	}
 	var state string

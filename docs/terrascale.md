@@ -39,6 +39,9 @@ Run `t3-agent37 prepare terrascale-dev` to refresh the catalog.
 checks MagicDNS and HTTPS if the local Tailscale CLI is available. On an OAuth
 authorization failure, it opens Trust credentials from an interactive
 terminal. `--no-browser` keeps setup in the terminal. `setup --check` runs offline.
+`setup --repair-tailscale` uses **Policy File Write** to define missing tags
+with empty owner lists and retries OAuth verification. Existing tags and
+access rules are preserved. Use `--dry-run` to validate and preview the change.
 `create` and `up` verify OAuth before provisioning. The workstation keeps
 the OAuth secret and sends the guest a single-use, preauthorized ephemeral key
 valid for ten minutes. The CLI revokes the key on a failed join. T3 uses the

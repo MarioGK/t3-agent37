@@ -151,15 +151,19 @@ func readCredentialFile(path, name string) ([]byte, error) {
 	return io.ReadAll(file)
 }
 
-func verifyTailscaleEnrollment(ctx context.Context) (*peers.Enrollment, error) {
+func tailscaleCredentials() (string, string, error) {
 	values, err := runtimeCredentials(tailClientID, tailSecret)
 	if err != nil {
-		return nil, err
+		return "", "", err
 	}
 	clientID, clientSecret := values[tailClientID], values[tailSecret]
 	if clientID == "" || clientSecret == "" {
-		return nil, fmt.Errorf("Tailscale enrollment requires %s and %s. Run t3-agent37 setup", tailClientID, tailSecret)
+		return "", "", fmt.Errorf("Tailscale enrollment requires %s and %s. Run t3-agent37 setup", tailClientID, tailSecret)
 	}
+	return clientID, clientSecret, nil
+}
+
+func workstationTailscaleTags() ([]string, error) {
 	config, err := readWorkstationConfig()
 	if err != nil {
 		return nil, err
@@ -168,5 +172,17 @@ func verifyTailscaleEnrollment(ctx context.Context) (*peers.Enrollment, error) {
 	if err != nil {
 		return nil, fmt.Errorf("invalid Tailscale tags. Run t3-agent37 setup: %w", err)
 	}
-	return peers.VerifyEnrollment(ctx, clientID, clientSecret, tags)
+	return tags, nil
+}
+
+func verifyTailscaleEnrollment(ctx context.Context) (*peers.Enrollment, error) {
+	id, secret, err := tailscaleCredentials()
+	if err != nil {
+		return nil, err
+	}
+	tags, err := workstationTailscaleTags()
+	if err != nil {
+		return nil, err
+	}
+	return peers.VerifyEnrollment(ctx, id, secret, tags)
 }

@@ -235,6 +235,38 @@ func verifySetupTailscale(ctx context.Context, output io.Writer, configuredTags 
 	return localOK, false
 }
 
+func repairTailscaleSetup(ctx context.Context, dryRun bool, output io.Writer) error {
+	id, secret, err := tailscaleCredentials()
+	if err != nil {
+		return err
+	}
+	tags, err := workstationTailscaleTags()
+	if err != nil {
+		return err
+	}
+	_, err = peers.VerifyEnrollment(ctx, id, secret, tags)
+	if errors.Is(err, peers.ErrEnrollmentTagDenied) {
+		added, repairErr := peers.EnsureEnrollmentTags(ctx, id, secret, tags, dryRun)
+		if repairErr != nil {
+			return repairErr
+		}
+		if len(added) == 0 {
+			return fmt.Errorf("the enrollment tags are already defined. Assign %s to the OAuth client in Trust credentials", strings.Join(tags, ", "))
+		}
+		if dryRun {
+			fmt.Fprintln(output, "Would define Tailscale tags", strings.Join(added, ", "))
+			return nil
+		}
+		fmt.Fprintln(output, "Defined Tailscale tags", strings.Join(added, ", "))
+		_, err = peers.VerifyEnrollment(ctx, id, secret, tags)
+	}
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(output, "Verified Tailscale OAuth can issue a scoped token for", strings.Join(tags, ", "))
+	return nil
+}
+
 func openTailscaleConsole(diagnostic io.Writer) {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
