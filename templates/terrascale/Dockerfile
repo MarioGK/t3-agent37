@@ -45,6 +45,7 @@ ARG OPENCODE_VERSION=1.19.5
 ARG MISE_VERSION=2026.11.9
 ARG ACTIONLINT_VERSION=1.7.12
 ARG TS_VERSION=0.0.82
+ARG TAILSCALE_VERSION=1.104.2
 RUN set -eu; \
     export HOME=/root; \
     downloads=$(mktemp -d); \
@@ -60,6 +61,8 @@ RUN set -eu; \
       8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8; \
     fetch "https://github.com/TerraScale/terrascale/releases/download/sdk/go/v${TS_VERSION}/ts_linux_amd64.tar.gz" ts.tar.gz \
       72dcfbdc6fa1a3ce50598c3097efc88096b12e9d14a770592fd5ec88355f1e56; \
+    fetch "https://pkgs.tailscale.com/stable/tailscale_${TAILSCALE_VERSION}_amd64.tgz" tailscale.tgz \
+      512f613ed7d04fc7282f7dc5bd76aa105aae28168fbb9357eb749ebcbc29f0ae; \
     runtime="/opt/t3-agent37/versions/${T3_VERSION}"; \
     mkdir -p "$runtime"; \
     tar -xzf "$downloads/t3.tar.gz" --strip-components=1 -C "$runtime"; \
@@ -68,6 +71,9 @@ RUN set -eu; \
     tar -xzf "$downloads/mise.tar.gz" -C /usr/local/bin --strip-components=2 mise/bin/mise; \
     tar -xzf "$downloads/actionlint.tar.gz" -C /usr/local/bin actionlint; \
     tar -xzf "$downloads/ts.tar.gz" -C /usr/local/bin ts; \
+    tailscale_archive="tailscale_${TAILSCALE_VERSION}_amd64"; \
+    tar -xzf "$downloads/tailscale.tgz" --strip-components=1 -C /usr/local/bin \
+      "$tailscale_archive/tailscale" "$tailscale_archive/tailscaled"; \
     rm -rf "$downloads"; \
     npm install --global --prefix /usr/local --no-audit --no-fund "opencode-ai@${OPENCODE_VERSION}" playwright@1.63.0; \
     uv python install 3.12.16; \
@@ -96,4 +102,5 @@ RUN set -eu; \
     rustfmt --version; cargo clippy --version; \
     ruby --version; shellcheck --version; actionlint --version; \
     ts --version; psql --version; command -v certutil unshare nsenter strace; \
+    tailscale version; tailscaled --version; \
     playwright --version

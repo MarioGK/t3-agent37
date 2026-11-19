@@ -1,4 +1,6 @@
 import json
+from io import BytesIO
+from unittest.mock import Mock
 
 from t3_agent37 import remote
 
@@ -26,3 +28,23 @@ def test_configures_managed_model_without_writing_the_token(monkeypatch, tmp_pat
     config = opencode.read_text()
     assert "fixture-token" not in config
     assert json.loads(config)["provider"]["agent37"]["options"]["apiKey"] == "{env:AGENT37_MANAGED_TOKEN}"
+
+
+def test_cliproxy_profile_loads_text_models_and_keeps_secret_out_of_config(monkeypatch):
+    monkeypatch.setenv("T3_AGENT37_CLIPROXY_URL", "https://example.org/")
+    monkeypatch.setenv("T3_AGENT37_CLIPROXY_KEY", "fixture-key")
+    monkeypatch.delenv("T3_AGENT37_CLIPROXY_MODEL", raising=False)
+    response = BytesIO(json.dumps({"data": [
+        {"id": "glm-5.3"}, {"id": "gpt-6.2-sol"}, {"id": "gpt-image-2"}, None,
+    ]}).encode())
+    opener = Mock()
+    opener.open.return_value = response
+    monkeypatch.setattr(remote, "build_opener", lambda *handlers: opener)
+    model, profile = remote.cli_proxy_profile()
+    assert model == "cliproxy/glm-5.3"
+    assert set(profile["models"]) == {"glm-5.3", "gpt-6.2-sol"}
+    assert profile["options"]["baseURL"] == "https://example.org/v1"
+    assert profile["options"]["apiKey"] == "{env:T3_AGENT37_CLIPROXY_KEY}"
+    request = opener.open.call_args.args[0]
+    assert request.full_url == "https://example.org/v1/models"
+    assert request.get_header("Authorization") == "Bearer fixture-key"

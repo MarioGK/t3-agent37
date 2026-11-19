@@ -13,8 +13,8 @@ supports macOS.
 Download the wheel from the GitHub release and install it with uv:
 
 ```bash
-gh release download v0.1.4 --repo MarioGK/t3-agent37 --pattern '*.whl'
-uv tool install ./t3_agent37-0.1.4-py3-none-any.whl
+gh release download v0.1.5 --repo MarioGK/t3-agent37 --pattern '*.whl'
+uv tool install ./t3_agent37-0.1.5-py3-none-any.whl
 t3-agent37 --version
 ```
 
@@ -55,9 +55,29 @@ For Codex, complete `codex login --device-auth` in that terminal.
 
 ## TerraScale template
 
-The [TerraScale Dockerfile](templates/terrascale/Dockerfile) bundles the pinned
-T3, managed OpenCode, and Codex runtimes. New sandboxes can start T3 with
-`agent37/default` using the included binaries.
+The [TerraScale Dockerfile](templates/terrascale/Dockerfile) bundles T3,
+OpenCode, Codex, and Tailscale. Revision `@3` and later select the CLIProxy
+profile and enroll in Tailscale when you create the sandbox with this CLI.
+T3 loads text models from the authenticated CLIProxy catalog. It selects
+`cliproxy/glm-5.3` for a fresh workspace. Set `T3_AGENT37_CLIPROXY_MODEL` to
+a different catalog ID before creating it. Run `t3-agent37 prepare <name>`
+to refresh the catalog on an existing CLIProxy sandbox.
+
+Load these variables into the workstation CLI process from your secret store.
+
+| Variable | Value |
+| --- | --- |
+| `T3_AGENT37_CLIPROXY_URL` | HTTPS base URL of your CLIProxy instance |
+| `T3_AGENT37_CLIPROXY_KEY` | A dedicated API key accepted by CLIProxy |
+| `T3_AGENT37_TAILSCALE_CLIENT_ID`, `T3_AGENT37_TAILSCALE_CLIENT_SECRET` | Tailscale OAuth client with `auth_keys` write access for `tag:agent37` |
+
+The OAuth client stays on the workstation. The CLI sends a single-use,
+ephemeral enrollment key to each sandbox and gives each sandbox a unique
+Tailscale hostname. The userspace daemon joins without advertising routes
+or accepting DNS changes, inbound tailnet traffic, or Tailscale SSH. T3
+continues to use its protected Agent37 relay. Inside the sandbox, use
+`socks5h://127.0.0.1:1055` for outbound connections to tailnet services.
+Use `--no-tailscale` to create a CLIProxy sandbox without tailnet enrollment.
 
 The image includes .NET 10 and 11, Go 1.27.4, Rust 1.99.1 with rustfmt and
 Clippy, Python 3.12 with uv, and Node 24 with mise. The TerraScale JS SDK's
@@ -76,7 +96,7 @@ key for the TerraScale workspace in the child process environment:
 
 ```bash
 agent37 templates build templates/terrascale --name terrascale-agent37 --default-port 3737
-t3-agent37 create terrascale-pilot --template terrascale-agent37@2 --yes
+t3-agent37 create terrascale-pilot --template terrascale-agent37@3 --yes
 ```
 
 Use the revision returned by the build when publishing your own copy. Agent37's Codex
@@ -97,8 +117,10 @@ several simultaneously. Run one relay per environment. Use `--port` on the
 first connection if you need to choose its address and `connect --pair` for
 a fresh pairing link.
 Stop the relay with Ctrl+C. To pause compute after work has finished, run
-`t3-agent37 down terrascale-pilot`. The Agent37 disk continues to accrue
-storage charges. Review active threads before stopping the instance.
+`t3-agent37 down terrascale-pilot`. For Tailscale-enabled sandboxes, `down`
+logs out the ephemeral device before stopping compute, and `up` enrolls
+again. The Agent37 disk continues to accrue storage charges. Review active
+threads before stopping the instance.
 
 Traffic routed through Agent37 wakes a sleeping sandbox. T3 background
 traffic can keep it awake. The local relay uses loopback and connects

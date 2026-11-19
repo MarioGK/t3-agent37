@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import shlex
 import shutil
 import subprocess
@@ -14,8 +15,9 @@ import sys
 import tarfile
 import tempfile
 import time
-from urllib.error import URLError
-from urllib.request import urlopen
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
+from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 VERSION = "0.1.11-nightly.20261118.4903"
 CHECKSUMS = {
@@ -124,9 +126,66 @@ def update_json(path, update):
             temporary.unlink(missing_ok=True)
 
 
-def configure_managed_opencode():
-    if not os.environ.get("AGENT37_MANAGED_TOKEN") or not os.environ.get("AGENT37_LLM_PROXY_URL"):
-        raise RuntimeError("The sandbox has no Agent37 managed model credentials")
+def cli_proxy_profile():
+    base = os.environ.get("T3_AGENT37_CLIPROXY_URL", "").rstrip("/")
+    key = os.environ.get("T3_AGENT37_CLIPROXY_KEY")
+    model = os.environ.get("T3_AGENT37_CLIPROXY_MODEL", "glm-5.3")
+    url = urlsplit(base)
+    if url.scheme != "https" or not url.hostname or url.username or url.password or url.query or url.fragment or not key:
+        raise RuntimeError("CLIProxy needs an HTTPS base URL and client key")
+    if not base.endswith("/v1"):
+        base += "/v1"
+
+    class NoRedirect(HTTPRedirectHandler):
+        def redirect_request(self, *args, **kwargs):
+            return None
+
+    try:
+        request = Request(base + "/models", headers={"Authorization": f"Bearer {key}"})
+        with build_opener(NoRedirect()).open(request, timeout=15) as response:
+            catalog = json.load(response)
+    except HTTPError as error:
+        error.close()
+        raise RuntimeError(f"CLIProxy model catalog returned HTTP {error.code}") from None
+    except (URLError, OSError, ValueError):
+        raise RuntimeError("CLIProxy model catalog is unavailable") from None
+    if not isinstance(catalog, dict) or not isinstance(catalog.get("data"), list):
+        raise RuntimeError("CLIProxy model catalog has an unexpected format")
+    media = ("gpt-image-", "grok-imagine-", "grok-tts", "grok-voice-")
+    models = {entry["id"]: {"name": entry["id"]} for entry in catalog["data"]
+              if isinstance(entry, dict) and isinstance(entry.get("id"), str)
+              and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:/()-]{0,159}", entry["id"])
+              and not entry["id"].startswith(media)}
+    if model not in models:
+        raise RuntimeError("The requested default model is absent from the CLIProxy catalog")
+    return f"cliproxy/{model}", {
+        "name": "CLIProxyAPI",
+        "options": {
+            "baseURL": base, "apiKey": "{env:T3_AGENT37_CLIPROXY_KEY}",
+            "timeout": 300000, "headerTimeout": 300000, "chunkTimeout": 300000,
+        },
+        "models": models,
+    }
+
+
+def configure_managed_opencode(provider="opencode"):
+    profile = "cliproxy" if provider == "cliproxy" else "agent37"
+    if profile == "cliproxy":
+        model, config = cli_proxy_profile()
+    else:
+        if not os.environ.get("AGENT37_MANAGED_TOKEN") or not os.environ.get("AGENT37_LLM_PROXY_URL"):
+            raise RuntimeError("The sandbox has no Agent37 managed model credentials")
+        model = MANAGED_MODEL
+        config = {
+            "name": "Agent37",
+            "options": {
+                "baseURL": "{env:AGENT37_LLM_PROXY_URL}",
+                "apiKey": "{env:AGENT37_MANAGED_TOKEN}",
+            },
+            "models": {"default": {"name": "Agent37 Default"}},
+        }
+    config["npm"] = "@ai-sdk/openai-compatible"
+
     binary = shutil.which("opencode")
     if binary is None:
         prefix = ROOT / "providers" / OPENCODE_VERSION
@@ -140,16 +199,9 @@ def configure_managed_opencode():
             )
 
     def configure_opencode(settings):
-        settings.setdefault("provider", {})["agent37"] = {
-            "npm": "@ai-sdk/openai-compatible",
-            "name": "Agent37",
-            "options": {
-                "baseURL": "{env:AGENT37_LLM_PROXY_URL}",
-                "apiKey": "{env:AGENT37_MANAGED_TOKEN}",
-            },
-            "models": {"default": {"name": "Agent37 Default"}},
-        }
-        settings.setdefault("model", MANAGED_MODEL)
+        settings.setdefault("provider", {})[profile] = config
+        if not settings.get("model") or (profile == "cliproxy" and settings["model"] == MANAGED_MODEL):
+            settings["model"] = model
         return settings
 
     def configure_t3(settings):
@@ -159,8 +211,9 @@ def configure_managed_opencode():
         opencode.setdefault("config", {})["binaryPath"] = str(binary)
         default = settings.get("defaultModelSelection") or {}
         previous = default.get("instanceId", default.get("provider"))
-        if not previous or previous == "codex":
-            settings["defaultModelSelection"] = {"instanceId": "opencode", "model": MANAGED_MODEL}
+        if (not previous or previous == "codex"
+                or (profile == "cliproxy" and default.get("model") == MANAGED_MODEL)):
+            settings["defaultModelSelection"] = {"instanceId": "opencode", "model": model}
         return settings
 
     config_home = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
@@ -169,8 +222,8 @@ def configure_managed_opencode():
 
 
 def provider_ready(provider):
-    if provider == "opencode":
-        configure_managed_opencode()
+    if provider in {"opencode", "cliproxy"}:
+        configure_managed_opencode(provider)
         return True
     command = {"codex": ["codex", "login", "status"], "claude": ["claude", "auth", "status"]}
     if provider not in command or shutil.which(provider) is None:
@@ -209,6 +262,31 @@ def pair(port):
     print(result.stdout.strip())
 
 
+def manage_tailnet(action, *args):
+    import tailnet  # the CLI installs this alongside the standalone bootstrap
+
+    if action == "tailnet-leave":
+        tailnet.leave()
+        return
+    if action == "tailnet-restore":
+        tailnet.restore()
+        return
+    hostname, *files = args
+    key = None
+    if files:
+        filename, = files
+        if not re.fullmatch(r"tailscale-enrollment-[a-f0-9]{32}", filename):
+            raise ValueError("Invalid enrollment file name")
+        path = ROOT / filename
+        with path.open() as source:
+            path.unlink()
+            key = source.read().strip()
+    try:
+        print(json.dumps(tailnet.join(hostname, key)))
+    except tailnet.EnrollmentRequired:
+        print(json.dumps({"enrollmentRequired": True}))
+
+
 if __name__ == "__main__":
     action = sys.argv[1]
     if action == "setup":
@@ -217,5 +295,9 @@ if __name__ == "__main__":
         serve()
     elif action == "boot":
         boot()
+        if (ROOT / "tailnet.py").is_file():
+            manage_tailnet("tailnet-restore")
     elif action == "pair":
         pair(sys.argv[2])
+    elif action in {"tailnet-join", "tailnet-leave"}:
+        manage_tailnet(action, *sys.argv[2:])

@@ -3,6 +3,7 @@
 import json
 import re
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 API = "https://api.agent37.com/v1/instances"
@@ -36,9 +37,9 @@ class Agent37:
         header = {"X-Agent37-Key": self.key} if sandbox else {
             "Authorization": f"Bearer {self.key}",
         }
-        body = None if payload is None else json.dumps(payload).encode()
+        body = payload if isinstance(payload, bytes) else None if payload is None else json.dumps(payload).encode()
         if body is not None:
-            header["Content-Type"] = "application/json"
+            header["Content-Type"] = "application/octet-stream" if isinstance(payload, bytes) else "application/json"
         request = Request(url, data=body, headers=header, method=method)
         try:
             with self.opener.open(request, timeout=240) as response:
@@ -82,6 +83,13 @@ class Agent37:
         if response["exit_code"] != 0 or response.get("truncated"):
             raise Agent37Error(f"Sandbox setup command failed (exit {response['exit_code']})")
         return response["stdout"]
+
+    def upload_enrollment_key(self, instance, filename, key):
+        if not re.fullmatch(r"tailscale-enrollment-[a-f0-9]{32}", filename):
+            raise ValueError("Invalid enrollment file name")
+        query = urlencode({"path": f"~/.local/share/t3-agent37/{filename}", "overwrite": "false"})
+        url = f"https://{instance_id(instance)}.agent37.app/v1/files/content?{query}"
+        self._request(url, method="PUT", payload=key.encode(), sandbox=True)
 
 
     def require_managed_budget(self, instance, *, initialize=False):

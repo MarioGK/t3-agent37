@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import base64
+import fcntl
 from importlib.metadata import version
 import json
 import os
@@ -18,17 +19,20 @@ import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit
 from urllib.request import Request
+from uuid import uuid4
 
 from aiohttp import web
 
 from .api import Agent37, Agent37Error, MANAGED_CREDIT_MICROS, instance_id
 from .relay import application
+from .tailscale_oauth import credentials as tailscale_credentials, enrollment_key
 
 
 OWNER = "t3-agent37"
 DEFAULT_PORT = 43737
 T3_PORTS = (3773, 4373)
-TEMPLATES = {"codex": "agent37-codex", "claude": "agent37-claude-code", "opencode": "agent37-opencode"}
+TEMPLATES = {"codex": "agent37-codex", "claude": "agent37-claude-code",
+             "opencode": "agent37-opencode", "cliproxy": "agent37-opencode"}
 
 
 def label(value):
@@ -44,7 +48,23 @@ def port_number(value):
     return port
 
 
-def request_body(name, template, provider="codex"):
+def terrascale_profile(template):
+    name, _, version = (template or "").partition("@")
+    return name == "terrascale-agent37" and (not version or version.isdecimal() and int(version) >= 3)
+
+
+def cliproxy_env():
+    keys = ("T3_AGENT37_CLIPROXY_URL", "T3_AGENT37_CLIPROXY_KEY")
+    values = {key: os.environ.get(key) for key in keys}
+    if not all(values.values()):
+        raise Agent37Error(f"Load {' and '.join(keys)} for CLIProxy")
+    model = os.environ.get("T3_AGENT37_CLIPROXY_MODEL")
+    if model:
+        values["T3_AGENT37_CLIPROXY_MODEL"] = model
+    return values
+
+
+def request_body(name, template, provider="codex", *, tailnet=False, provider_env=None):
     payload = {
         "name": name, "template": template,
         "metadata": {"managed_by": OWNER, "environment": name, "provider": provider},
@@ -57,6 +77,10 @@ def request_body(name, template, provider="codex"):
     }
     if provider == "opencode":
         payload["budget"] = {"credit_micros": MANAGED_CREDIT_MICROS}
+    if tailnet:
+        payload["metadata"]["tailnet"] = "tailscale"
+    if provider_env:
+        payload["env"].update(provider_env)
     return payload
 
 
@@ -76,7 +100,7 @@ def lookup(client, name):
     return matches[0] if matches else None
 
 
-def get_or_create(client, name, template, state, provider="codex"):
+def get_or_create(client, name, template, state, provider="codex", *, tailnet=False):
     existing = lookup(client, name)
     if existing:
         (state / f"{name}.pending").unlink(missing_ok=True)
@@ -96,7 +120,15 @@ def get_or_create(client, name, template, state, provider="codex"):
         marker.unlink(missing_ok=True)
         raise
     try:
-        result = existing or client.create(request_body(name, template, provider))
+        provider_env = cliproxy_env() if not existing and provider == "cliproxy" else None
+        if not existing and tailnet:
+            tailscale_credentials()
+    except Agent37Error:
+        marker.unlink(missing_ok=True)
+        raise
+    try:
+        result = existing or client.create(request_body(name, template, provider, tailnet=tailnet,
+                                                       provider_env=provider_env))
         instance_id(result["id"])
     except Agent37Error as error:
         if error.status in {400, 401, 402, 403, 404, 422, 429}:
@@ -106,20 +138,27 @@ def get_or_create(client, name, template, state, provider="codex"):
     return result
 
 
-def setup(client, instance, provider):
-    script = Path(__file__).with_name("remote.py").read_bytes()
-    encoded = base64.b64encode(script).decode()
+REMOTE = 'python3 "$HOME/.local/share/t3-agent37/remote.py"'
+
+
+def setup(client, instance, provider, *, tailnet=False):
+    names = ("remote.py", "tailnet.py") if tailnet else ("remote.py",)
+    arguments = []
+    for name in names:
+        source = Path(__file__).with_name(name).read_bytes()
+        arguments.extend((name, base64.b64encode(source).decode()))
     install = (
         "import base64, pathlib, sys, os, tempfile; "
         "path = pathlib.Path.home() / '.local/share/t3-agent37'; "
         "path.mkdir(mode=0o700, parents=True, exist_ok=True); "
-        "fd, name = tempfile.mkstemp(dir=path); os.close(fd); "
-        "pathlib.Path(name).write_bytes(base64.b64decode(sys.argv[1])); "
-        "os.replace(name, path / 'remote.py')"
+        "\nfor filename, body in zip(sys.argv[1::2], sys.argv[2::2]):\n"
+        " with tempfile.NamedTemporaryFile(dir=path, delete=False) as stage:\n"
+        "  stage.write(base64.b64decode(body)); stage.flush()\n"
+        " os.replace(stage.name, path / filename)"
     )
     command = (
-        f"python3 -c {shlex.quote(install)} {encoded} "
-        f'&& python3 "$HOME/.local/share/t3-agent37/remote.py" setup {provider}'
+        f"python3 -c {shlex.quote(install)} {shlex.join(arguments)} "
+        f"&& {REMOTE} setup {provider}"
     )
     # Bootstrap is idempotent. Run it again after a restart so an Agent37
     # cached exec response cannot claim that the previous process is ready.
@@ -128,6 +167,29 @@ def setup(client, instance, provider):
         raise Agent37Error("Sandbox setup did not return a T3 environment ID")
     visible, port = wait_for_t3(client, instance, expected=proof["environmentId"], remote_port=proof["port"])
     return {**visible, "providerReady": proof["providerReady"]}, port
+
+
+def join_tailnet(client, instance, name):
+    hostname = f"a37-{label(name)}-{instance_id(instance)}"
+    command = f"{REMOTE} tailnet-join {hostname}"
+    try:
+        proof = json.loads(client.exec(instance, command))
+        if proof.get("enrollmentRequired"):
+            key = enrollment_key(*tailscale_credentials())
+            filename = f"tailscale-enrollment-{uuid4().hex}"
+            try:
+                client.upload_enrollment_key(instance, filename, key)
+                proof = json.loads(client.exec(instance, f"{command} {filename}"))
+            except Agent37Error:
+                try:
+                    client.exec(instance, f'unlink "$HOME/.local/share/t3-agent37/{filename}"')
+                except Agent37Error:
+                    pass  # the bootstrap may already have consumed the short-lived key
+                raise
+        if not proof.get("id") or proof.get("hostname") != hostname:
+            raise Agent37Error("Tailscale did not confirm the sandbox identity")
+    except Agent37Error as error:
+        raise Agent37Error(f"Could not enroll {name} in Tailscale. {error}") from None
 
 
 def wait_for_t3(client, instance, *, expected=None, remote_port=None, timeout=45):
@@ -230,6 +292,82 @@ def summary(instance):
     return {**fields, "provider": (instance.get("metadata") or {}).get("provider", "codex")}
 
 
+def lifecycle(client, instance, name, action):
+    target = "running" if action == "start" else "stopped"
+    identifier = instance_id(instance["id"])
+    provider = summary(instance)["provider"]
+    tailnet = (instance.get("metadata") or {}).get("tailnet") == "tailscale"
+    if action == "stop" and instance["status"] != target and tailnet:
+        installed = 'test -f "$HOME/.local/share/t3-agent37/tailnet.py"'
+        try:
+            client.exec(identifier, f"if {installed}; then {REMOTE} tailnet-leave; fi")
+        except Agent37Error as error:
+            raise Agent37Error(f"Tailscale logout failed for {name}. Retry down. {error}") from None
+    if instance["status"] != target:
+        if action == "start" and tailnet and instance["status"] == "stopped":
+            tailscale_credentials()
+        instance = {**instance, **client.lifecycle(identifier, action)}
+    if action == "start" and tailnet:
+        setup(client, identifier, provider, tailnet=True)
+        join_tailnet(client, identifier, name)
+        instance = client.get(identifier)
+    return summary(instance)
+
+
+def operate(client, args, state):
+    instance = (get_or_create(client, args.name, args.template, state, args.provider, tailnet=args.tailscale)
+                if args.action == "create" else lookup(client, args.name))
+    if not instance:
+        raise Agent37Error(f"No managed Agent37 environment named {args.name}")
+    identifier = instance_id(instance["id"])
+    tailnet = (instance.get("metadata") or {}).get("tailnet") == "tailscale"
+    if args.action in {"start", "stop"}:
+        print(json.dumps(lifecycle(client, instance, args.name, args.action)))
+        return None
+    if args.action == "terminal":
+        print(client.terminal(identifier))
+        return None
+    if args.action == "prepare":
+        previous = summary(instance)["provider"]
+        provider = "cliproxy" if previous == "cliproxy" else "opencode"
+        if provider == "opencode":
+            client.require_managed_budget(identifier, initialize=previous != "opencode")
+        start = instance["status"] in {"stopped", "sleeping"}
+        if start:
+            lifecycle(client, instance, args.name, "start")
+        if not (start and tailnet and previous == provider):
+            setup(client, identifier, provider, tailnet=tailnet)
+        if provider == "cliproxy":
+            print(f"CLIProxy model catalog refreshed on {args.name}.")
+        else:
+            client.set_provider(instance, provider)
+            print(f"Managed OpenCode is ready on {args.name} (agent37/default).")
+        return None
+    port = assigned_port(state, identifier, args.port)
+    if args.action == "create":
+        if (instance["template"] != args.template or summary(instance)["provider"] != args.provider
+                or tailnet != args.tailscale):
+            raise Agent37Error("This name already uses a different template, provider, or Tailscale setting")
+        if args.provider == "opencode":
+            client.require_managed_budget(identifier)
+        if instance["status"] in {"stopped", "sleeping"}:
+            if tailnet and instance["status"] == "stopped":
+                tailscale_credentials()
+            client.lifecycle(identifier, "start")
+        proof, remote_port = setup(client, identifier, args.provider, tailnet=tailnet)
+        if tailnet:
+            join_tailnet(client, identifier, args.name)
+        print(f"Cloud T3 ready ({identifier}, {proof['environmentId']}).", flush=True)
+        if not proof["providerReady"]:
+            print(f"{args.provider} needs sign-in. Run t3-agent37 terminal {args.name}.", flush=True)
+    else:
+        if instance["status"] == "stopped":
+            raise Agent37Error("The sandbox is stopped. Run t3-agent37 up first.")
+        _, remote_port = wait_for_t3(client, identifier)
+    pairing = pair_link(client, identifier, port) if args.action == "create" or args.pair else None
+    return identifier, port, remote_port, pairing
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog=OWNER, description=__doc__)
     parser.add_argument("--version", action="version", version=version(OWNER))
@@ -237,14 +375,16 @@ def main(argv=None):
     sub.add_parser("list", help="List managed Agent37 environments")
     create = sub.add_parser("create", help="Create a sandbox, install T3, and open pairing")
     create.add_argument("name", type=label)
-    create.add_argument("--provider", choices=TEMPLATES, default="opencode",
-                        help="Agent provider (default: managed OpenCode)")
+    create.add_argument("--provider", choices=TEMPLATES,
+                        help="Agent provider (default: CLIProxy for TerraScale @3+, Agent37 OpenCode otherwise)")
+    create.add_argument("--tailscale", action=argparse.BooleanOptionalAction,
+                        help="Enroll in Tailscale (default: enabled for TerraScale @3+)")
     create.add_argument("--template", help="Agent37 template override, optionally pinned by revision")
     create.add_argument("--port", type=port_number)
     mode = create.add_mutually_exclusive_group(required=True)
     mode.add_argument("--yes", action="store_true", help="Authorize paid provisioning")
     mode.add_argument("--dry-run", action="store_true", help="Print the request without using the API")
-    prepare = sub.add_parser("prepare", help="Set up managed OpenCode on an existing sandbox")
+    prepare = sub.add_parser("prepare", help="Configure OpenCode or refresh the CLIProxy model catalog")
     prepare.add_argument("name", type=label)
     connect = sub.add_parser("connect", help="Run the local relay for a paired environment")
     connect.add_argument("name", type=label)
@@ -254,16 +394,19 @@ def main(argv=None):
         aliases = {"start": ["up"], "stop": ["down"]}.get(action, [])
         command = sub.add_parser(action, aliases=aliases, help={
             "start": "Start an Agent37 instance",
-            "stop": "Stop an instance and keep its disk",
+            "stop": "Remove the instance from Tailscale and stop it, keeping its disk",
             "terminal": "Print the signed Agent37 terminal URL for provider login",
         }[action])
         command.add_argument("name", type=label)
     args = parser.parse_args(argv)
     args.action = {"up": "start", "down": "stop"}.get(args.action, args.action)
     if args.action == "create":
+        terra = terrascale_profile(args.template)
+        args.provider = args.provider or ("cliproxy" if terra else "opencode")
         args.template = args.template or TEMPLATES[args.provider]
+        args.tailscale = terra if args.tailscale is None else args.tailscale
         if args.dry_run:
-            print(json.dumps(request_body(args.name, args.template, args.provider), indent=2))
+            print(json.dumps(request_body(args.name, args.template, args.provider, tailnet=args.tailscale), indent=2))
             return 0
     key = os.environ.get("AGENT37_API_KEY")
     if not key:
@@ -274,46 +417,12 @@ def main(argv=None):
             print(json.dumps([summary(item) for item in managed(client)], indent=2))
             return 0
         state = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / OWNER
-        instance = (get_or_create(client, args.name, args.template, state, args.provider)
-                    if args.action == "create" else lookup(client, args.name))
-        if not instance:
-            raise Agent37Error(f"No managed Agent37 environment named {args.name}")
-        identifier = instance_id(instance["id"])
-        if args.action in {"start", "stop"}:
-            target_status = {"start": "running", "stop": "stopped"}[args.action]
-            if instance["status"] != target_status:
-                instance = {**instance, **client.lifecycle(identifier, args.action)}
-            print(json.dumps(summary(instance)))
-            return 0
-        if args.action == "terminal":
-            print(client.terminal(identifier))
-            return 0
-        if args.action == "prepare":
-            client.require_managed_budget(identifier, initialize=summary(instance)["provider"] != "opencode")
-            if instance["status"] in {"stopped", "sleeping"}:
-                client.lifecycle(identifier, "start")
-            setup(client, identifier, "opencode")
-            client.set_provider(instance, "opencode")
-            print(f"Managed OpenCode is ready on {args.name} (agent37/default).")
-            return 0
-        port = assigned_port(state, identifier, args.port)
-        if args.action == "create":
-            if instance["template"] != args.template or summary(instance)["provider"] != args.provider:
-                raise Agent37Error("This name already uses a different template or provider")
-            if args.provider == "opencode":
-                client.require_managed_budget(identifier)
-            if instance["status"] in {"stopped", "sleeping"}:
-                client.lifecycle(identifier, "start")
-            proof, remote_port = setup(client, identifier, args.provider)
-            print(f"Cloud T3 ready ({identifier}, {proof['environmentId']}).", flush=True)
-            if not proof["providerReady"]:
-                print(f"{args.provider} needs sign-in. Run t3-agent37 terminal {args.name}.", flush=True)
-        else:
-            if instance["status"] == "stopped":
-                raise Agent37Error("The sandbox is stopped. Run t3-agent37 up first.")
-            _, remote_port = wait_for_t3(client, identifier)
-        pairing = pair_link(client, identifier, port) if args.action == "create" or args.pair else None
-        asyncio.run(serve(client, identifier, port, remote_port, pairing))
+        state.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with (state / f"{args.name}.lifecycle.lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            relay = operate(client, args, state)
+        if relay is not None:
+            asyncio.run(serve(client, *relay))
     except KeyboardInterrupt:
         return 0
     except (Agent37Error, OSError, ValueError, KeyError, sqlite3.Error) as error:
