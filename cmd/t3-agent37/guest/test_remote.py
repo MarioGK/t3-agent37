@@ -4,7 +4,27 @@ import tarfile
 import tempfile
 import unittest
 
-from remote import unpack_runtime
+from remote import select_runtime, unpack_runtime
+
+
+class SelectRuntimeTest(unittest.TestCase):
+    def test_prefers_the_verified_template_version(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            versions = root / "image" / "versions"
+            fallback = root / "fallback"
+            runtime = versions / "template-version"
+            binary = runtime / "t3"
+            entrypoint = root / "t3"
+            runtime.mkdir(parents=True)
+            binary.touch()
+            entrypoint.symlink_to(binary)
+            self.assertEqual(select_runtime(entrypoint, versions, fallback), fallback)
+            (runtime / ".verified").touch()
+            self.assertEqual(select_runtime(entrypoint, versions, fallback), runtime)
+            self.assertEqual(select_runtime(entrypoint, root / "other", fallback), fallback)
+            binary.unlink()
+            self.assertEqual(select_runtime(entrypoint, versions, fallback), fallback)
 
 
 class UnpackRuntimeTest(unittest.TestCase):

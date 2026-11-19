@@ -40,7 +40,7 @@ RUN set -eu; \
       ln -s "/opt/terrascale/rustup-bin/$binary" "/usr/local/bin/$binary"; \
     done
 
-ARG T3_VERSION=0.1.11-nightly.20261118.4903
+ARG T3_VERSION=0.1.11-nightly.20261119.4954
 ARG OPENCODE_VERSION=1.19.5
 ARG MISE_VERSION=2026.11.9
 ARG ACTIONLINT_VERSION=1.7.12
@@ -54,7 +54,7 @@ RUN set -eu; \
       printf '%s  %s\n' "$3" "$downloads/$2" | sha256sum -c -; \
     }; \
     fetch "https://github.com/pingdotgg/t3code/releases/download/v${T3_VERSION}/t3-${T3_VERSION}-linux-x64.tar.gz" t3.tar.gz \
-      d7450450c9f71c6daac7fb1ec0d5b22fd7e2365f9e124c730fd5d3dc3e3e1d2a; \
+      ad94394d27733b75e000deefefbfefe187e61366ea18b0df8ffb549d3bb2966d; \
     fetch "https://github.com/jdx/mise/releases/download/v${MISE_VERSION}/mise-v${MISE_VERSION}-linux-x64.tar.gz" mise.tar.gz \
       23ba592fcbc61f057e2b82c1eafd085832712ba0c759b714ca16cd06babca378; \
     fetch "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" actionlint.tar.gz \
@@ -88,7 +88,7 @@ RUN HOME=/root PLAYWRIGHT_BROWSERS_PATH=/opt/terrascale/playwright playwright in
 USER node
 RUN set -eu; \
     export PATH=/usr/local/bin:/usr/bin:/bin; \
-    t3 --version; codex --version; opencode --version; \
+    test "$(t3 --version)" = "t3 v$T3_VERSION"; codex --version; opencode --version; \
     go version; gofmt -h >/dev/null 2>&1; \
     dotnet --list-sdks > /tmp/terrascale-sdks; \
     grep -E '^10\.' /tmp/terrascale-sdks; grep -E '^11\.' /tmp/terrascale-sdks; \

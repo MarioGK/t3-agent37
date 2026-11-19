@@ -19,7 +19,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
-VERSION = "0.1.11-nightly.20261118.4903"
+# Images without a verified T3 installation use this download.
+FALLBACK_VERSION = "0.1.11-nightly.20261118.4903"
 CHECKSUMS = {
     "x86_64": ("x64", "d7450450c9f71c6daac7fb1ec0d5b22fd7e2365f9e124c730fd5d3dc3e3e1d2a"),
     "aarch64": ("arm64", "3b35b94c96098bdd4282536c7f8ca18447593b8c00af6cf7bfcc2e16be155ceb"),
@@ -27,9 +28,6 @@ CHECKSUMS = {
 ROOT = Path.home() / ".local/share/t3-agent37"
 DATA = ROOT / "data"
 SCRIPT = ROOT / "remote.py"
-PREBUILT = Path("/opt/t3-agent37/versions") / VERSION
-RUNTIME = PREBUILT if (PREBUILT / ".verified").is_file() else ROOT / "versions" / VERSION
-T3 = RUNTIME / "t3"
 OPENCODE_VERSION = "1.19.5"
 MANAGED_MODEL = "agent37/default"
 # Agent37 may keep the gateway port assigned at original creation even
@@ -37,6 +35,22 @@ MANAGED_MODEL = "agent37/default"
 PORT = 4373 if os.environ.get("AGENT37_GATEWAY_PORT") == "3773" else 3773
 HOST = os.environ.get("T3_AGENT37_BIND", "0.0.0.0")
 DESCRIPTOR = f"http://127.0.0.1:{PORT}/.well-known/t3/environment"
+
+
+def select_runtime(entrypoint, image_versions, fallback):
+    if entrypoint.is_symlink():
+        binary = entrypoint.readlink()
+        runtime = binary.parent
+        if (binary.name == "t3" and runtime.parent == image_versions
+                and (runtime / ".verified").is_file() and binary.is_file()):
+            return runtime
+    return fallback
+
+
+RUNTIME = select_runtime(Path("/usr/local/bin/t3"), Path("/opt/t3-agent37/versions"),
+                         ROOT / "versions" / FALLBACK_VERSION)
+VERSION = RUNTIME.name
+T3 = RUNTIME / "t3"
 
 
 def unpack_runtime(package, destination):

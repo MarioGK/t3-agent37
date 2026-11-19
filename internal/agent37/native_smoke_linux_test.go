@@ -23,7 +23,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-const smokeT3Version = "0.1.11-nightly.20261118.4903"
+const smokeT3Version = "0.1.11-nightly.20261119.4954"
 
 func TestNativeT3Smoke(t *testing.T) {
 	if os.Getenv("T3_AGENT37_NATIVE_SMOKE") != "1" {
@@ -228,9 +228,9 @@ func nativeSmokeBinary(t *testing.T, ctx context.Context, root string) string {
 	var arch, checksum string
 	switch runtime.GOARCH {
 	case "amd64":
-		arch, checksum = "x64", "d7450450c9f71c6daac7fb1ec0d5b22fd7e2365f9e124c730fd5d3dc3e3e1d2a"
+		arch, checksum = "x64", "ad94394d27733b75e000deefefbfefe187e61366ea18b0df8ffb549d3bb2966d"
 	case "arm64":
-		arch, checksum = "arm64", "3b35b94c96098bdd4282536c7f8ca18447593b8c00af6cf7bfcc2e16be155ceb"
+		arch, checksum = "arm64", "9f6bbfc997f5ccb1de91dd062d9894f608feced8695183c17befa8f395d384cd"
 	default:
 		t.Skipf("no pinned Linux T3 binary for %s", runtime.GOARCH)
 	}
