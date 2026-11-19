@@ -1,7 +1,9 @@
 # TerraScale Agent37 template
 
-Run `t3-agent37 setup` and choose `terrascale-agent37@3` if your Agent37
-workspace has access. You can also [publish your own copy](#publish-the-template).
+Use t3-agent37 0.2.17 or later. Run `t3-agent37 setup` and choose
+`terrascale-agent37@4` if your workspace has access. This revision
+includes T3 Code `0.1.11-nightly.20261119.4954`.
+You can also [publish your own copy](#publish-the-template).
 Choose CLIProxy as the model provider, or use Automatic with the TerraScale
 template. For Tailscale, define `tag:agent37` in your tailnet policy and grant your
 T3 clients access to that tag on TCP 443. Setup opens **Trust credentials**.
@@ -13,7 +15,7 @@ tailnet DNS settings. [Trust credentials](https://console.tailscale.com/admin/se
 
 ```sh
 t3-agent37 setup --verify
-t3-agent37 create terrascale-dev --template terrascale-agent37@3 --yes
+t3-agent37 create terrascale-dev --template terrascale-agent37@4 --yes
 ```
 
 You can supply these variables from your secret store on the workstation.
