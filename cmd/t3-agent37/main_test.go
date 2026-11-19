@@ -52,6 +52,17 @@ func TestFlagsCanFollowName(t *testing.T) {
 	}
 }
 
+func TestLsUsesListCommand(t *testing.T) {
+	var output bytes.Buffer
+	opts, err := parse([]string{"ls"}, &output)
+	if err != nil || opts.action != "list" {
+		t.Fatalf("ls = %+v, %v", opts, err)
+	}
+	if _, err := parse([]string{"ls", "dev"}, &output); err == nil {
+		t.Fatal("ls accepted a sandbox name")
+	}
+}
+
 func TestCreateWithoutName(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	state := filepath.Join(t.TempDir(), "new-state")

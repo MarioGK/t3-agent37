@@ -39,7 +39,7 @@ type options struct {
 
 func parse(args []string, output io.Writer) (options, error) {
 	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" || args[0] == "help" {
-		fmt.Fprintln(output, "Usage: t3-agent37 <create|list|up|down|connect|prepare|terminal> [name] [flags]\n       t3-agent37 --version")
+		fmt.Fprintln(output, "Usage: t3-agent37 <create|list|ls|up|down|connect|prepare|terminal> [name] [flags]\n       t3-agent37 --version")
 		return options{}, flag.ErrHelp
 	}
 	if len(args) == 1 && (args[0] == "--version" || args[0] == "version") {
@@ -50,6 +50,8 @@ func parse(args []string, output io.Writer) (options, error) {
 	switch opts.action {
 	case "down":
 		opts.action = "stop"
+	case "ls":
+		opts.action = "list"
 	case "create", "up", "connect", "start", "stop", "prepare", "terminal", "list":
 	default:
 		return opts, fmt.Errorf("unknown command %q", opts.action)
@@ -57,6 +59,10 @@ func parse(args []string, output io.Writer) (options, error) {
 	flags := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	flags.SetOutput(output)
 	flags.Usage = func() {
+		if opts.action == "list" {
+			fmt.Fprintf(output, "Usage: t3-agent37 %s\nList managed Agent37 sandboxes.\n", args[0])
+			return
+		}
 		fmt.Fprintf(output, "Usage: t3-agent37 %s [name] [flags]\n", args[0])
 		if opts.action == "create" {
 			fmt.Fprintln(output, "Omit the name to use the next numbered name.")
@@ -423,9 +429,9 @@ func run(ctx context.Context, args []string, output, diagnostic io.Writer) error
 		}
 		return jsonOutput(output, createPayload(opts, nil), true)
 	}
-	key := os.Getenv("AGENT37_API_KEY")
-	if key == "" {
-		return errors.New("load AGENT37_API_KEY into the environment")
+	key, err := agent37APIKey()
+	if err != nil {
+		return err
 	}
 	client := agent37.New(key)
 	if opts.action == "list" {

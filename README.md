@@ -14,11 +14,13 @@ Windows PowerShell
 irm https://raw.githubusercontent.com/MarioGK/t3-agent37/main/install.ps1 | iex
 ```
 
-Set `AGENT37_API_KEY`. Run `up` to create a sandbox with the next numbered
-name and open T3 pairing. Use the printed name to stop or resume the sandbox.
+Set `AGENT37_API_KEY` or use the key saved by `agent37 ssh setup` in
+`~/.config/agent37/config.json`. Run `up` to create a sandbox with the next
+numbered name and open T3 pairing.
 
 ```sh
 t3-agent37 up
+t3-agent37 ls
 t3-agent37 down agent-1
 t3-agent37 up agent-1
 t3-agent37 connect agent-1
