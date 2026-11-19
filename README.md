@@ -13,8 +13,8 @@ supports macOS.
 Download the wheel from the private GitHub release and install it with uv:
 
 ```bash
-gh release download v0.1.0 --repo MarioGK/t3-agent37 --pattern '*.whl'
-uv tool install ./t3_agent37-0.1.0-py3-none-any.whl
+gh release download v0.1.1 --repo MarioGK/t3-agent37 --pattern '*.whl'
+uv tool install ./t3_agent37-0.1.1-py3-none-any.whl
 t3-agent37 --version
 ```
 
@@ -83,7 +83,7 @@ Stop the relay with Ctrl+C. To pause compute after work has finished, run
 `t3-agent37 down terrascale-pilot`. The Agent37 disk continues to accrue
 storage charges. Review active threads before stopping the instance.
 
-Version 0.1.0 uses explicit start and stop. Wake-on-send and cached
+Version 0.1.1 uses explicit start and stop. Wake-on-send and cached
 threads during sleep are follow-up milestones. Native T3 pairing remains
 in place, and the relay uses only loopback and Agent37's protected HTTPS
 and WebSocket endpoint.

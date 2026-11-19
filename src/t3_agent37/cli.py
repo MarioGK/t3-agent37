@@ -3,7 +3,6 @@
 import argparse
 import asyncio
 import base64
-import hashlib
 from importlib.metadata import version
 import json
 import os
@@ -15,6 +14,8 @@ import socket
 import sqlite3
 import subprocess
 import sys
+import time
+from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit
 from urllib.request import Request
 
@@ -112,15 +113,37 @@ def setup(client, instance, provider):
         f"python3 -c {shlex.quote(install)} {encoded} "
         f'&& python3 "$HOME/.local/share/t3-agent37/remote.py" setup {provider}'
     )
-    build = hashlib.sha256(script).hexdigest()[:16]
-    proof = json.loads(client.exec(instance, command, name=f"t3-setup-{provider}-{build}"))
+    # Bootstrap is idempotent. Run it again after a restart so an Agent37
+    # cached exec response cannot claim that the previous process is ready.
+    proof = json.loads(client.exec(instance, command))
+    if not proof.get("environmentId"):
+        raise Agent37Error("Sandbox setup did not return a T3 environment ID")
+    return wait_for_t3(client, instance, expected=proof["environmentId"])
+
+
+def wait_for_t3(client, instance, *, expected=None, timeout=45):
     origin = protected_origin(instance)
     request = Request(origin + "/.well-known/t3/environment", headers={"X-Agent37-Key": client.key})
-    with client.opener.open(request, timeout=15) as response:
-        visible = json.load(response)
-    if not proof.get("environmentId") or visible.get("environmentId") != proof["environmentId"]:
-        raise Agent37Error("Protected T3 endpoint returned a different environment")
-    return proof
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            with client.opener.open(request, timeout=5) as response:
+                visible = json.load(response)
+        except HTTPError as error:
+            status = error.code
+            error.close()
+            if status not in {404, 409, 425, 429, 502, 503, 504}:
+                raise Agent37Error(f"Protected T3 endpoint returned HTTP {status}", status) from None
+        except (URLError, TimeoutError):
+            pass
+        else:
+            identity = visible.get("environmentId")
+            if not identity or (expected and identity != expected):
+                raise Agent37Error("Protected T3 endpoint returned a different environment")
+            return visible
+        if time.monotonic() >= deadline:
+            raise Agent37Error("Protected T3 endpoint did not become ready. Check instance status and retry.")
+        time.sleep(1)
 
 
 def port_available(port):
@@ -256,6 +279,10 @@ def main(argv=None):
                 client.lifecycle(identifier, "start")
             proof = setup(client, identifier, args.provider)
             print(f"Cloud T3 ready ({identifier}, {proof['environmentId']}).", flush=True)
+        else:
+            if instance["status"] == "stopped":
+                raise Agent37Error("The sandbox is stopped. Run t3-agent37 up first.")
+            wait_for_t3(client, identifier)
         pairing = pair_link(client, identifier, port) if args.action == "create" or args.pair else None
         asyncio.run(serve(client, identifier, port, pairing))
     except KeyboardInterrupt:

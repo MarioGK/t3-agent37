@@ -41,7 +41,16 @@ async def pair_through_relay(origin, identifier, credential):
         }
         async with client.post(server.make_url("/oauth/token"), headers=headers, data=data) as result:
             assert result.status == 200, result.status
-            assert (await result.json())["access_token"]
+            session = (await result.json())["access_token"]
+        async with client.post(server.make_url("/api/auth/websocket-ticket/rpc"),
+                               headers={**headers, "Authorization": f"Bearer {session}"}) as result:
+            assert result.status == 200, result.status
+            ticket = (await result.json())["ticket"]
+        async with client.ws_connect(server.make_url("/ws"), headers=headers,
+                                     params={"orchestrationProtocol": "2", "wsTicket": ticket}) as websocket:
+            await websocket.send_json({"_tag": "Ping"})
+            response = await websocket.receive_json(timeout=10)
+            assert response.get("_tag") == "Pong"
 
 
 def main():

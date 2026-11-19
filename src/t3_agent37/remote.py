@@ -109,7 +109,9 @@ def setup(provider):
         if provider not in {"codex", "claude", "opencode"} or shutil.which(provider) is None:
             raise RuntimeError("The selected provider CLI must be installed on PATH")
         install_hook()
-        boot()
+        result = descriptor()
+        if result is None:
+            boot()
         for _ in range(60):
             result = descriptor()
             if result is not None:

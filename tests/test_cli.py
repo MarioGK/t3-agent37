@@ -86,3 +86,31 @@ def test_provider_chooses_matching_agent_template(monkeypatch, capsys):
     output = json.loads(capsys.readouterr().out)
     assert output["template"] == "agent37-opencode"
     assert output["metadata"]["provider"] == "opencode"
+
+
+def test_protected_endpoint_retries_after_start(monkeypatch):
+    from io import BytesIO
+    from urllib.error import HTTPError
+
+    from t3_agent37.cli import wait_for_t3
+
+    client = Mock(key="placeholder")
+    client.opener.open.side_effect = [
+        HTTPError("", 404, "Starting", None, BytesIO()),
+        HTTPError("", 502, "Not ready", None, BytesIO()),
+        BytesIO(b'{"environmentId":"stable"}'),
+    ]
+    monkeypatch.setattr("t3_agent37.cli.time.sleep", lambda seconds: None)
+    assert wait_for_t3(client, "ab12cd34ef", expected="stable")["environmentId"] == "stable"
+    assert client.opener.open.call_count == 3
+
+
+def test_protected_endpoint_rejects_mismatched_identity():
+    from io import BytesIO
+
+    from t3_agent37.cli import wait_for_t3
+
+    client = Mock(key="placeholder")
+    client.opener.open.return_value = BytesIO(b'{"environmentId":"other"}')
+    with pytest.raises(Agent37Error, match="different environment"):
+        wait_for_t3(client, "ab12cd34ef", expected="stable")
