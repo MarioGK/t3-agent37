@@ -3,12 +3,11 @@ package main
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
-	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -44,12 +43,12 @@ func TestTerraScaleDryRunWithNoCredentials(t *testing.T) {
 
 func TestFlagsCanFollowName(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	opts, err := parse([]string{"create", "dev", "--template", "terrascale-agent37@3", "--no-tailscale", "--yes"}, &bytes.Buffer{})
-	if err != nil || opts.name != "dev" || opts.generatedName || opts.tailscale || opts.provider != "cliproxy" || !opts.yes {
+	opts, err := parse([]string{"create", "dev", "--template", "terrascale-agent37@3", "--tailscale", "--yes"}, &bytes.Buffer{})
+	if err != nil || opts.name != "dev" || opts.generatedName || !opts.tailscale || opts.provider != "cliproxy" || !opts.yes {
 		t.Fatalf("unexpected options: %+v, %v", opts, err)
 	}
-	opts, err = parse([]string{"connect", "--port", "49373", "dev", "--pair"}, &bytes.Buffer{})
-	if err != nil || opts.port != 49373 || !opts.pair {
+	opts, err = parse([]string{"connect", "dev", "--pair"}, &bytes.Buffer{})
+	if err != nil || !opts.pair {
 		t.Fatalf("unexpected connect options: %+v, %v", opts, err)
 	}
 }
@@ -70,7 +69,7 @@ func TestCreateWithoutName(t *testing.T) {
 	state := filepath.Join(t.TempDir(), "new-state")
 	t.Setenv("XDG_STATE_HOME", state)
 	var output bytes.Buffer
-	if err := run(context.Background(), []string{"create", "--dry-run"}, &output, &output); err != nil {
+	if err := run(context.Background(), []string{"create", "--template", "terrascale-agent37@3", "--dry-run"}, &output, &output); err != nil {
 		t.Fatal(err)
 	}
 	var payload struct {
@@ -91,12 +90,34 @@ func TestCreateWithoutName(t *testing.T) {
 	}
 }
 
+func TestProvisioningRequiresTailnetBeforeCreatingState(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", filepath.Join(t.TempDir(), "new-state"))
+	t.Setenv("T3_AGENT37_TAILSCALE_CLIENT_ID", "")
+	t.Setenv("T3_AGENT37_TAILSCALE_CLIENT_SECRET", "")
+	var output bytes.Buffer
+	_, err := parse([]string{"up", "--template", "terrascale-agent37@3", "--no-tailscale"}, &output)
+	if err == nil || !strings.Contains(err.Error(), "Tailscale is required") {
+		t.Fatalf("up accepted a loopback fallback: %v", err)
+	}
+	err = run(context.Background(), []string{"up", "--template", "terrascale-agent37@3"}, &output, &output)
+	if err == nil || !strings.Contains(err.Error(), "Tailscale enrollment requires") {
+		t.Fatalf("up accepted missing enrollment credentials: %v", err)
+	}
+	if _, err := os.Stat(os.Getenv("XDG_STATE_HOME")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("up reserved state before it found the credential: %v", err)
+	}
+	if _, err := pairLink(context.Background(), nil, "aaaaaaaaaa", "http://127.0.0.1:43738"); err == nil {
+		t.Fatal("pairing accepted a loopback origin")
+	}
+}
+
 func TestUpWithoutNameCreatesAndNamedUpStarts(t *testing.T) {
 	t.Setenv("AGENT37_API_KEY", "")
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	var output bytes.Buffer
-	opts, err := parse([]string{"up"}, &output)
+	opts, err := parse([]string{"up", "--template", "terrascale-agent37@3"}, &output)
 	if err != nil || opts.action != "create" || !opts.generatedName || !opts.yes || opts.dryRun {
 		t.Fatalf("bare up = %+v, %v", opts, err)
 	}
@@ -107,7 +128,7 @@ func TestUpWithoutNameCreatesAndNamedUpStarts(t *testing.T) {
 	if _, err := parse([]string{"up", "dev", "--dry-run"}, &output); err == nil {
 		t.Fatal("named up accepted a provisioning flag")
 	}
-	if err := run(context.Background(), []string{"up", "--dry-run", "--template", "terrascale-agent37@3", "--no-tailscale"}, &output, &output); err != nil {
+	if err := run(context.Background(), []string{"up", "--dry-run", "--template", "terrascale-agent37@3", "--tailscale"}, &output, &output); err != nil {
 		t.Fatal(err)
 	}
 	var payload struct {
@@ -119,7 +140,7 @@ func TestUpWithoutNameCreatesAndNamedUpStarts(t *testing.T) {
 		t.Fatal(err)
 	}
 	if payload.Name != "agent-1" || payload.Template != "terrascale-agent37@3" ||
-		payload.Metadata["provider"] != "cliproxy" || payload.Metadata["tailnet"] != "" {
+		payload.Metadata["provider"] != "cliproxy" || payload.Metadata["tailnet"] != "tailscale" {
 		t.Fatalf("unexpected up preview: %+v", payload)
 	}
 }
@@ -133,45 +154,5 @@ func TestDeleteRequiresExplicitConfirmation(t *testing.T) {
 	opts, err := parse([]string{"down", "dev", "--delete", "--yes"}, &bytes.Buffer{})
 	if err != nil || opts.action != "stop" || !opts.deleteSandbox {
 		t.Fatalf("unexpected delete options: %+v, %v", opts, err)
-	}
-}
-
-func TestRetainsExistingSQLiteRelayPorts(t *testing.T) {
-	state := t.TempDir()
-	db, err := sql.Open("sqlite", filepath.Join(state, "ports.sqlite3"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec("CREATE TABLE ports (instance TEXT PRIMARY KEY, port INTEGER UNIQUE)"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec("INSERT INTO ports VALUES (?, ?)", "ab12cd34ef", 45123); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-	ctx := context.Background()
-	if port, err := assignedPort(ctx, state, "ab12cd34ef", 0); err != nil || port != 45123 {
-		t.Fatalf("upgraded relay returned %d, %v", port, err)
-	}
-
-	listener, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	requested := listener.Addr().(*net.TCPAddr).Port
-	listener.Close()
-	if port, err := assignedPort(ctx, state, "bc23de45fg", requested); err != nil || port != requested {
-		t.Fatalf("second relay returned %d, %v", port, err)
-	}
-	if _, err := assignedPort(ctx, state, "zz12cd34ef", requested); err == nil {
-		t.Fatal("two sandboxes reserved the same relay port")
-	}
-	if err := releasePort(ctx, state, "bc23de45fg"); err != nil {
-		t.Fatal(err)
-	}
-	if port, err := assignedPort(ctx, state, "zz12cd34ef", requested); err != nil || port != requested {
-		t.Fatalf("released relay port returned %d, %v", port, err)
 	}
 }

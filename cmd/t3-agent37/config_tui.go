@@ -20,13 +20,6 @@ func editConfig(ctx context.Context, output io.Writer) error {
 		return err
 	}
 	values := &file.values
-	tailscale := "auto"
-	if values.Tailscale != nil {
-		tailscale = "off"
-		if *values.Tailscale {
-			tailscale = "on"
-		}
-	}
 	var save bool
 	form := huh.NewForm(
 		huh.NewGroup(
@@ -37,7 +30,7 @@ func editConfig(ctx context.Context, output io.Writer) error {
 				Validate(validateNamePrefix),
 			huh.NewInput().
 				Title("Agent37 template").
-				Description("Use name@revision to pin it, or leave blank for the provider default.").
+				Description("Use a template with Tailscale installed. Add @revision to pin it.").
 				Placeholder("terrascale-agent37@3").
 				Value(&values.Template),
 		),
@@ -52,15 +45,6 @@ func editConfig(ctx context.Context, output io.Writer) error {
 					huh.NewOption("Claude Code", "claude"),
 				).
 				Value(&values.Provider),
-			huh.NewSelect[string]().
-				Title("Tailscale enrollment").
-				Description("Automatic enrolls TerraScale sandboxes. Enrollment requires OAuth credentials.").
-				Options(
-					huh.NewOption("Automatic", "auto"),
-					huh.NewOption("On", "on"),
-					huh.NewOption("Off", "off"),
-				).
-				Value(&tailscale),
 		),
 		huh.NewGroup(
 			huh.NewConfirm().
@@ -80,10 +64,6 @@ func editConfig(ctx context.Context, output io.Writer) error {
 	}
 	values.Template = strings.TrimSpace(values.Template)
 	values.Tailscale = nil
-	if tailscale != "auto" {
-		enabled := tailscale == "on"
-		values.Tailscale = &enabled
-	}
 	if err := file.save(ctx); err != nil {
 		return err
 	}

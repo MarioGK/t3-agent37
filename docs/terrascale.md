@@ -14,18 +14,21 @@ Supply these variables from your secret store on the workstation.
 | `T3_AGENT37_CLIPROXY_KEY` | CLIProxy client API key |
 | `T3_AGENT37_TAILSCALE_CLIENT_ID`, `T3_AGENT37_TAILSCALE_CLIENT_SECRET` | OAuth client with `auth_keys` write access for `tag:agent37` |
 
+The CLI also reads these keys from an owner-only `runtime.json` beside
+`config.json`. Environment variables take precedence.
+
 T3 loads the CLIProxy text model catalog and defaults to `cliproxy/glm-5.3`.
 Set `T3_AGENT37_CLIPROXY_MODEL` before `create` to pick another model ID.
 Run `t3-agent37 prepare terrascale-dev` to refresh the catalog.
 
-`create` and `up` enroll the sandbox with a single-use ephemeral Tailscale key.
+`create` and `up` enroll the sandbox with a single-use ephemeral Tailscale key
+and serve T3 at its private `https://<hostname>.<tailnet>.ts.net` address.
+`connect <name> --pair` prints a pairing link for that address.
 `down` logs out the device before deleting the newest managed sandbox.
 `down <name>` logs out the device and stops that sandbox. Inside the sandbox, use
-`socks5h://127.0.0.1:1055` to reach tailnet services. T3 uses the local relay.
-Use `--no-tailscale` on `create` for a CLIProxy-only sandbox.
-
-Run `t3-agent37 config` to set the default template and Tailscale enrollment
-for new sandboxes. Load the credentials above before provisioning.
+`socks5h://127.0.0.1:1055` to reach tailnet services.
+Run `t3-agent37 config` to set a Tailscale-ready default template.
+Enrollment credentials are required before provisioning starts.
 
 ```json
 {"name_prefix": "terra", "template": "terrascale-agent37@3", "tailscale": true}
@@ -46,7 +49,8 @@ Use the environment ID from `/.well-known/t3/environment` on each peer and
 an SSH alias that reaches the T3 owner. Each server must have Linked
 Environments enabled. The sandbox joins with private Tailscale HTTPS Serve.
 The CLI adds both directions with approval-required access and reuses
-reachable links. Set `T3_AGENT37_PEERS_FILE` to an empty string to skip sync.
+reachable links without opening the desktop app. Set `T3_AGENT37_PEERS_FILE`
+to an empty string to skip sync.
 
 The image includes T3, OpenCode, Codex, Tailscale, .NET 10 and 11, Go 1.27.4,
 Rust 1.99.1 with rustfmt and Clippy, Python 3.12 with uv, and Node 24 with

@@ -207,7 +207,7 @@ func readJSON(body io.Reader, result any) error {
 	return json.Unmarshal(data, result)
 }
 
-func (p peerAPI) verify(ctx context.Context, attempts int) error {
+func (p peerAPI) verify(ctx context.Context, attempts int, requirePeerLinks bool) error {
 	type descriptor struct {
 		EnvironmentID string `json:"environmentId"`
 		Capabilities  struct {
@@ -238,10 +238,25 @@ func (p peerAPI) verify(ctx context.Context, attempts int) error {
 		return fmt.Errorf("T3 environment identity changed for %s", p.name)
 	}
 	capabilities := row.Capabilities
-	if !capabilities.PeerLinks || !capabilities.LinkFence || !capabilities.MCPModeLimitHeader || !capabilities.PeerLinkPairingCodes {
+	if requirePeerLinks && (!capabilities.PeerLinks || !capabilities.LinkFence || !capabilities.MCPModeLimitHeader || !capabilities.PeerLinkPairingCodes) {
 		return fmt.Errorf("%s does not support scoped T3 peer links", p.name)
 	}
 	return nil
+}
+
+// VerifyTailnet checks that the private address serves the expected sandbox.
+func VerifyTailnet(ctx context.Context, name, environmentID, address string) (string, error) {
+	origin, err := privateOrigin(address)
+	if err != nil {
+		return "", err
+	}
+	client := newHTTPClient(5 * time.Second)
+	defer client.CloseIdleConnections()
+	target := newPeerAPI(client, name, origin, environmentID, "")
+	if err := target.verify(ctx, 6, false); err != nil {
+		return "", err
+	}
+	return origin, nil
 }
 
 func (p peerAPI) rpc(ctx context.Context, token, method string, payload, result any) error {
@@ -402,10 +417,10 @@ func Sync(ctx context.Context, configured []Peer, name, sandboxID, privateURL, p
 
 	cloud := newPeerAPI(client, name, protectedURL, sandboxID, agent37Key)
 	private := newPeerAPI(client, name, privateURL, sandboxID, "")
-	if err := cloud.verify(ctx, 1); err != nil {
+	if err := cloud.verify(ctx, 1, true); err != nil {
 		return err
 	}
-	if err := private.verify(ctx, 6); err != nil {
+	if err := private.verify(ctx, 6, true); err != nil {
 		return err
 	}
 	var failures []string
@@ -422,7 +437,7 @@ func Sync(ctx context.Context, configured []Peer, name, sandboxID, privateURL, p
 }
 
 func syncPeer(ctx context.Context, cloud peerAPI, cloudToken string, target peerAPI, peer Peer, privateURL string) error {
-	if err := target.verify(ctx, 1); err != nil {
+	if err := target.verify(ctx, 1, true); err != nil {
 		return err
 	}
 	token, err := issueOverSSH(ctx, peer)

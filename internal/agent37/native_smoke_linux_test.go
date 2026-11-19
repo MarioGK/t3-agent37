@@ -10,7 +10,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/http/httptest"
 	"net/url"
 	"os"
 	"os/exec"
@@ -26,9 +25,9 @@ import (
 
 const smokeT3Version = "0.1.11-nightly.20261118.4903"
 
-func TestNativeT3RelaySmoke(t *testing.T) {
+func TestNativeT3Smoke(t *testing.T) {
 	if os.Getenv("T3_AGENT37_NATIVE_SMOKE") != "1" {
-		t.Skip("set T3_AGENT37_NATIVE_SMOKE=1 to run the native T3 relay smoke test")
+		t.Skip("set T3_AGENT37_NATIVE_SMOKE=1 to test the native T3 server")
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 120*time.Second)
 	defer cancel()
@@ -115,25 +114,6 @@ func TestNativeT3RelaySmoke(t *testing.T) {
 	}
 
 	origin, upstream, stop := start()
-	relay := httptest.NewUnstartedServer(nil)
-	defer relay.Close()
-	handler, err := RelayHandler(origin, "fixture-only", relay.Listener.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	relay.Config.Handler = handler
-	relay.Start()
-	var downstream Descriptor
-	if err = nativeSmokeJSON(ctx, client, http.MethodGet, relay.URL+"/.well-known/t3/environment", nil, "", &downstream); err != nil {
-		t.Fatalf("discover T3 through relay: %v", err)
-	}
-	if upstream.EnvironmentID != downstream.EnvironmentID {
-		t.Fatal("T3 environment identity changed through relay")
-	}
-	if upstream.Capabilities["accessTokenRenewal"] == true && downstream.Capabilities["accessTokenRenewal"] != false {
-		t.Fatal("the loopback relay advertised URL-bound token renewal")
-	}
-
 	pairCtx, pairCancel := context.WithTimeout(ctx, 15*time.Second)
 	defer pairCancel()
 	pair := exec.CommandContext(pairCtx, binary, "auth", "pairing", "create", "--base-dir", base, "--ttl", "5m", "--label", "smoke", "--json")
@@ -157,26 +137,26 @@ func TestNativeT3RelaySmoke(t *testing.T) {
 	var token struct {
 		Access string `json:"access_token"`
 	}
-	if err = nativeSmokeJSON(ctx, client, http.MethodPost, relay.URL+"/oauth/token", form, "", &token); err != nil || token.Access == "" {
-		t.Fatalf("exchange T3 pairing credential through relay: %v", err)
+	if err = nativeSmokeJSON(ctx, client, http.MethodPost, origin+"/oauth/token", form, "", &token); err != nil || token.Access == "" {
+		t.Fatalf("exchange T3 pairing credential: %v", err)
 	}
 	var auth struct {
 		Ticket string `json:"ticket"`
 	}
-	if err = nativeSmokeJSON(ctx, client, http.MethodPost, relay.URL+"/api/auth/websocket-ticket/rpc", nil, token.Access, &auth); err != nil || auth.Ticket == "" {
-		t.Fatalf("mint native T3 WebSocket ticket through relay: %v", err)
+	if err = nativeSmokeJSON(ctx, client, http.MethodPost, origin+"/api/auth/websocket-ticket/rpc", nil, token.Access, &auth); err != nil || auth.Ticket == "" {
+		t.Fatalf("mint native T3 WebSocket ticket: %v", err)
 	}
 
 	query := url.Values{"orchestrationProtocol": {"2"}, "wsTicket": {auth.Ticket}}
-	endpoint := "ws" + strings.TrimPrefix(relay.URL, "http") + "/ws?" + query.Encode()
+	endpoint := "ws" + strings.TrimPrefix(origin, "http") + "/ws?" + query.Encode()
 	dialer := websocket.Dialer{HandshakeTimeout: 5 * time.Second}
 	conn, response, err := dialer.DialContext(ctx, endpoint, http.Header{"Origin": {"t3code://app"}})
 	if err != nil {
 		if response != nil {
 			response.Body.Close()
-			t.Fatalf("upgrade native T3 WebSocket through relay: HTTP %d", response.StatusCode)
+			t.Fatalf("upgrade native T3 WebSocket: HTTP %d", response.StatusCode)
 		}
-		t.Fatal("could not upgrade native T3 WebSocket through relay")
+		t.Fatal("could not upgrade native T3 WebSocket")
 	}
 	defer conn.Close()
 	connectionDeadline := time.Now().Add(5 * time.Second)
@@ -193,7 +173,7 @@ func TestNativeT3RelaySmoke(t *testing.T) {
 		Tag string `json:"_tag"`
 	}
 	if err = conn.ReadJSON(&pong); err != nil || pong.Tag != "Pong" {
-		t.Fatalf("read native T3 Pong through relay: %v", err)
+		t.Fatalf("read native T3 Pong: %v", err)
 	}
 	if err := conn.Close(); err != nil {
 		t.Fatal(err)

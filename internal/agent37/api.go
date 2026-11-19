@@ -1,4 +1,4 @@
-// Package agent37 provides Agent37 Cloud API operations and a loopback-only T3 relay.
+// Package agent37 provides Agent37 Cloud API operations.
 package agent37
 
 import (

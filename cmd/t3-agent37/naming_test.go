@@ -47,8 +47,8 @@ func TestUpUsesTailnetDefaultsFromConfig(t *testing.T) {
 	if err != nil || opts.namePrefix != "terra" || opts.template != "terrascale-agent37@3" || opts.provider != "cliproxy" || !opts.tailscale {
 		t.Fatalf("configured up = %+v, %v", opts, err)
 	}
-	opts, err = parse([]string{"up", "--template", "agent37-opencode", "--no-tailscale"}, os.Stderr)
-	if err != nil || opts.template != "agent37-opencode" || opts.tailscale {
+	opts, err = parse([]string{"up", "--template", "agent37-opencode"}, os.Stderr)
+	if err != nil || opts.template != "agent37-opencode" || !opts.tailscale {
 		t.Fatalf("up with explicit overrides = %+v, %v", opts, err)
 	}
 }

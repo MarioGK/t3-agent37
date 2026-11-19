@@ -51,8 +51,8 @@ func TestSaveDefaultsAndApplyProvisioningOverrides(t *testing.T) {
 	if err != nil || opts.template != "terrascale-agent37@3" || opts.provider != "opencode" || !opts.tailscale {
 		t.Fatalf("named provisioning defaults = %+v, %v", opts, err)
 	}
-	opts, err = parse([]string{"up", "--template", "agent37-codex", "--provider", "codex", "--no-tailscale"}, io.Discard)
-	if err != nil || opts.namePrefix != "terra" || opts.template != "agent37-codex" || opts.provider != "codex" || opts.tailscale {
+	opts, err = parse([]string{"up", "--template", "agent37-codex", "--provider", "codex"}, io.Discard)
+	if err != nil || opts.namePrefix != "terra" || opts.template != "agent37-codex" || opts.provider != "codex" || !opts.tailscale {
 		t.Fatalf("explicit provisioning overrides = %+v, %v", opts, err)
 	}
 	if err := file.save(ctx); err == nil || !strings.Contains(err.Error(), "config changed") {

@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/MarioGK/t3-agent37/internal/agent37"
+	_ "modernc.org/sqlite"
 )
 
 const (

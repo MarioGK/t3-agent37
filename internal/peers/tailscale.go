@@ -7,23 +7,11 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"time"
 )
 
 const tailscaleAPI = "https://api.tailscale.com/api/v2"
-
-// TailscaleCredentials returns the workstation OAuth credentials for ephemeral enrollment.
-func TailscaleCredentials() (id, secret string, err error) {
-	const clientID = "T3_AGENT37_TAILSCALE_CLIENT_ID"
-	const clientSecret = "T3_AGENT37_TAILSCALE_CLIENT_SECRET"
-	id, secret = os.Getenv(clientID), os.Getenv(clientSecret)
-	if id == "" || secret == "" {
-		return "", "", fmt.Errorf("load %s and %s for Tailscale enrollment", clientID, clientSecret)
-	}
-	return id, secret, nil
-}
 
 // EnrollmentKey mints a one-use, preauthorized ephemeral key restricted to the Agent37 tag.
 func EnrollmentKey(ctx context.Context, clientID, clientSecret string) (string, error) {

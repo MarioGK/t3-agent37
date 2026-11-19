@@ -16,8 +16,10 @@ irm https://raw.githubusercontent.com/MarioGK/t3-agent37/main/install.ps1 | iex
 
 Set `AGENT37_API_KEY` or use the key saved by `agent37 ssh setup` in
 `~/.config/agent37/config.json`. Run `up` to create a sandbox with the next
-numbered name and open T3 pairing.
-T3 Code asks for confirmation the first time you add a sandbox.
+numbered name. Configure a Tailscale-ready template and enrollment credentials
+first. Sandboxes use their private Tailscale HTTPS DNS name.
+For a separate desktop connection, `connect <name> --pair` prints a link.
+T3 Code asks for confirmation when adding that connection.
 
 ```sh
 t3-agent37 up
@@ -33,10 +35,10 @@ t3-agent37 connect agent-1
 `down <name>` stops a specific sandbox and keeps its disk.
 `delete` opens a terminal picker. Use the arrow keys to select a sandbox and
 confirm before deleting its disk. For scripts, use `delete <name>`. Add
-`--dry-run` to preview. `connect` reopens the local relay.
+`--dry-run` to preview. `connect` prints the verified Tailscale address.
 
-Run `t3-agent37 config` to edit the name prefix, default template, provider,
-and Tailscale enrollment. The editor works offline. Provisioning flags override
+Run `t3-agent37 config` to edit the name prefix, default template, and provider.
+The editor works offline. Provisioning flags override
 the saved defaults. Settings are stored in `~/.config/t3-agent37/config.json` (Windows uses
 `%APPDATA%\t3-agent37\config.json`). The prefix accepts 1 to 33 lowercase
 letters, digits, or hyphens and must start and end with a letter or digit.

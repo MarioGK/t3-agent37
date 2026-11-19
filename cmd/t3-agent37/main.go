@@ -24,16 +24,14 @@ const owner = "t3-agent37"
 
 var version = "dev"
 var namePattern = regexp.MustCompile("^[a-z0-9][a-z0-9-]{0,42}$")
-var templates = map[string]string{
-	"codex": "agent37-codex", "claude": "agent37-claude-code",
-	"opencode": "agent37-opencode", "cliproxy": "agent37-opencode",
+var providers = map[string]struct{}{
+	"codex": {}, "claude": {}, "opencode": {}, "cliproxy": {},
 }
 
 type options struct {
 	action, name, provider, template string
 	namePrefix                       string
 	targetID                         string
-	port                             int
 	yes, dryRun, pair, tailscale     bool
 	deleteSandbox                    bool
 	generatedName                    bool
@@ -81,7 +79,7 @@ func parse(args []string, output io.Writer) (options, error) {
 			fmt.Fprintln(output, "Omit the name to use the next numbered name.")
 		}
 		if opts.action == "up" {
-			fmt.Fprintln(output, "Run without a name to provision a new sandbox and open T3 pairing.")
+			fmt.Fprintln(output, "Run without a name to provision a new sandbox.")
 			fmt.Fprintln(output, "Pass a sandbox name to start it.")
 		}
 		if args[0] == "down" {
@@ -99,10 +97,11 @@ func parse(args []string, output io.Writer) (options, error) {
 		flags.StringVar(&opts.template, "template", "", "Agent37 template, optionally pinned by revision")
 		flags.BoolVar(&opts.dryRun, "dry-run", false, "Print the request without using the API")
 		flags.BoolVar(&opts.tailscale, "tailscale", false, "Enroll the sandbox in Tailscale")
-		flags.BoolVar(&noTailscale, "no-tailscale", false, "Skip Tailscale enrollment")
+		flags.BoolVar(&noTailscale, "no-tailscale", false, "Disable Tailscale enrollment")
+		_ = flags.MarkHidden("no-tailscale")
 	}
 	if opts.action == "connect" {
-		flags.BoolVar(&opts.pair, "pair", false, "Open a one-time T3 pairing link")
+		flags.BoolVar(&opts.pair, "pair", false, "Print a one-time T3 pairing link")
 	}
 	if opts.action == "stop" {
 		flags.BoolVar(&opts.deleteSandbox, "delete", false, "Permanently delete the managed sandbox and its disk")
@@ -110,9 +109,6 @@ func parse(args []string, output io.Writer) (options, error) {
 	}
 	if args[0] == "down" || opts.action == "delete" {
 		flags.BoolVar(&opts.dryRun, "dry-run", false, "Show which sandbox would be deleted")
-	}
-	if opts.action == "create" || opts.action == "up" || opts.action == "connect" {
-		flags.IntVar(&opts.port, "port", 0, "Local relay port")
 	}
 	if err := flags.Parse(args[1:]); err != nil {
 		return opts, err
@@ -163,9 +159,6 @@ func parse(args []string, output io.Writer) (options, error) {
 		opts.action = "stop"
 		opts.deleteSandbox = true
 	}
-	if flags.Changed("port") && (opts.port < 1024 || opts.port > 65535) {
-		return opts, errors.New("port must be between 1024 and 65535")
-	}
 	if opts.action == "create" {
 		if opts.yes == opts.dryRun {
 			return opts, errors.New("choose exactly one of --yes and --dry-run")
@@ -188,23 +181,18 @@ func parse(args []string, output io.Writer) (options, error) {
 				opts.provider = "cliproxy"
 			}
 		}
-		template, supported := templates[opts.provider]
+		_, supported := providers[opts.provider]
 		if !supported {
 			return opts, fmt.Errorf("unknown provider %q", opts.provider)
 		}
 		if opts.template == "" {
-			opts.template = template
+			return opts, errors.New("choose a Tailscale-ready template in t3-agent37 config or with --template")
 		}
-		if flags.Changed("tailscale") && noTailscale {
-			return opts, errors.New("choose --tailscale or --no-tailscale")
+		if noTailscale || (flags.Changed("tailscale") && !opts.tailscale) ||
+			(!flags.Changed("tailscale") && config.Tailscale != nil && !*config.Tailscale) {
+			return opts, errors.New("Tailscale is required. Enable it in the workstation config")
 		}
-		if !flags.Changed("tailscale") {
-			opts.tailscale = terra
-			if config.Tailscale != nil {
-				opts.tailscale = *config.Tailscale
-			}
-			opts.tailscale = opts.tailscale && !noTailscale
-		}
+		opts.tailscale = true
 	}
 	return opts, nil
 }
@@ -244,7 +232,10 @@ func createPayload(opts options, extraEnv map[string]string) map[string]any {
 func cliproxyEnv() (map[string]string, error) {
 	result := make(map[string]string)
 	for _, name := range []string{"T3_AGENT37_CLIPROXY_URL", "T3_AGENT37_CLIPROXY_KEY"} {
-		value := os.Getenv(name)
+		value, err := runtimeCredential(name)
+		if err != nil {
+			return nil, err
+		}
 		if value == "" {
 			return nil, fmt.Errorf("load %s for CLIProxy", name)
 		}
@@ -367,11 +358,6 @@ func getOrCreate(ctx context.Context, client *agent37.Client, opts options, stat
 			return existing, err
 		}
 	}
-	if opts.tailscale {
-		if _, _, err = peers.TailscaleCredentials(); err != nil {
-			return existing, err
-		}
-	}
 	keepMarker = true // The operation may have reached Agent37 even if the reply is lost.
 	instance, err := client.Create(ctx, createPayload(opts, extra))
 	if err != nil {
@@ -391,13 +377,7 @@ func getOrCreate(ctx context.Context, client *agent37.Client, opts options, stat
 	return instance, nil
 }
 
-type relayConfig struct {
-	instance     string
-	port, remote int
-	pairing      string
-}
-
-func operate(ctx context.Context, client *agent37.Client, opts options, state string, output, diagnostic io.Writer) (*relayConfig, error) {
+func operate(ctx context.Context, client *agent37.Client, opts options, state string, output, diagnostic io.Writer) error {
 	var instance agent37.Instance
 	var configured []peers.Peer
 	var err error
@@ -405,94 +385,102 @@ func operate(ctx context.Context, client *agent37.Client, opts options, state st
 		if opts.tailscale {
 			configured, err = peers.Configured()
 			if err != nil {
-				return nil, err
+				return err
 			}
 		}
 		instance, err = getOrCreate(ctx, client, opts, state)
 	} else if opts.targetID != "" {
 		instance, err = client.Get(ctx, opts.targetID)
 		if err == nil && (instance.ID != opts.targetID || !isManaged(instance) || instance.Metadata["environment"] != opts.name) {
-			return nil, errors.New("the selected sandbox changed. Choose a target again")
+			return errors.New("the selected sandbox changed. Choose a target again")
 		}
 	} else {
 		instance, err = lookup(ctx, client, opts.name)
 	}
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if instance.ID == "" {
-		return nil, fmt.Errorf("no managed Agent37 environment named %s", opts.name)
+		return fmt.Errorf("no managed Agent37 environment named %s", opts.name)
 	}
 	if err := agent37.ValidateID(instance.ID); err != nil {
-		return nil, err
+		return err
 	}
 	tailnet := instance.Metadata["tailnet"] == "tailscale"
+	if !tailnet && (opts.action == "start" || opts.action == "connect") {
+		return errors.New("this sandbox was created without Tailscale. Create a new sandbox with a Tailscale-ready template")
+	}
 	provider := displayProvider(instance)
 	switch opts.action {
-	case "start", "stop":
-		if opts.action == "start" && tailnet {
-			configured, err = peers.Configured()
-			if err != nil {
-				return nil, err
-			}
-		}
-		instance, err = lifecycle(ctx, client, instance, opts.name, opts.action, configured, diagnostic)
+	case "start":
+		configured, err = peers.Configured()
 		if err != nil {
-			return nil, err
+			return err
+		}
+		instance, tailnetURL, err := startSandbox(ctx, client, instance, opts.name, configured, diagnostic)
+		if err != nil {
+			return err
+		}
+		row := summary(instance)
+		if tailnetURL != "" {
+			row["t3_url"] = tailnetURL
+		}
+		return jsonOutput(output, row, false)
+	case "stop":
+		instance, err = stopSandbox(ctx, client, instance, opts.name)
+		if err != nil {
+			return err
 		}
 		if opts.deleteSandbox {
 			if err := client.Delete(ctx, instance.ID); err != nil {
-				return nil, err
+				return err
 			}
 			instance.Status = "deleted"
-			if err := releasePort(ctx, state, instance.ID); err != nil {
-				fmt.Fprintf(diagnostic, "Sandbox deleted. Could not release its saved relay port: %v\n", err)
-			}
 		}
-		return nil, jsonOutput(output, summary(instance), false)
+		return jsonOutput(output, summary(instance), false)
 	case "terminal":
 		link, err := client.Terminal(ctx, instance.ID)
 		if err == nil {
 			fmt.Fprintln(output, link)
 		}
-		return nil, err
+		return err
 	case "prepare":
-		return nil, prepare(ctx, client, instance, opts.name, output, diagnostic)
+		return prepare(ctx, client, instance, opts.name, output, diagnostic)
 	}
 	if opts.action == "create" && (instance.Template != opts.template || provider != opts.provider || tailnet != opts.tailscale) {
-		return nil, errors.New("this name already uses a different template, provider, or Tailscale setting")
+		return errors.New("this name already uses a different template, provider, or Tailscale setting")
 	}
-	port, err := assignedPort(ctx, state, instance.ID, opts.port)
-	if err != nil {
-		return nil, err
-	}
-	relay := &relayConfig{instance: instance.ID, port: port}
+	var proof setupProof
 	if opts.action == "create" {
-		proof, err := prepareCreated(ctx, client, instance, opts.name, configured, diagnostic)
+		proof, err = prepareCreated(ctx, client, instance, opts.name, configured, diagnostic)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		relay.remote = proof.Port
 		fmt.Fprintf(output, "Cloud T3 ready (%s, %s).\n", instance.ID, proof.EnvironmentID)
 		if !proof.ProviderReady {
 			fmt.Fprintf(output, "%s needs sign-in. Run t3-agent37 terminal %s.\n", provider, opts.name)
 		}
 	} else {
 		if instance.Status == "stopped" {
-			return nil, errors.New("the sandbox is stopped. Run t3-agent37 up first")
+			return errors.New("the sandbox is stopped. Run t3-agent37 up first")
 		}
-		_, relay.remote, err = waitForT3(ctx, client, instance.ID, "", 0)
+		proof, err = bootstrap(ctx, client, instance, opts.name, nil, false, diagnostic)
 		if err != nil {
-			return nil, err
+			return err
 		}
 	}
-	if opts.action == "create" || opts.pair {
-		relay.pairing, err = pairLink(ctx, client, instance.ID, port)
-		if err != nil {
-			return nil, err
-		}
+	if proof.TailnetURL == "" {
+		return errors.New("Agent37 did not provide the sandbox's Tailscale address")
 	}
-	return relay, nil
+	fmt.Fprintln(output, "T3 Code on Tailscale", proof.TailnetURL)
+	if opts.pair {
+		pairing, err := pairLink(ctx, client, instance.ID, proof.TailnetURL)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(output, "Pair in T3 Code (expires in 5 minutes): %s\n", pairing)
+	}
+	return nil
 }
 
 func run(ctx context.Context, args []string, output, diagnostic io.Writer) error {
@@ -524,6 +512,11 @@ func run(ctx context.Context, args []string, output, diagnostic io.Writer) error
 	}
 	if opts.pickDelete && !terminalAvailable(diagnostic) {
 		return errors.New("interactive deletion requires a terminal. Use delete <name> to select a sandbox")
+	}
+	if opts.action == "create" {
+		if _, _, err := tailscaleCredentials(); err != nil {
+			return err
+		}
 	}
 	key, err := agent37APIKey()
 	if err != nil {
@@ -604,16 +597,13 @@ func run(ctx context.Context, args []string, output, diagnostic io.Writer) error
 	if opts.generatedName {
 		fmt.Fprintf(output, "Creating sandbox %s.\n", opts.name)
 	}
-	relay, err := operate(ctx, client, opts, state, output, diagnostic)
+	err = operate(ctx, client, opts, state, output, diagnostic)
 	unlockErr := lock.Unlock()
 	if err != nil {
 		return err
 	}
 	if unlockErr != nil {
 		return unlockErr
-	}
-	if relay != nil {
-		return serve(ctx, client, relay, output)
 	}
 	return nil
 }

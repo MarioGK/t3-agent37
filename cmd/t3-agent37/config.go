@@ -52,21 +52,11 @@ type configFile struct {
 
 func readWorkstationConfig() (configFile, error) {
 	file := configFile{values: workstationConfig{NamePrefix: defaultNamePrefix}}
-	base := os.Getenv("XDG_CONFIG_HOME")
-	if base == "" {
-		var err error
-		if runtime.GOOS == "windows" {
-			base, err = os.UserConfigDir()
-		} else {
-			var home string
-			home, err = os.UserHomeDir()
-			base = filepath.Join(home, ".config")
-		}
-		if err != nil {
-			return file, err
-		}
+	dir, err := workstationConfigDir()
+	if err != nil {
+		return file, err
 	}
-	file.path = filepath.Join(base, owner, "config.json")
+	file.path = filepath.Join(dir, "config.json")
 	if target, err := filepath.EvalSymlinks(file.path); err == nil {
 		file.path = target
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -84,6 +74,24 @@ func readWorkstationConfig() (configFile, error) {
 	}
 	file.original = data
 	return file, nil
+}
+
+func workstationConfigDir() (string, error) {
+	base := os.Getenv("XDG_CONFIG_HOME")
+	if base == "" {
+		var err error
+		if runtime.GOOS == "windows" {
+			base, err = os.UserConfigDir()
+		} else {
+			var home string
+			home, err = os.UserHomeDir()
+			base = filepath.Join(home, ".config")
+		}
+		if err != nil {
+			return "", err
+		}
+	}
+	return filepath.Join(base, owner), nil
 }
 
 func (file configFile) save(ctx context.Context) error {

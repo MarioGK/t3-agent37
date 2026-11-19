@@ -282,10 +282,10 @@ def setup(provider, peer_links=False):
         raise RuntimeError("T3 did not start. See ~/.local/share/t3-agent37/server.log")
 
 
-def pair(port):
+def pair(address):
     result = subprocess.run([
         str(T3), "auth", "pairing", "create", "--base-dir", str(DATA),
-        "--ttl", "5m", "--label", "t3-agent37", "--base-url", f"http://127.0.0.1:{int(port)}",
+        "--ttl", "5m", "--label", "t3-agent37", "--base-url", address,
         "--json",
     ], check=True, capture_output=True, text=True)
     print(result.stdout.strip())
@@ -301,8 +301,6 @@ def manage_tailnet(action, *args):
         tailnet.restore()
         return
     if action == "tailnet-serve-peer":
-        if not (ROOT / "peer-proxy").is_file():
-            raise RuntimeError("T3 peer linking is disabled for this sandbox")
         print(json.dumps({"url": tailnet.serve_peer(PORT)}))
         return
     hostname, *files = args

@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"io"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
@@ -43,6 +42,7 @@ type setupProof struct {
 	Port          int    `json:"port"`
 	ProviderReady bool   `json:"providerReady"`
 	PeerProxy     bool   `json:"peerProxy"`
+	TailnetURL    string `json:"-"`
 }
 
 func execJSON[T any](ctx context.Context, client *agent37.Client, id, command string) (T, error) {
@@ -69,7 +69,7 @@ func waitForT3(ctx context.Context, client *agent37.Client, id, expected string,
 
 func setup(ctx context.Context, client *agent37.Client, instance agent37.Instance, configured []peers.Peer) (setupProof, error) {
 	provider := displayProvider(instance)
-	if _, allowed := templates[provider]; !allowed {
+	if _, allowed := providers[provider]; !allowed {
 		return setupProof{}, errors.New("sandbox metadata names an unsupported T3 provider")
 	}
 	command := "python3 -c " + shellQuote(installGuest) + " remote.py " + base64.StdEncoding.EncodeToString(guestRemote)
@@ -118,7 +118,7 @@ func joinTailnetOnce(ctx context.Context, client *agent37.Client, id, name strin
 		return err
 	}
 	if proof.EnrollmentRequired {
-		clientID, clientSecret, err := peers.TailscaleCredentials()
+		clientID, clientSecret, err := tailscaleCredentials()
 		if err != nil {
 			return err
 		}
@@ -151,10 +151,6 @@ func linkFleet(ctx context.Context, client *agent37.Client, id, name string, con
 	if !proof.PeerProxy {
 		return fmt.Errorf("%s needs a fresh boot for T3 peer routing; run down and up when idle", name)
 	}
-	private, err := execJSON[struct{ URL string }](ctx, client, id, remote+" tailnet-serve-peer")
-	if err != nil {
-		return err
-	}
 	admin, err := execJSON[struct{ Token string }](ctx, client, id, remote+" peer-admin")
 	if err != nil {
 		return err
@@ -163,7 +159,7 @@ func linkFleet(ctx context.Context, client *agent37.Client, id, name string, con
 	if err != nil {
 		return err
 	}
-	if err := peers.Sync(ctx, configured, name, proof.EnvironmentID, private.URL, protected, client.Key, admin.Token); err != nil {
+	if err := peers.Sync(ctx, configured, name, proof.EnvironmentID, proof.TailnetURL, protected, client.Key, admin.Token); err != nil {
 		return err
 	}
 	hosts := make([]string, 0, len(configured))
@@ -192,6 +188,14 @@ func bootstrap(ctx context.Context, client *agent37.Client, instance agent37.Ins
 		if err := joinTailnet(ctx, client, instance.ID, name); err != nil {
 			return proof, err
 		}
+		private, err := execJSON[struct{ URL string }](ctx, client, instance.ID, remote+" tailnet-serve-peer")
+		if err != nil {
+			return proof, err
+		}
+		proof.TailnetURL, err = peers.VerifyTailnet(ctx, name, proof.EnvironmentID, private.URL)
+		if err != nil {
+			return proof, err
+		}
 	}
 	if len(configured) != 0 {
 		return proof, linkFleet(ctx, client, instance.ID, name, configured, proof, diagnostic)
@@ -201,7 +205,7 @@ func bootstrap(ctx context.Context, client *agent37.Client, instance agent37.Ins
 
 func wake(ctx context.Context, client *agent37.Client, instance agent37.Instance) (agent37.Instance, error) {
 	if instance.Status == "stopped" && instance.Metadata["tailnet"] == "tailscale" {
-		if _, _, err := peers.TailscaleCredentials(); err != nil {
+		if _, _, err := tailscaleCredentials(); err != nil {
 			return instance, err
 		}
 	}
@@ -212,39 +216,41 @@ func wake(ctx context.Context, client *agent37.Client, instance agent37.Instance
 	return instance, err
 }
 
-func lifecycle(ctx context.Context, client *agent37.Client, instance agent37.Instance, name, action string, configured []peers.Peer, diagnostic io.Writer) (agent37.Instance, error) {
-	tailnet := instance.Metadata["tailnet"] == "tailscale"
-	if action == "stop" {
-		if instance.Status == "stopped" {
-			return instance, nil
-		}
-		if tailnet {
-			check := `if test -f "$HOME/.local/share/t3-agent37/tailnet.py"; then ` + remote + " tailnet-leave; fi"
-			if _, err := client.Exec(ctx, instance.ID, check); err != nil {
-				return instance, fmt.Errorf("Tailscale logout failed for %s; retry down: %w", name, err)
-			}
-		}
-		update, err := client.Lifecycle(ctx, instance.ID, "stop")
-		if update.Status != "" {
-			instance.Status = update.Status
-		}
-		return instance, err
+func stopSandbox(ctx context.Context, client *agent37.Client, instance agent37.Instance, name string) (agent37.Instance, error) {
+	if instance.Status == "stopped" {
+		return instance, nil
 	}
+	if instance.Metadata["tailnet"] == "tailscale" {
+		check := `if test -f "$HOME/.local/share/t3-agent37/tailnet.py"; then ` + remote + " tailnet-leave; fi"
+		if _, err := client.Exec(ctx, instance.ID, check); err != nil {
+			return instance, fmt.Errorf("Tailscale logout failed for %s. Retry down: %w", name, err)
+		}
+	}
+	update, err := client.Lifecycle(ctx, instance.ID, "stop")
+	if update.Status != "" {
+		instance.Status = update.Status
+	}
+	return instance, err
+}
+
+func startSandbox(ctx context.Context, client *agent37.Client, instance agent37.Instance, name string, configured []peers.Peer, diagnostic io.Writer) (agent37.Instance, string, error) {
 	wasStopped := instance.Status == "stopped"
 	if instance.Status != "running" {
 		var err error
 		instance, err = wake(ctx, client, instance)
 		if err != nil {
-			return instance, err
+			return instance, "", err
 		}
 	}
-	if tailnet {
-		if _, err := bootstrap(ctx, client, instance, name, configured, wasStopped, diagnostic); err != nil {
-			return instance, err
+	if instance.Metadata["tailnet"] == "tailscale" {
+		proof, err := bootstrap(ctx, client, instance, name, configured, wasStopped, diagnostic)
+		if err != nil {
+			return instance, proof.TailnetURL, err
 		}
-		return client.Get(ctx, instance.ID)
+		instance, err = client.Get(ctx, instance.ID)
+		return instance, proof.TailnetURL, err
 	}
-	return instance, nil
+	return instance, "", nil
 }
 
 func prepareCreated(ctx context.Context, client *agent37.Client, instance agent37.Instance, name string, configured []peers.Peer, diagnostic io.Writer) (setupProof, error) {
@@ -275,7 +281,7 @@ func prepare(ctx context.Context, client *agent37.Client, instance agent37.Insta
 	start := instance.Status == "stopped" || instance.Status == "sleeping"
 	if start {
 		var err error
-		instance, err = lifecycle(ctx, client, instance, name, "start", nil, diagnostic)
+		instance, _, err = startSandbox(ctx, client, instance, name, nil, diagnostic)
 		if err != nil {
 			return err
 		}
@@ -299,13 +305,20 @@ func prepare(ctx context.Context, client *agent37.Client, instance agent37.Insta
 	return nil
 }
 
-func pairLink(ctx context.Context, client *agent37.Client, id string, port int) (string, error) {
-	reply, err := execJSON[struct{ PairURL string }](ctx, client, id, remote+" pair "+strconv.Itoa(port))
+func pairLink(ctx context.Context, client *agent37.Client, id, origin string) (string, error) {
+	base, err := url.Parse(origin)
+	if err != nil {
+		return "", err
+	}
+	if base.Scheme != "https" || !strings.HasSuffix(base.Hostname(), ".ts.net") {
+		return "", errors.New("T3 pairing requires a private Tailscale HTTPS address")
+	}
+	reply, err := execJSON[struct{ PairURL string }](ctx, client, id, remote+" pair "+shellQuote(origin))
 	if err != nil {
 		return "", err
 	}
 	parsed, err := url.Parse(reply.PairURL)
-	if err != nil || parsed.Scheme != "http" || parsed.Host != fmt.Sprintf("127.0.0.1:%d", port) ||
+	if err != nil || parsed.Scheme != base.Scheme || parsed.Host != base.Host ||
 		parsed.User != nil || parsed.Path != "/pair" || parsed.RawQuery != "" {
 		return "", errors.New("T3 returned an unexpected pairing address")
 	}

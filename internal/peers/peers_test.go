@@ -36,6 +36,7 @@ func TestConfiguredPeersValidatesPrivateOrigins(t *testing.T) {
 	}
 	for _, origin := range []string{
 		"http://beta.test.ts.net", "https://example.net", "https://user@beta.test.ts.net",
+		"https://127.0.0.1:43738",
 		"https://beta.test.ts.net:65536", "https://beta.test.ts.net/#", "https://beta.test.ts.net//",
 	} {
 		if _, err := privateOrigin(origin); err == nil {
@@ -45,6 +46,24 @@ func TestConfiguredPeersValidatesPrivateOrigins(t *testing.T) {
 	t.Setenv("T3_AGENT37_PEERS_FILE", "")
 	if list, err := Configured(); err != nil || len(list) != 0 {
 		t.Fatalf("disabled configuration: %v, %v", list, err)
+	}
+}
+
+func TestDirectTailnetDiscoveryChecksIdentityWithoutPeerCapability(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != descriptorPath || r.Header.Get("X-Agent37-Key") != "" {
+			t.Error("direct discovery sent the wrong request")
+		}
+		fmt.Fprint(w, `{"environmentId":"sandbox-proof","capabilities":{}}`)
+	}))
+	defer server.Close()
+	target := newPeerAPI(server.Client(), "sandbox", server.URL, "sandbox-proof", "")
+	if err := target.verify(context.Background(), 1, false); err != nil {
+		t.Fatal(err)
+	}
+	target.environmentID = "different-sandbox"
+	if err := target.verify(context.Background(), 1, false); err == nil {
+		t.Fatal("direct discovery accepted the wrong environment")
 	}
 }
 
@@ -133,7 +152,7 @@ func TestT3PeersLinkWithNativeScopedGrantAndReuseReachableLink(t *testing.T) {
 	ctx := context.Background()
 	sourceAPI := newPeerAPI(cloud.Client(), "sandbox", cloud.URL, "cloud-id", "fixture-gateway-key")
 	targetAPI := newPeerAPI(target.Client(), "beta", target.URL, "beta-id", "")
-	if err := sourceAPI.verify(ctx, 1); err != nil {
+	if err := sourceAPI.verify(ctx, 1, true); err != nil {
 		t.Fatal(err)
 	}
 	for range 2 {
