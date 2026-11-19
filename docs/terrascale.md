@@ -23,6 +23,23 @@ Run `t3-agent37 prepare terrascale-dev` to refresh the catalog.
 `socks5h://127.0.0.1:1055` to reach tailnet services. T3 uses the local relay.
 Use `--no-tailscale` on `create` for a CLIProxy-only sandbox.
 
+## Link T3 servers
+
+To link a Tailscale-enabled sandbox on `create` and `up`, save the peers in
+`~/.config/t3-agent37/peers.json` or set `T3_AGENT37_PEERS_FILE`.
+
+```json
+[
+  {"ssh": "dev", "url": "https://dev.example.ts.net:18456", "environmentId": "your-t3-environment-id"}
+]
+```
+
+Use the environment ID from `/.well-known/t3/environment` on each peer and
+an SSH alias that reaches the T3 owner. Each server must have Linked
+Environments enabled. The sandbox joins with private Tailscale HTTPS Serve.
+The CLI adds both directions with approval-required access and reuses
+reachable links. Set `T3_AGENT37_PEERS_FILE` to an empty string to skip sync.
+
 The image includes T3, OpenCode, Codex, Tailscale, .NET 10 and 11, Go 1.27.4,
 Rust 1.99.1 with rustfmt and Clippy, Python 3.12 with uv, and Node 24 with
 mise. The Node pins are 24.21.0 with npm 11.18.0 and 24.22.1. The image also

@@ -53,7 +53,8 @@ def start_daemon():
         try:
             daemon = subprocess.Popen(
                 ["tailscaled", "--tun=userspace-networking", "--statedir", str(ROOT),
-                 "--socks5-server=127.0.0.1:1055", "--socket", str(ROOT / "tailscaled.sock")],
+                 "--socks5-server=127.0.0.1:1055", "--outbound-http-proxy-listen=127.0.0.1:1055",
+                 "--socket", str(ROOT / "tailscaled.sock")],
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 start_new_session=True,
             )
@@ -145,6 +146,19 @@ def restore():
     with locked():
         if (ROOT / "joined").exists() and (ROOT / "tailscaled.state").exists():
             start_daemon()
+
+
+def serve_peer(port):
+    with locked():
+        peer = identity(status())
+        if peer is None or not peer["dnsName"].endswith(".ts.net"):
+            raise TailnetError("Tailscale needs MagicDNS to serve T3 peer connections")
+        if not run_private("set", "--shields-up=false", timeout=10):
+            raise TailnetError("Could not enable private Tailscale ingress")
+        if not run_private("serve", "--bg", "--yes", "--https=443", f"http://127.0.0.1:{port}", timeout=45):
+            run_private("set", "--shields-up=true", timeout=10)
+            raise TailnetError("Could not publish T3 through private Tailscale Serve")
+        return f"https://{peer['dnsName']}"
 
 
 def leave():

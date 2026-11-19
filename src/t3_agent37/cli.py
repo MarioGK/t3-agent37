@@ -24,6 +24,7 @@ from uuid import uuid4
 from aiohttp import web
 
 from .api import Agent37, Agent37Error, MANAGED_CREDIT_MICROS, instance_id
+from .peers import configured_peers, sync_peers
 from .relay import application
 from .tailscale_oauth import credentials as tailscale_credentials, enrollment_key
 
@@ -141,7 +142,7 @@ def get_or_create(client, name, template, state, provider="codex", *, tailnet=Fa
 REMOTE = 'python3 "$HOME/.local/share/t3-agent37/remote.py"'
 
 
-def setup(client, instance, provider, *, tailnet=False):
+def setup(client, instance, provider, *, tailnet=False, peers=False):
     names = ("remote.py", "tailnet.py") if tailnet else ("remote.py",)
     arguments = []
     for name in names:
@@ -158,7 +159,7 @@ def setup(client, instance, provider, *, tailnet=False):
     )
     command = (
         f"python3 -c {shlex.quote(install)} {shlex.join(arguments)} "
-        f"&& {REMOTE} setup {provider}"
+        f"&& {REMOTE} setup {provider}{' --peer-links' if peers else ''}"
     )
     # Bootstrap is idempotent. Run it again after a restart so an Agent37
     # cached exec response cannot claim that the previous process is ready.
@@ -166,7 +167,7 @@ def setup(client, instance, provider, *, tailnet=False):
     if not proof.get("environmentId"):
         raise Agent37Error("Sandbox setup did not return a T3 environment ID")
     visible, port = wait_for_t3(client, instance, expected=proof["environmentId"], remote_port=proof["port"])
-    return {**visible, "providerReady": proof["providerReady"]}, port
+    return {**visible, "providerReady": proof["providerReady"], "peerProxy": proof.get("peerProxy", False)}, port
 
 
 def join_tailnet(client, instance, name):
@@ -190,6 +191,16 @@ def join_tailnet(client, instance, name):
             raise Agent37Error("Tailscale did not confirm the sandbox identity")
     except Agent37Error as error:
         raise Agent37Error(f"Could not enroll {name} in Tailscale. {error}") from None
+
+
+def link_fleet(client, instance, name, peers, proof, port):
+    if not proof.get("peerProxy"):
+        raise Agent37Error(f"{name} needs a fresh boot for T3 peer routing. Run down and up when idle")
+    private = json.loads(client.exec(instance, f"{REMOTE} tailnet-serve-peer"))["url"]
+    token = json.loads(client.exec(instance, f"{REMOTE} peer-admin"))["token"]
+    asyncio.run(sync_peers(peers, name, proof["environmentId"], private, protected_origin(instance, port),
+                           client.key, token))
+    print(f"Linked {name} with {', '.join(peer.host for peer in peers)}.", file=sys.stderr)
 
 
 def wait_for_t3(client, instance, *, expected=None, remote_port=None, timeout=45):
@@ -292,11 +303,14 @@ def summary(instance):
     return {**fields, "provider": (instance.get("metadata") or {}).get("provider", "codex")}
 
 
-def lifecycle(client, instance, name, action):
+def lifecycle(client, instance, name, action, *, peers=()):
     target = "running" if action == "start" else "stopped"
     identifier = instance_id(instance["id"])
     provider = summary(instance)["provider"]
     tailnet = (instance.get("metadata") or {}).get("tailnet") == "tailscale"
+    was_stopped = instance["status"] == "stopped"
+    if peers and not tailnet:
+        raise Agent37Error("T3 peer links require a Tailscale-enabled sandbox")
     if action == "stop" and instance["status"] != target and tailnet:
         installed = 'test -f "$HOME/.local/share/t3-agent37/tailnet.py"'
         try:
@@ -308,13 +322,19 @@ def lifecycle(client, instance, name, action):
             tailscale_credentials()
         instance = {**instance, **client.lifecycle(identifier, action)}
     if action == "start" and tailnet:
-        setup(client, identifier, provider, tailnet=True)
+        proof, port = setup(client, identifier, provider, tailnet=True, peers=bool(peers))
+        if peers and not proof.get("peerProxy") and was_stopped:
+            client.lifecycle(identifier, "restart")
+            proof, port = setup(client, identifier, provider, tailnet=True, peers=True)
         join_tailnet(client, identifier, name)
+        if peers:
+            link_fleet(client, identifier, name, peers, proof, port)
         instance = client.get(identifier)
     return summary(instance)
 
 
 def operate(client, args, state):
+    peers = configured_peers() if args.action == "create" and args.tailscale else ()
     instance = (get_or_create(client, args.name, args.template, state, args.provider, tailnet=args.tailscale)
                 if args.action == "create" else lookup(client, args.name))
     if not instance:
@@ -322,7 +342,9 @@ def operate(client, args, state):
     identifier = instance_id(instance["id"])
     tailnet = (instance.get("metadata") or {}).get("tailnet") == "tailscale"
     if args.action in {"start", "stop"}:
-        print(json.dumps(lifecycle(client, instance, args.name, args.action)))
+        if args.action == "start" and tailnet:
+            peers = configured_peers()
+        print(json.dumps(lifecycle(client, instance, args.name, args.action, peers=peers)))
         return None
     if args.action == "terminal":
         print(client.terminal(identifier))
@@ -354,9 +376,11 @@ def operate(client, args, state):
             if tailnet and instance["status"] == "stopped":
                 tailscale_credentials()
             client.lifecycle(identifier, "start")
-        proof, remote_port = setup(client, identifier, args.provider, tailnet=tailnet)
+        proof, remote_port = setup(client, identifier, args.provider, tailnet=tailnet, peers=bool(peers))
         if tailnet:
             join_tailnet(client, identifier, args.name)
+        if peers:
+            link_fleet(client, identifier, args.name, peers, proof, remote_port)
         print(f"Cloud T3 ready ({identifier}, {proof['environmentId']}).", flush=True)
         if not proof["providerReady"]:
             print(f"{args.provider} needs sign-in. Run t3-agent37 terminal {args.name}.", flush=True)
@@ -393,7 +417,7 @@ def main(argv=None):
     for action in ("start", "stop", "terminal"):
         aliases = {"start": ["up"], "stop": ["down"]}.get(action, [])
         command = sub.add_parser(action, aliases=aliases, help={
-            "start": "Start an Agent37 instance",
+            "start": "Start an Agent37 instance and link its configured T3 peers",
             "stop": "Remove the instance from Tailscale and stop it, keeping its disk",
             "terminal": "Print the signed Agent37 terminal URL for provider login",
         }[action])

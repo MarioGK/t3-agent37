@@ -120,6 +120,30 @@ def test_down_logs_out_first_and_preserves_sandbox_on_logout_failure():
     assert [method[0] for method in client.mock_calls][-2:] == ["exec", "lifecycle"]
 
 
+def test_up_syncs_t3_peers_after_start_and_tailnet_join(monkeypatch):
+    from t3_agent37 import cli
+    from t3_agent37.peers import Peer
+
+    client = Mock()
+    instance = {**INSTANCE, "status": "stopped", "metadata": {
+        **INSTANCE["metadata"], "tailnet": "tailscale",
+    }}
+    client.lifecycle.return_value = {"status": "running"}
+    client.get.return_value = {**instance, "status": "running"}
+    proof = {"environmentId": "cloud-id", "peerProxy": True}
+    peers = (Peer("beta", "https://beta.test.ts.net", "beta-id"),)
+    steps = Mock()
+    steps.attach_mock(client.lifecycle, "start")
+    steps.setup.return_value = (proof, 3773)
+    for function in ("tailscale_credentials", "setup", "join_tailnet", "link_fleet"):
+        monkeypatch.setattr(cli, function, getattr(steps, function))
+    assert cli.lifecycle(client, instance, "pilot", "start", peers=peers)["status"] == "running"
+    assert [call[0] for call in steps.mock_calls] == [
+        "tailscale_credentials", "start", "setup", "join_tailnet", "link_fleet",
+    ]
+    steps.link_fleet.assert_called_once_with(client, "ab12cd34ef", "pilot", peers, proof, 3773)
+
+
 def test_join_only_mints_a_single_use_key_when_needed(monkeypatch):
     from t3_agent37 import cli
 

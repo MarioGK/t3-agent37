@@ -69,7 +69,7 @@ class Agent37:
         return self._request(f"{API}/{instance_id(instance)}")
 
     def lifecycle(self, instance, action):
-        if action not in {"start", "stop"}:
+        if action not in {"start", "stop", "restart"}:
             raise ValueError("Unknown lifecycle action")
         return self._request(f"{API}/{instance_id(instance)}/{action}", method="POST")
 

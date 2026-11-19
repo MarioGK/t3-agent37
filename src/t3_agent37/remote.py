@@ -103,6 +103,14 @@ def serve():
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
         return
+    active_proxy = ROOT / "peer-proxy-active"
+    if (ROOT / "peer-proxy").is_file():
+        os.environ["NODE_USE_ENV_PROXY"] = "1"
+        os.environ["HTTPS_PROXY"] = "http://127.0.0.1:1055"
+        os.environ["NO_PROXY"] = "127.0.0.1,localhost,::1"
+        active_proxy.touch()
+    else:
+        active_proxy.unlink(missing_ok=True)
     os.set_inheritable(lock.fileno(), True)
     os.execv(T3, [str(T3), "serve", "--host", HOST, "--port", str(PORT),
                   "--base-dir", str(DATA), "--mode", "web", "--no-browser"])
@@ -233,12 +241,15 @@ def provider_ready(provider):
     ).returncode == 0
 
 
-def setup(provider):
+def setup(provider, peer_links=False):
     ROOT.mkdir(parents=True, mode=0o700, exist_ok=True)
     with (ROOT / "install.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         install_runtime()
         ready = provider_ready(provider)
+        if peer_links:
+            (ROOT / "peer-proxy").touch()
+            update_json(DATA / "userdata/settings.json", lambda settings: {**settings, "linkedEnvironmentsEnabled": True})
         install_hook()
         result = descriptor()
         if result is None:
@@ -247,7 +258,8 @@ def setup(provider):
             result = descriptor()
             if result is not None:
                 print(json.dumps({"environmentId": result["environmentId"], "version": VERSION,
-                                  "port": PORT, "providerReady": ready}))
+                                  "port": PORT, "providerReady": ready,
+                                  "peerProxy": (ROOT / "peer-proxy-active").is_file()}))
                 return
             time.sleep(1)
         raise RuntimeError("T3 did not start. See ~/.local/share/t3-agent37/server.log")
@@ -271,6 +283,11 @@ def manage_tailnet(action, *args):
     if action == "tailnet-restore":
         tailnet.restore()
         return
+    if action == "tailnet-serve-peer":
+        if not (ROOT / "peer-proxy").is_file():
+            raise RuntimeError("T3 peer linking is disabled for this sandbox")
+        print(json.dumps({"url": tailnet.serve_peer(PORT)}))
+        return
     hostname, *files = args
     key = None
     if files:
@@ -290,7 +307,7 @@ def manage_tailnet(action, *args):
 if __name__ == "__main__":
     action = sys.argv[1]
     if action == "setup":
-        setup(sys.argv[2])
+        setup(sys.argv[2], "--peer-links" in sys.argv[3:])
     elif action == "serve":
         serve()
     elif action == "boot":
@@ -299,5 +316,12 @@ if __name__ == "__main__":
             manage_tailnet("tailnet-restore")
     elif action == "pair":
         pair(sys.argv[2])
-    elif action in {"tailnet-join", "tailnet-leave"}:
+    elif action == "peer-admin":
+        result = subprocess.run([str(T3), "auth", "session", "issue", "--base-dir", str(DATA),
+                                 "--json", "--ttl", "5m", "--label", "t3-agent37-peer-sync",
+                                 "--scope", "access:read", "--scope", "access:write",
+                                 "--scope", "orchestration:read", "--scope", "orchestration:operate"],
+                                capture_output=True, text=True, check=True)
+        print(result.stdout.strip())
+    elif action in {"tailnet-join", "tailnet-leave", "tailnet-serve-peer"}:
         manage_tailnet(action, *sys.argv[2:])
