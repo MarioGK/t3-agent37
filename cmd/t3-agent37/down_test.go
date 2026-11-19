@@ -19,7 +19,7 @@ func (f downTestTransport) RoundTrip(request *http.Request) (*http.Response, err
 	return f(request)
 }
 
-func TestBareDownPinsNewestManagedInstance(t *testing.T) {
+func TestDeletionCommandsSelectManagedTargets(t *testing.T) {
 	t.Setenv("AGENT37_API_KEY", "fixture-only")
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	const older = `{"id":"aaaaaaaaaa","name":"z-older","status":"running","created":100,"metadata":{"managed_by":"t3-agent37","environment":"z-older"}}`
@@ -43,6 +43,10 @@ func TestBareDownPinsNewestManagedInstance(t *testing.T) {
 			body = `{"id":"bbbbbbbbbb","status":"stopped"}`
 		case "DELETE /v1/instances/bbbbbbbbbb":
 			status = http.StatusNoContent
+		case "POST /v1/instances/aaaaaaaaaa/stop":
+			body = `{"id":"aaaaaaaaaa","status":"stopped"}`
+		case "DELETE /v1/instances/aaaaaaaaaa":
+			status = http.StatusNoContent
 		default:
 			return nil, fmt.Errorf("unexpected request %s", call)
 		}
@@ -65,6 +69,28 @@ func TestBareDownPinsNewestManagedInstance(t *testing.T) {
 	}
 	if err := json.Unmarshal(output.Bytes(), &row); err != nil || row["id"] != "bbbbbbbbbb" || row["status"] != "deleted" || len(calls) != 5 {
 		t.Fatalf("wrong deletion: %v, %v, %v", row, calls, err)
+	}
+	output.Reset()
+	if err := run(ctx, []string{"delete", "z-older", "--dry-run"}, &output, &diagnostic); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(output.Bytes(), &row); err != nil || row["id"] != "aaaaaaaaaa" || row["action"] != "delete" || len(calls) != 6 {
+		t.Fatalf("wrong named preview: %v, %v, %v", row, calls, err)
+	}
+	output.Reset()
+	if err := run(ctx, []string{"delete", "z-older"}, &output, &diagnostic); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(output.Bytes(), &row); err != nil || row["id"] != "aaaaaaaaaa" || row["status"] != "deleted" || len(calls) != 9 {
+		t.Fatalf("wrong named deletion: %v, %v, %v", row, calls, err)
+	}
+}
+
+func TestDeleteRequiresAName(t *testing.T) {
+	for _, args := range [][]string{{"delete"}, {"delete", "--dry-run"}, {"delete", "two", "names"}} {
+		if _, err := parse(args, io.Discard); err == nil {
+			t.Fatalf("delete accepted an ambiguous target: %v", args)
+		}
 	}
 }
 

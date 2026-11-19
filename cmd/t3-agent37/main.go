@@ -42,7 +42,7 @@ type options struct {
 
 func parse(args []string, output io.Writer) (options, error) {
 	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" || args[0] == "help" {
-		fmt.Fprintln(output, "Usage: t3-agent37 <create|list|ls|up|down|connect|prepare|terminal> [name] [flags]\n       t3-agent37 --version")
+		fmt.Fprintln(output, "Usage: t3-agent37 <create|list|ls|up|down|delete|connect|prepare|terminal> [name] [flags]\n       t3-agent37 --version")
 		return options{}, flag.ErrHelp
 	}
 	if len(args) == 1 && (args[0] == "--version" || args[0] == "version") {
@@ -55,7 +55,7 @@ func parse(args []string, output io.Writer) (options, error) {
 		opts.action = "stop"
 	case "ls":
 		opts.action = "list"
-	case "create", "up", "connect", "start", "stop", "prepare", "terminal", "list":
+	case "create", "up", "delete", "connect", "start", "stop", "prepare", "terminal", "list":
 	default:
 		return opts, fmt.Errorf("unknown command %q", opts.action)
 	}
@@ -66,7 +66,12 @@ func parse(args []string, output io.Writer) (options, error) {
 			fmt.Fprintf(output, "Usage: t3-agent37 %s\nList managed Agent37 sandboxes.\n", args[0])
 			return
 		}
-		fmt.Fprintf(output, "Usage: t3-agent37 %s [name] [flags]\n", args[0])
+		if opts.action == "delete" {
+			fmt.Fprintln(output, "Usage: t3-agent37 delete <name> [flags]")
+			fmt.Fprintln(output, "Permanently delete a managed sandbox and its disk.")
+		} else {
+			fmt.Fprintf(output, "Usage: t3-agent37 %s [name] [flags]\n", args[0])
+		}
 		if opts.action == "create" {
 			fmt.Fprintln(output, "Omit the name to use the next numbered name.")
 		}
@@ -97,9 +102,9 @@ func parse(args []string, output io.Writer) (options, error) {
 	if opts.action == "stop" {
 		flags.BoolVar(&opts.deleteSandbox, "delete", false, "Permanently delete the managed sandbox and its disk")
 		flags.BoolVar(&opts.yes, "yes", false, "Confirm permanent deletion")
-		if args[0] == "down" {
-			flags.BoolVar(&opts.dryRun, "dry-run", false, "Show which sandbox bare down would delete")
-		}
+	}
+	if args[0] == "down" || opts.action == "delete" {
+		flags.BoolVar(&opts.dryRun, "dry-run", false, "Show which sandbox would be deleted")
 	}
 	if opts.action == "create" || opts.action == "up" || opts.action == "connect" {
 		flags.IntVar(&opts.port, "port", 0, "Local relay port")
@@ -140,6 +145,10 @@ func parse(args []string, output io.Writer) (options, error) {
 	}
 	if opts.action == "stop" && opts.dryRun && !opts.latest {
 		return opts, errors.New("omit the name to preview which sandbox bare down would delete")
+	}
+	if opts.action == "delete" {
+		opts.action = "stop"
+		opts.deleteSandbox = true
 	}
 	if flags.Changed("port") && (opts.port < 1024 || opts.port > 65535) {
 		return opts, errors.New("port must be between 1024 and 65535")
@@ -260,6 +269,10 @@ func lookup(ctx context.Context, client *agent37.Client, name string) (agent37.I
 	if err != nil {
 		return agent37.Instance{}, err
 	}
+	return namedManaged(instances, name)
+}
+
+func namedManaged(instances []agent37.Instance, name string) (agent37.Instance, error) {
 	var found agent37.Instance
 	for _, instance := range instances {
 		if !isManaged(instance) || instance.Metadata["environment"] != name {
@@ -499,7 +512,7 @@ func run(ctx context.Context, args []string, output, diagnostic io.Writer) error
 		return err
 	}
 	client := agent37.New(key)
-	if opts.action == "list" || opts.latest {
+	if opts.action == "list" || opts.latest || opts.dryRun {
 		instances, err := client.List(ctx)
 		if err != nil {
 			return err
@@ -513,11 +526,19 @@ func run(ctx context.Context, args []string, output, diagnostic io.Writer) error
 			}
 			return jsonOutput(output, rows, true)
 		}
-		instance, err := latestManaged(instances)
+		var instance agent37.Instance
+		if opts.latest {
+			instance, err = latestManaged(instances)
+		} else {
+			instance, err = namedManaged(instances, opts.name)
+		}
 		if err != nil {
 			return err
 		}
 		if instance.ID == "" {
+			if !opts.latest {
+				return fmt.Errorf("no managed Agent37 environment named %s", opts.name)
+			}
 			fmt.Fprintln(output, "No managed Agent37 sandboxes.")
 			return nil
 		}
