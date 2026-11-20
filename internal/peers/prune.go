@@ -9,7 +9,6 @@ import (
 	"regexp"
 	"slices"
 	"strings"
-	"time"
 )
 
 var sandboxHostname = regexp.MustCompile(`^a37-([a-z0-9][a-z0-9-]{0,42})-([a-z0-9]{10})$`)
@@ -21,17 +20,6 @@ type SandboxLink struct {
 	EnvironmentID string `json:"environment_id"`
 	URL           string `json:"url"`
 	Status        string `json:"-"`
-}
-
-// Reachable checks expired links directly because T3 skips probing them.
-func (link SandboxLink) Reachable(ctx context.Context) bool {
-	if link.Status != "expired" {
-		return link.Status != "unreachable"
-	}
-	client := newHTTPClient(5 * time.Second)
-	defer client.CloseIdleConnections()
-	target := newPeerAPI(client, link.Name, link.URL, link.EnvironmentID)
-	return target.verify(ctx, 1, false) == nil
 }
 
 func decodeSandboxLink(peer Peer, entry link) (SandboxLink, bool) {

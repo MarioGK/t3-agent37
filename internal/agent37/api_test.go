@@ -99,6 +99,28 @@ func TestAgent37ErrorsHideResponseDetails(t *testing.T) {
 	}
 }
 
+func TestDeleteAcknowledgesOnlyTheRequestedInstance(t *testing.T) {
+	client := New("fixture-key")
+	for _, tc := range []struct {
+		status int
+		body   string
+		ok     bool
+	}{
+		{200, `{"id":"ab12cd34ef","deleted":true}`, true},
+		{204, "", true},
+		{404, `{}`, true},
+		{200, `{}`, false},
+		{200, `null`, false},
+		{200, `{"id":"ab12cd34ef","deleted":false}`, false},
+		{200, `{"id":"zz12cd34ef","deleted":true}`, false},
+	} {
+		client.http.Transport = testTransport(func(*http.Request) (int, string) { return tc.status, tc.body })
+		if err := client.Delete(t.Context(), "ab12cd34ef"); (err == nil) != tc.ok {
+			t.Errorf("status %d with %s: unexpected error %v", tc.status, tc.body, err)
+		}
+	}
+}
+
 func TestWaitForT3ProbesAlternatePortAndChecksIdentity(t *testing.T) {
 	client := New("fixture-key")
 	client.http.Transport = testTransport(func(request *http.Request) (int, string) {

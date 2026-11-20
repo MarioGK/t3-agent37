@@ -168,7 +168,8 @@ def leave():
         active = ROOT / "joined"
         if not any((ROOT / name).exists() for name in ("joined", "tailscaled.state", "tailscaled.sock")):
             return
-        start_daemon()
-        if not run_private("logout", timeout=20):
-            raise TailnetError("Tailscale logout did not complete. Retry before stopping the sandbox.")
+        info = start_daemon()
+        if info.get("BackendState") != "NeedsLogin" and not run_private("logout", timeout=20):
+            if (status() or {}).get("BackendState") != "NeedsLogin":
+                raise TailnetError("Tailscale logout did not complete. Retry before stopping the sandbox.")
         active.unlink(missing_ok=True)

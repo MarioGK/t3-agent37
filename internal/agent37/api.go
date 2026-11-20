@@ -49,6 +49,7 @@ type Instance struct {
 	Template  string            `json:"template"`
 	Status    string            `json:"status"`
 	Created   int64             `json:"created"`
+	PastDue   bool              `json:"past_due"`
 	Metadata  map[string]string `json:"metadata"`
 	extraMeta map[string]json.RawMessage
 }
@@ -235,11 +236,22 @@ func (c *Client) Delete(ctx context.Context, id string) error {
 	if err := ValidateID(id); err != nil {
 		return err
 	}
-	err := c.request(ctx, http.MethodDelete, apiBase+"/"+id, nil, nil, false)
+	var ack json.RawMessage
+	err := c.request(ctx, http.MethodDelete, apiBase+"/"+id, nil, &ack, false)
 	if apiError, ok := errors.AsType[*Error](err); ok && apiError.Status == http.StatusNotFound {
 		return nil
 	}
-	return err
+	if err != nil || len(ack) == 0 { // 204 or a failed request.
+		return err
+	}
+	var result struct {
+		ID      string `json:"id"`
+		Deleted bool   `json:"deleted"`
+	}
+	if json.Unmarshal(ack, &result) != nil || result.ID != id || !result.Deleted {
+		return errRequest
+	}
+	return nil
 }
 
 func (c *Client) Lifecycle(ctx context.Context, id, action string) (Instance, error) {

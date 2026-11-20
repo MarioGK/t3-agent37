@@ -1,6 +1,7 @@
 package peers
 
 import (
+	"cmp"
 	"context"
 	json "encoding/json/v2"
 	"errors"
@@ -22,6 +23,8 @@ type MeshNode struct {
 	// ListLinksJSON is optional and returns the output of the local T3
 	// environment list command. Dry runs only use this read-only route.
 	ListLinksJSON func(context.Context) ([]byte, error)
+	Unlink        func(context.Context, string) error
+	CleanupOnly   bool
 }
 
 // ReconcileMesh verifies every available directed link between configured T3
@@ -46,7 +49,7 @@ type meshEndpoint struct {
 }
 
 func reconcileMesh(ctx context.Context, client *http.Client, candidates []MeshNode) (int, error) {
-	nodes, validation := normalizeMeshNodes(candidates)
+	nodes, validation := normalizeMeshNodes(candidates, false)
 	if len(nodes) < 2 {
 		return 0, validation
 	}
@@ -115,29 +118,34 @@ func reconcileSource(ctx context.Context, source meshEndpoint, targets []meshEnd
 	return count, errors.Join(failures...)
 }
 
-func normalizeMeshNodes(candidates []MeshNode) ([]MeshNode, error) {
+func normalizeMeshNodes(candidates []MeshNode, forCleanup bool) ([]MeshNode, error) {
 	nodes := make([]MeshNode, 0, len(candidates))
 	addresses := make(map[string]string, len(candidates))
 	identities := make(map[string]string, len(candidates))
 	var failures []error
 	for _, node := range candidates {
 		origin, err := privateOrigin(node.URL)
-		if !sshAlias.MatchString(node.Name) || !environmentID.MatchString(node.EnvironmentID) || err != nil {
+		localOwner := forCleanup && node.ListLinksJSON != nil && node.Unlink != nil
+		if !sshAlias.MatchString(node.Name) || !localOwner && !environmentID.MatchString(node.EnvironmentID) || err != nil {
 			failures = append(failures, fmt.Errorf("invalid private T3 environment %q", node.Name))
 			continue
 		}
 		key := strings.ToLower(origin)
-		if previous := identities[node.EnvironmentID]; previous != "" && previous != key {
+		candidateID := cmp.Or(node.EnvironmentID, key)
+		if previous := identities[node.EnvironmentID]; node.EnvironmentID != "" && previous != "" && previous != key {
 			failures = append(failures, fmt.Errorf("%s duplicates another T3 environment's identity", node.Name))
 			continue
 		}
 		if previous := addresses[key]; previous != "" {
-			if previous != node.EnvironmentID {
+			if previous != candidateID {
 				failures = append(failures, fmt.Errorf("%s duplicates another T3 environment's address", node.Name))
 			}
 			continue
 		}
-		identities[node.EnvironmentID], addresses[key] = key, node.EnvironmentID
+		if node.EnvironmentID != "" {
+			identities[node.EnvironmentID] = key
+		}
+		addresses[key] = candidateID
 		node.URL = origin
 		nodes = append(nodes, node)
 	}
@@ -175,7 +183,7 @@ func forMeshNode(ctx context.Context, count int, run func(int)) {
 func PruneMeshSandboxLinks(ctx context.Context, sandboxes []MeshNode, dryRun bool,
 	visit func(context.Context, SandboxLink, func() error) (bool, error),
 ) ([]SandboxLink, error) {
-	nodes, validation := normalizeMeshNodes(sandboxes)
+	nodes, validation := normalizeMeshNodes(sandboxes, true)
 	if len(nodes) == 0 {
 		return nil, validation
 	}
@@ -198,8 +206,10 @@ func pruneMeshNode(ctx context.Context, client *http.Client, node MeshNode, dryR
 		return nil, nil
 	}
 	api := newPeerAPI(client, node.Name, node.URL, node.EnvironmentID)
-	if err := api.verify(ctx, 1, true); err != nil {
-		return nil, err
+	if node.ListLinksJSON == nil || node.Unlink == nil {
+		if err := api.verify(ctx, 1, true); err != nil {
+			return nil, err
+		}
 	}
 	var entries []link
 	var token string
@@ -220,6 +230,9 @@ func pruneMeshNode(ctx context.Context, client *http.Client, node MeshNode, dryR
 		}
 	}
 	return pruneEntries(ctx, Peer{Host: node.Name, URL: node.URL}, entries, dryRun, visit, func(sandbox SandboxLink) error {
+		if node.Unlink != nil {
+			return node.Unlink(ctx, sandbox.EnvironmentID)
+		}
 		if token == "" {
 			var err error
 			token, err = node.issue(ctx)

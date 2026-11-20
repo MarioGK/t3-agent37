@@ -10,7 +10,6 @@ import (
 	"maps"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -296,8 +295,13 @@ func displayProvider(instance agent37.Instance) string {
 }
 
 func summary(instance agent37.Instance) map[string]any {
-	return map[string]any{"id": instance.ID, "name": instance.Name, "status": instance.Status,
+	name := cmp.Or(instance.Metadata["environment"], instance.Name)
+	row := map[string]any{"id": instance.ID, "name": name, "status": instance.Status,
 		"template": instance.Template, "provider": displayProvider(instance)}
+	if instance.Name != "" && instance.Name != name {
+		row["cloud_name"] = instance.Name
+	}
+	return row
 }
 
 func jsonOutput(output io.Writer, data any, pretty bool) error {
@@ -361,7 +365,7 @@ func latestManaged(instances []agent37.Instance) (agent37.Instance, error) {
 }
 
 func getOrCreate(ctx context.Context, client *agent37.Client, opts options, state string, diagnostic io.Writer) (agent37.Instance, error) {
-	marker := filepath.Join(state, opts.name+".pending")
+	marker := sandboxStatePath(state, opts.name, ".pending")
 	if !opts.generatedName {
 		existing, err := lookup(ctx, client, opts.name)
 		if err != nil || existing.ID != "" {
@@ -449,9 +453,6 @@ func operate(ctx context.Context, client *agent37.Client, enrollment *peers.Enro
 		instance, err = getOrCreate(ctx, client, opts, state, diagnostic)
 	} else if opts.targetID != "" {
 		instance, err = client.Get(ctx, opts.targetID)
-		if opts.deleteSandbox && (sandboxNotFound(err) || err == nil && instance.Status == "deleted" && instance.ID == opts.targetID) {
-			return showAbsentSandbox(output, opts.name, false)
-		}
 		if err == nil && (instance.ID != opts.targetID || !isManaged(instance) || instance.Metadata["environment"] != opts.name) {
 			return errors.New("the selected sandbox changed. Choose a target again")
 		}
@@ -462,9 +463,6 @@ func operate(ctx context.Context, client *agent37.Client, enrollment *peers.Enro
 		return err
 	}
 	if instance.ID == "" {
-		if opts.deleteSandbox {
-			return showAbsentSandbox(output, opts.name, false)
-		}
 		return fmt.Errorf("no managed Agent37 environment named %s", opts.name)
 	}
 	if err := agent37.ValidateID(instance.ID); err != nil {
@@ -490,11 +488,17 @@ func operate(ctx context.Context, client *agent37.Client, enrollment *peers.Enro
 		}
 		return showLifecycleResult(output, "Sandbox started", instance, proof.TailnetURL)
 	case "stop":
-		instance, err = applySandboxDown(ctx, client, instance, opts.name, state, opts.deleteSandbox)
+		instance, err = stopSandbox(ctx, client, instance, opts.name)
 		if err != nil {
 			return err
 		}
-		return finishSandboxDown(ctx, client, instance, opts.name, output, diagnostic)
+		if tailnet {
+			cleanupSandboxLinks(ctx, client, opts.name, instance.ID, diagnostic)
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return showLifecycleResult(output, "Sandbox stopped", instance, "")
 	case "terminal":
 		link, err := client.Terminal(ctx, instance.ID)
 		if err != nil {
@@ -637,8 +641,8 @@ func run(ctx context.Context, args []string, output, diagnostic io.Writer) error
 	if opts.action == "link" {
 		return linkSandboxes(ctx, client, opts, output, diagnostic)
 	}
-	if opts.latest {
-		return runLatestDown(ctx, client, opts, output, diagnostic)
+	if opts.deleteSandbox && !opts.pickDelete {
+		return runRecordedDown(ctx, client, opts, output, diagnostic)
 	}
 	if opts.action == "list" || opts.dryRun || opts.pickDelete {
 		instances, err := client.List(ctx)
@@ -662,9 +666,6 @@ func run(ctx context.Context, args []string, output, diagnostic io.Writer) error
 			return err
 		}
 		if instance.ID == "" {
-			if opts.deleteSandbox {
-				return showAbsentSandbox(output, opts.name, opts.dryRun)
-			}
 			return fmt.Errorf("no managed Agent37 environment named %s", opts.name)
 		}
 		if opts.dryRun {
@@ -672,6 +673,9 @@ func run(ctx context.Context, args []string, output, diagnostic io.Writer) error
 		}
 		opts.name = instance.Metadata["environment"]
 		opts.targetID = instance.ID
+		if opts.pickDelete {
+			return runRecordedDown(ctx, client, opts, output, diagnostic)
+		}
 	}
 	if state == "" {
 		state, err = statePath()
@@ -717,11 +721,14 @@ func lockSandbox(ctx context.Context, client *agent37.Client, state string, opts
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
-	if err := run(ctx, os.Args[1:], os.Stdout, os.Stderr); err != nil && !errors.Is(err, context.Canceled) {
+	if err := run(ctx, os.Args[1:], os.Stdout, os.Stderr); err != nil {
 		for line := range strings.SplitSeq(err.Error(), "\n") {
-			if strings.TrimSpace(line) != "" {
+			if strings.TrimSpace(line) != "" && strings.TrimSpace(line) != context.Canceled.Error() {
 				notice(os.Stderr, failure, "t3-agent37: %s", line)
 			}
+		}
+		if errors.Is(err, context.Canceled) {
+			os.Exit(130)
 		}
 		os.Exit(1)
 	}

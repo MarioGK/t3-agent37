@@ -19,23 +19,27 @@ const inspectGuestPeer = `import json, sys
 from pathlib import Path
 sys.path.insert(0, str(Path.home() / ".local/share/t3-agent37"))
 import remote, tailnet
-peer = tailnet.identity(tailnet.status())
-server = remote.descriptor()
-if peer is None or server is None:
-    print("{}")
-else:
-    print(json.dumps({"environmentId": server["environmentId"],
-                      "url": "https://" + peer["dnsName"],
-                      "peerProxy": (remote.ROOT / "peer-proxy-active").is_file(),
-                      "desktopConfirmed": getattr(remote, "desktop_confirmed", lambda _: False)(server["environmentId"])}))`
+status = tailnet.status() or {}
+peer = tailnet.identity(status)
+try:
+    server = remote.descriptor()
+except RuntimeError:
+    server = None
+dns = ((status.get("Self") or {}).get("DNSName") or "").rstrip(".")
+environment = (server or {}).get("environmentId", "")
+print(json.dumps({"environmentId": environment,
+                  "url": "https://" + dns if dns else "",
+                  "offline": peer is None,
+                  "peerProxy": (remote.ROOT / "peer-proxy-active").is_file(),
+                  "desktopConfirmed": bool(environment) and getattr(remote, "desktop_confirmed", lambda _: False)(environment)}))`
 
-const listGuestPeers = `import os, subprocess, sys
+const runGuestEnvironment = `import os, subprocess, sys
 from pathlib import Path
 sys.path.insert(0, str(Path.home() / ".local/share/t3-agent37"))
 import remote
 env = dict(os.environ, NODE_USE_ENV_PROXY="1", HTTPS_PROXY="http://127.0.0.1:1055",
            NO_PROXY="127.0.0.1,localhost,::1")
-raise SystemExit(subprocess.run([str(remote.T3), "environment", "list", "--json",
+raise SystemExit(subprocess.run([str(remote.T3), "environment", *sys.argv[1:],
                                  "--base-dir", str(remote.DATA)], stderr=subprocess.DEVNULL,
                                  env=env).returncode)`
 
@@ -44,6 +48,7 @@ type sandboxPeer struct {
 	URL              string `json:"url"`
 	PeerProxy        bool   `json:"peerProxy"`
 	DesktopConfirmed bool   `json:"desktopConfirmed"`
+	Offline          bool   `json:"offline"`
 }
 
 func meshNode(client *agent37.Client, id, name string, proof sandboxPeer) (peers.MeshNode, error) {
@@ -53,11 +58,8 @@ func meshNode(client *agent37.Client, id, name string, proof sandboxPeer) (peers
 		return peers.MeshNode{}, errors.New("sandbox did not report a valid Tailscale HTTPS address")
 	}
 	host, suffix, _ := strings.Cut(origin.Hostname(), ".")
-	if host != "a37-"+name+"-"+id || !strings.HasSuffix(suffix, ".ts.net") || proof.EnvironmentID == "" {
+	if host != "a37-"+name+"-"+id || !strings.HasSuffix(suffix, ".ts.net") {
 		return peers.MeshNode{}, errors.New("sandbox did not report its assigned Tailscale and T3 identities")
-	}
-	if !proof.PeerProxy {
-		return peers.MeshNode{}, errors.New("sandbox needs a fresh boot for T3 peer routing")
 	}
 	return peers.MeshNode{
 		Name: name, URL: proof.URL, EnvironmentID: proof.EnvironmentID,
@@ -72,13 +74,17 @@ func meshNode(client *agent37.Client, id, name string, proof sandboxPeer) (peers
 			return admin.Token, nil
 		},
 		ListLinksJSON: func(ctx context.Context) ([]byte, error) {
-			value, err := client.Exec(ctx, id, "python3 -B -c "+shellQuote(listGuestPeers))
+			value, err := client.Exec(ctx, id, "python3 -B -c "+shellQuote(runGuestEnvironment)+" list --json")
 			return []byte(value), err
+		},
+		Unlink: func(ctx context.Context, environmentID string) error {
+			_, err := client.Exec(ctx, id, "python3 -B -c "+shellQuote(runGuestEnvironment)+" unlink "+shellQuote(environmentID))
+			return err
 		},
 	}, nil
 }
 
-func discoverSandboxPeer(ctx context.Context, client *agent37.Client, instance agent37.Instance, allowWake bool) (sandboxPeer, error) {
+func discoverSandboxPeer(ctx context.Context, client *agent37.Client, instance agent37.Instance, allowWake, forCleanup bool) (sandboxPeer, error) {
 	probe, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	woke := instance.Status == "sleeping" && allowWake
@@ -90,7 +96,8 @@ func discoverSandboxPeer(ctx context.Context, client *agent37.Client, instance a
 	command := "python3 -B -c " + shellQuote(inspectGuestPeer)
 	for {
 		running, err := client.ExecJSON[sandboxPeer](probe, instance.ID, command)
-		if running.EnvironmentID != "" && err == nil {
+		ready := running.EnvironmentID != "" && !running.Offline
+		if err == nil && (ready || forCleanup && running.URL != "") {
 			return running, nil
 		}
 		if !woke {
@@ -108,13 +115,22 @@ func discoverSandboxPeer(ctx context.Context, client *agent37.Client, instance a
 }
 
 func cloudMeshNodes(ctx context.Context, client *agent37.Client, instances []agent37.Instance, skipID string, allowWake bool) ([]peers.MeshNode, error) {
+	return discoverCloudNodes(ctx, client, instances, skipID, allowWake, false)
+}
+
+func discoverCloudNodes(ctx context.Context, client *agent37.Client, instances []agent37.Instance, skipID string, allowWake, forCleanup bool) ([]peers.MeshNode, error) {
 	var group sync.WaitGroup
 	limit := make(chan struct{}, 6)
 	nodes := make([]peers.MeshNode, len(instances))
 	failures := make([]error, len(instances))
 	for i, instance := range instances {
-		if instance.ID == skipID || !isManaged(instance) || instance.Metadata["tailnet"] != "tailscale" ||
-			(instance.Status != "running" && (!allowWake || instance.Status != "sleeping")) {
+		if instance.ID == skipID || !isManaged(instance) || instance.Metadata["tailnet"] != "tailscale" {
+			continue
+		}
+		if instance.Status != "running" && (!allowWake || instance.Status != "sleeping") {
+			if forCleanup {
+				failures[i] = fmt.Errorf("cannot check T3 links on %s while it is %s", instance.Metadata["environment"], instance.Status)
+			}
 			continue
 		}
 		group.Go(func() {
@@ -130,12 +146,21 @@ func cloudMeshNodes(ctx context.Context, client *agent37.Client, instances []age
 				failures[i] = errors.New("a managed sandbox has an invalid identity")
 				return
 			}
-			proof, err := discoverSandboxPeer(ctx, client, instance, allowWake)
+			proof, err := discoverSandboxPeer(ctx, client, instance, allowWake, forCleanup)
 			if err == nil {
-				if requiresDesktopConfirmation(instance) && !proof.DesktopConfirmed {
+				pendingConfirmation := requiresDesktopConfirmation(instance) && !proof.DesktopConfirmed
+				if pendingConfirmation && !forCleanup {
 					return
 				}
 				nodes[i], err = meshNode(client, instance.ID, name, proof)
+				nodes[i].CleanupOnly = pendingConfirmation || !proof.PeerProxy || proof.Offline || proof.EnvironmentID == ""
+				if !proof.PeerProxy && !forCleanup {
+					nodes[i] = peers.MeshNode{}
+					err = errors.New("sandbox needs a fresh boot for T3 peer routing")
+				}
+				if err == nil && forCleanup && allowWake && !pendingConfirmation && !proof.PeerProxy {
+					err = errors.New("sandbox needs a fresh boot for T3 peer routing")
+				}
 			}
 			if err != nil {
 				failures[i] = fmt.Errorf("%s: %w", name, err)
@@ -145,7 +170,7 @@ func cloudMeshNodes(ctx context.Context, client *agent37.Client, instances []age
 	group.Wait()
 	var ready []peers.MeshNode
 	for _, node := range nodes {
-		if node.EnvironmentID != "" {
+		if node.URL != "" {
 			ready = append(ready, node)
 		}
 	}
@@ -155,6 +180,10 @@ func cloudMeshNodes(ctx context.Context, client *agent37.Client, instances []age
 func linkStartedSandbox(ctx context.Context, client *agent37.Client, instance agent37.Instance, name string, configured []peers.Peer, proof setupProof, diagnostic io.Writer) {
 	if requiresDesktopConfirmation(instance) && !proof.DesktopConfirmed {
 		notice(diagnostic, warning, "T3 linking awaits desktop confirmation. Run t3-agent37 link %s.", name)
+		return
+	}
+	if !proof.PeerProxy || proof.EnvironmentID == "" {
+		notice(diagnostic, warning, "T3 mesh pending for %s. Sandbox needs a fresh boot for T3 peer routing.", name)
 		return
 	}
 	node, err := meshNode(client, instance.ID, name, sandboxPeer{

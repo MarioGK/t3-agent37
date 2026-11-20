@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -42,12 +43,10 @@ func TestDeletionCommandsSelectManagedTargets(t *testing.T) {
 			body = `{"data":[` + strings.Join([]string{newer, unmanaged, older, deleted}, ",") + `]}`
 		case "GET /v1/instances/bbbbbbbbbb":
 			body = newer
-		case "POST /v1/instances/bbbbbbbbbb/stop":
-			body = `{"id":"bbbbbbbbbb","status":"stopped"}`
 		case "DELETE /v1/instances/bbbbbbbbbb":
 			status = http.StatusNoContent
-		case "POST /v1/instances/aaaaaaaaaa/stop":
-			body = `{"id":"aaaaaaaaaa","status":"stopped"}`
+		case "GET /v1/instances/aaaaaaaaaa":
+			body = older
 		case "DELETE /v1/instances/aaaaaaaaaa":
 			status = http.StatusNoContent
 		default:
@@ -70,21 +69,21 @@ func TestDeletionCommandsSelectManagedTargets(t *testing.T) {
 	if err := run(ctx, []string{"down"}, &output, &diagnostic); err != nil {
 		t.Fatal(err)
 	}
-	if err := json.Unmarshal(output.Bytes(), &row); err != nil || row["id"] != "bbbbbbbbbb" || row["status"] != "deleted" || len(calls) != 5 {
+	if err := json.Unmarshal(output.Bytes(), &row); err != nil || row["id"] != "bbbbbbbbbb" || row["status"] != "deleted" || len(calls) != 4 {
 		t.Fatalf("wrong deletion: %v, %v, %v", row, calls, err)
 	}
 	output.Reset()
 	if err := run(ctx, []string{"delete", "z-older", "--dry-run"}, &output, &diagnostic); err != nil {
 		t.Fatal(err)
 	}
-	if err := json.Unmarshal(output.Bytes(), &row); err != nil || row["id"] != "aaaaaaaaaa" || row["action"] != "delete" || len(calls) != 6 {
+	if err := json.Unmarshal(output.Bytes(), &row); err != nil || row["id"] != "aaaaaaaaaa" || row["action"] != "delete" || len(calls) != 5 {
 		t.Fatalf("wrong named preview: %v, %v, %v", row, calls, err)
 	}
 	output.Reset()
 	if err := run(ctx, []string{"delete", "z-older"}, &output, &diagnostic); err != nil {
 		t.Fatal(err)
 	}
-	if err := json.Unmarshal(output.Bytes(), &row); err != nil || row["id"] != "aaaaaaaaaa" || row["status"] != "deleted" || len(calls) != 9 {
+	if err := json.Unmarshal(output.Bytes(), &row); err != nil || row["id"] != "aaaaaaaaaa" || row["status"] != "deleted" || len(calls) != 8 {
 		t.Fatalf("wrong named deletion: %v, %v, %v", row, calls, err)
 	}
 }
@@ -149,6 +148,11 @@ func TestDownRetriesExactTargetAfterLostDeleteResponse(t *testing.T) {
 	}
 	createdReplacement = true
 	calls = nil
+	if row := runDownTest(t, "down", "--dry-run"); row["id"] != "bbbbbbbbbb" || row["action"] != "none" ||
+		!slices.Equal(calls, []string{"GET /v1/instances/bbbbbbbbbb"}) {
+		t.Fatalf("preview retargeted or advertised an already applied operation: %v, %v", row, calls)
+	}
+	calls = nil
 	if row := runDownTest(t, "down"); row["id"] != "bbbbbbbbbb" || row["status"] != "deleted" ||
 		!slices.Equal(calls, []string{"GET /v1/instances/bbbbbbbbbb"}) {
 		t.Fatalf("retry selected a different target: %v, %v", row, calls)
@@ -166,6 +170,119 @@ func TestDownRetriesExactTargetAfterLostDeleteResponse(t *testing.T) {
 	}
 }
 
+func TestDeleteRetriesAcrossEntrypoints(t *testing.T) {
+	for _, scenario := range []struct {
+		name      string
+		first     []string
+		retry     []string
+		loseReply bool
+	}{
+		{"same name after lost reply", []string{"delete", "con"}, []string{"del", "con"}, true},
+		{"bare then named after lost reply", []string{"down"}, []string{"down", "--delete", "--yes", "con"}, true},
+		{"named then bare after lost result", []string{"del", "con"}, []string{"down"}, false},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			t.Setenv("AGENT37_API_KEY", "fixture-only")
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			state, _ := statePath()
+			if err := os.MkdirAll(state, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			marker := sandboxStatePath(state, "con", ".pending")
+			if err := os.WriteFile(marker, []byte("original"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			const original = `{"id":"aaaaaaaaaa","name":"my cloud label","status":"failed","created":100,"metadata":{"managed_by":"t3-agent37","environment":"con"}}`
+			const replacement = `{"id":"bbbbbbbbbb","status":"running","created":200,"metadata":{"managed_by":"t3-agent37","environment":"con"}}`
+			transport := http.DefaultTransport
+			t.Cleanup(func() { http.DefaultTransport = transport })
+			var deleted bool
+			http.DefaultTransport = downTestTransport(func(r *http.Request) (*http.Response, error) {
+				switch call := r.Method + " " + r.URL.Path; call {
+				case "GET /v1/instances":
+					if deleted {
+						return downResponse(200, `{"data":[`+replacement+`]}`), nil
+					}
+					return downResponse(200, `{"data":[`+original+`]}`), nil
+				case "GET /v1/instances/aaaaaaaaaa":
+					if deleted {
+						return downResponse(404, `{}`), nil
+					}
+					return downResponse(200, original), nil
+				case "DELETE /v1/instances/aaaaaaaaaa":
+					if deleted {
+						return nil, errors.New("duplicate deletion")
+					}
+					deleted = true
+					if scenario.loseReply {
+						return nil, io.ErrUnexpectedEOF
+					}
+					return downResponse(200, `{"id":"aaaaaaaaaa","deleted":true}`), nil
+				default:
+					t.Errorf("unexpected request %s", call)
+					return nil, errors.New("unexpected request")
+				}
+			})
+			if err := run(t.Context(), scenario.first, brokenOutput{}, io.Discard); err == nil || !deleted {
+				t.Fatalf("expected ambiguous result after delete, got %v", err)
+			}
+			if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("old create marker remains: %v", err)
+			}
+			if err := os.WriteFile(marker, []byte("replacement"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if row := runDownTest(t, scenario.retry...); row["id"] != "aaaaaaaaaa" || row["name"] != "con" || row["cloud_name"] != "my cloud label" {
+				t.Fatalf("retry changed the original target: %v", row)
+			}
+			if content, err := os.ReadFile(marker); err != nil || string(content) != "replacement" {
+				t.Fatalf("retry changed the replacement marker: %q, %v", content, err)
+			}
+		})
+	}
+}
+
+type brokenOutput struct{}
+
+func (brokenOutput) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }
+
+func TestDownDoesNotRetargetOnKeyChange(t *testing.T) {
+	t.Setenv("AGENT37_API_KEY", "new-key")
+	t.Setenv("XDG_STATE_HOME", filepath.Join(t.TempDir(), "test[legacy]"))
+	state, _ := statePath()
+	legacyPath := filepath.Join(state, "last-down-"+keyScope(agent37.New("old-key"))+".json")
+	if err := saveConfigJSON(t.Context(), legacyPath, nil, downReceipt{ID: "aaaaaaaaaa", Name: "ts-2", Status: "deleted", Created: 200}); err != nil {
+		t.Fatal(err)
+	}
+	transport := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = transport })
+	http.DefaultTransport = downTestTransport(func(r *http.Request) (*http.Response, error) {
+		t.Errorf("changed-key command accessed API: %s %s", r.Method, r.URL.Path)
+		return nil, errors.New("unexpected request")
+	})
+	for _, args := range [][]string{{"down"}, {"down", "--delete", "--yes"}, {"down", "--dry-run"}} {
+		if err := run(t.Context(), args, io.Discard, io.Discard); !errors.Is(err, errDownKeyChanged) {
+			t.Fatalf("%v: expected explicit target requirement, got %v", args, err)
+		}
+	}
+}
+
+func TestDownPreviewOfEmptyWorkspace(t *testing.T) {
+	t.Setenv("AGENT37_API_KEY", "fixture-only")
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	transport := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = transport })
+	http.DefaultTransport = downTestTransport(func(r *http.Request) (*http.Response, error) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/instances" {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		return downResponse(200, `{"data":[]}`), nil
+	})
+	if row := runDownTest(t, "down", "--dry-run"); row["status"] != "absent" || row["action"] != "none" {
+		t.Fatalf("wrong empty preview: %v", row)
+	}
+}
+
 func TestDownSucceedsAndRetriesPendingPeerCleanup(t *testing.T) {
 	t.Setenv("AGENT37_API_KEY", "fixture-only")
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
@@ -174,6 +291,7 @@ func TestDownSucceedsAndRetriesPendingPeerCleanup(t *testing.T) {
 	peerFile := filepath.Join(t.TempDir(), "peers.json")
 	t.Setenv("T3_AGENT37_PEERS_FILE", peerFile)
 	const target = `{"id":"bbbbbbbbbb","status":"stopped","created":200,"metadata":{"managed_by":"t3-agent37","environment":"ts-1","tailnet":"tailscale"}}`
+	const newer = `{"id":"cccccccccc","status":"running","created":300,"metadata":{"managed_by":"t3-agent37","environment":"ts-2"}}`
 	originalTransport := http.DefaultTransport
 	t.Cleanup(func() { http.DefaultTransport = originalTransport })
 	var deletes int
@@ -184,7 +302,7 @@ func TestDownSucceedsAndRetriesPendingPeerCleanup(t *testing.T) {
 			if deletes == 0 {
 				return downResponse(http.StatusOK, `{"data":[`+target+`]}`), nil
 			}
-			return downResponse(http.StatusOK, `{"data":[]}`), nil
+			return downResponse(http.StatusOK, `{"data":[`+newer+`]}`), nil
 		case "GET /v1/instances/bbbbbbbbbb":
 			return downResponse(http.StatusOK, target), nil
 		case "DELETE /v1/instances/bbbbbbbbbb":
@@ -196,7 +314,8 @@ func TestDownSucceedsAndRetriesPendingPeerCleanup(t *testing.T) {
 	})
 	var output, diagnostic bytes.Buffer
 	if err := run(t.Context(), []string{"down"}, &output, &diagnostic); err != nil || deletes != 1 ||
-		!strings.Contains(output.String(), `"status":"deleted"`) || !strings.Contains(diagnostic.String(), "T3 cleanup pending for ts-1") {
+		!strings.Contains(output.String(), `"status":"deleted"`) || !strings.Contains(output.String(), `"cleanup_pending":true`) ||
+		!strings.Contains(diagnostic.String(), "T3 cleanup pending for ts-1") {
 		t.Fatalf("deletion did not report the peer problem separately: %v, %d, %s, %s", err, deletes, &output, &diagnostic)
 	}
 	if err := os.WriteFile(peerFile, []byte(`[]`), 0o600); err != nil {
@@ -206,6 +325,51 @@ func TestDownSucceedsAndRetriesPendingPeerCleanup(t *testing.T) {
 	diagnostic.Reset()
 	if err := run(t.Context(), []string{"down"}, &output, &diagnostic); err != nil || deletes != 1 || diagnostic.Len() != 0 {
 		t.Fatalf("retry did not finish cleanup without deleting again: %v, %d, %s", err, deletes, &diagnostic)
+	}
+}
+
+func TestLatestDownReceiptRefusesASecondTimestampTie(t *testing.T) {
+	transport := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = transport })
+	http.DefaultTransport = downTestTransport(func(r *http.Request) (*http.Response, error) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/instances" {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		const rows = `{"data":[{"id":"aaaaaaaaaa","status":"running","created":200,"metadata":{"managed_by":"t3-agent37","environment":"original"}},
+		{"id":"bbbbbbbbbb","status":"running","created":200,"metadata":{"managed_by":"t3-agent37","environment":"new"}}]}`
+		return downResponse(200, rows), nil
+	})
+	_, err := selectDownTarget(t.Context(), agent37.New("fixture"), options{latest: true}, downReceipt{ID: "aaaaaaaaaa", Created: 200})
+	if err == nil || !strings.Contains(err.Error(), "same Agent37 creation time") {
+		t.Fatalf("expected explicit choice for a timestamp tie, got %v", err)
+	}
+}
+
+func TestStopRetriesCheckpointInProgress(t *testing.T) {
+	transport := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = transport })
+	var calls []string
+	http.DefaultTransport = downTestTransport(func(r *http.Request) (*http.Response, error) {
+		call := r.Method + " " + r.URL.Path
+		calls = append(calls, call)
+		switch call {
+		case "POST /v1/instances/aaaaaaaaaa/exec":
+			if len(calls) == 1 {
+				return downResponse(409, `{"error":{"code":"try_again"}}`), nil
+			}
+			return downResponse(200, `{"exit_code":0}`), nil
+		case "GET /v1/instances/aaaaaaaaaa":
+			return downResponse(200, `{"id":"aaaaaaaaaa","status":"sleeping","metadata":{"managed_by":"t3-agent37","environment":"test","tailnet":"tailscale"}}`), nil
+		case "POST /v1/instances/aaaaaaaaaa/stop":
+			return downResponse(200, `{"id":"aaaaaaaaaa","status":"stopped"}`), nil
+		default:
+			return nil, fmt.Errorf("unexpected request %s", call)
+		}
+	})
+	instance, err := stopSandbox(t.Context(), agent37.New("fixture"), agent37.Instance{ID: "aaaaaaaaaa", Status: "sleeping",
+		Metadata: map[string]string{"tailnet": "tailscale"}}, "test")
+	if err != nil || instance.Status != "stopped" || len(calls) != 4 {
+		t.Fatalf("checkpoint retry failed: %s, %v, %v", instance.Status, calls, err)
 	}
 }
 

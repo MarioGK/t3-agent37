@@ -75,7 +75,7 @@ func printCommandHelpAtWidth(output io.Writer, command cliCommand, flags *flag.F
 	case "up", "create":
 		description += ". Omit the name to use the lowest available number."
 	case "down":
-		description = "Delete the newest managed sandbox and its disk. After deletion, bare down keeps the same target until a newer sandbox exists. Pass a name to stop that sandbox and keep its disk."
+		description = "Delete the newest managed sandbox and its disk. Retries keep the saved target while cleanup is pending. Pass a name to stop that sandbox and keep its disk."
 	case "delete", "del":
 		description = "Permanently delete a sandbox and its disk. Omit the name to open the picker."
 	}

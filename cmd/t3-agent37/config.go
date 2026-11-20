@@ -156,9 +156,26 @@ func saveConfigJSON(ctx context.Context, path string, original []byte, values an
 	encoder := json.NewEncoder(temp)
 	encoder.SetIndent("", "  ")
 	writeErr := encoder.Encode(values)
+	if writeErr == nil {
+		writeErr = temp.Sync()
+	}
 	closeErr := temp.Close()
 	if err := errors.Join(writeErr, closeErr); err != nil {
 		return err
 	}
-	return os.Rename(temp.Name(), path)
+	if err := os.Rename(temp.Name(), path); err != nil {
+		return err
+	}
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	return errors.Join(syncDirectory(dir), syncDirectory(filepath.Dir(dir)))
+}
+
+func syncDirectory(dir string) error {
+	directory, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	return errors.Join(directory.Sync(), directory.Close())
 }

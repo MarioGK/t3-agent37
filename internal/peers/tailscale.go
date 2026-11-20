@@ -20,6 +20,7 @@ import (
 const DefaultEnrollmentTag = "tag:agent37"
 
 var tagPattern = regexp.MustCompile(`^tag:[a-z][a-z0-9-]*$`)
+var tailnetNodeID = regexp.MustCompile(`^[a-zA-Z0-9]{1,128}$`)
 
 var ErrEnrollmentAuthorization = errors.New("Tailscale OAuth authorization failed")
 var ErrEnrollmentTagDenied = fmt.Errorf("%w. Tailscale denied the requested tags", ErrEnrollmentAuthorization)
@@ -158,4 +159,51 @@ func enrollmentAPIError(action string, err error) error {
 		return fmt.Errorf("could not %s (Tailscale HTTP %d)", action, response.Status)
 	}
 	return fmt.Errorf("could not %s through the Tailscale API", action)
+}
+
+// RemoveSandboxDevice removes only the tagged device for a specific sandbox.
+// The caller must first verify that Agent37 deleted that immutable sandbox ID.
+func RemoveSandboxDevice(ctx context.Context, clientID, secret string, tags []string, hostname string) error {
+	return removeSandboxDevice(ctx, tailscaleHTTPClient(), &tailscaleAPI, clientID, secret, tags, hostname)
+}
+
+func removeSandboxDevice(ctx context.Context, client *http.Client, base *url.URL, clientID, secret string, tags []string, hostname string) error {
+	if !sandboxHostname.MatchString(hostname) || len(tags) == 0 {
+		return errors.New("invalid sandbox Tailscale device identity")
+	}
+	api, err := tailscaleOAuthClient(ctx, client, base, clientID, secret, "devices:core", tags)
+	if err != nil {
+		return errors.New("could not authorize Tailscale device removal. Check Devices Core Write for the enrollment tags")
+	}
+	devices, err := api.Devices().List(ctx)
+	if err != nil {
+		return enrollmentAPIError("list sandbox devices", err)
+	}
+	var match string
+	for _, device := range devices {
+		dnsName := strings.TrimSuffix(device.Name, ".")
+		label, _, _ := strings.Cut(dnsName, ".")
+		if label != hostname || !strings.HasSuffix(dnsName, ".ts.net") {
+			continue
+		}
+		if match != "" || device.Hostname != hostname || !tailnetNodeID.MatchString(device.NodeID) || !hasDeviceTags(device.Tags, tags) {
+			return errors.New("the matching Tailscale device did not have the expected identity and tags")
+		}
+		match = device.NodeID
+	}
+	if match != "" {
+		if err := api.Devices().Delete(ctx, match); err != nil && !tailscale.IsNotFound(err) {
+			return enrollmentAPIError("remove the sandbox device", err)
+		}
+	}
+	return nil
+}
+
+func hasDeviceTags(deviceTags, required []string) bool {
+	for _, tag := range required {
+		if !slices.Contains(deviceTags, tag) {
+			return false
+		}
+	}
+	return true
 }

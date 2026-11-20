@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"strings"
 	"time"
@@ -209,21 +210,81 @@ func wake(ctx context.Context, client *agent37.Client, instance agent37.Instance
 	return instance, err
 }
 
+func leaveSandboxTailnet(ctx context.Context, client *agent37.Client, id string) error {
+	check := `if test -f "$HOME/.local/share/t3-agent37/tailnet.py"; then ` + remote + " tailnet-leave; fi"
+	_, err := client.Exec(ctx, id, check)
+	return err
+}
+
+func deleteSandbox(ctx context.Context, client *agent37.Client, instance agent37.Instance, name string) (bool, error) {
+	if instance.Status == "deleting" {
+		return false, fmt.Errorf("Agent37 is still deleting %s. Retry to check its status", name)
+	}
+	tailnetPending := instance.Metadata["tailnet"] == "tailscale" && instance.Status != "stopped"
+	if tailnetPending && !instance.PastDue && (instance.Status == "running" || instance.Status == "sleeping") {
+		// Guest access is best effort. Agent37 DELETE also works for failed
+		// instances and cold sleepers that cannot be stopped.
+		logout, cancel := context.WithTimeout(ctx, 25*time.Second)
+		tailnetPending = leaveSandboxTailnet(logout, client, instance.ID) != nil
+		cancel()
+	}
+	if err := ctx.Err(); err != nil {
+		return tailnetPending, err
+	}
+	return tailnetPending, client.Delete(ctx, instance.ID)
+}
+
 func stopSandbox(ctx context.Context, client *agent37.Client, instance agent37.Instance, name string) (agent37.Instance, error) {
 	if instance.Status == "stopped" {
 		return instance, nil
 	}
-	if instance.Metadata["tailnet"] == "tailscale" {
-		check := `if test -f "$HOME/.local/share/t3-agent37/tailnet.py"; then ` + remote + " tailnet-leave; fi"
-		if _, err := client.Exec(ctx, instance.ID, check); err != nil {
-			return instance, fmt.Errorf("Tailscale logout failed for %s. Retry down: %w", name, err)
+	stopCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
+	tailnet := instance.Metadata["tailnet"] == "tailscale"
+	loggedOut := !tailnet || instance.PastDue
+	for {
+		switch instance.Status {
+		case "stopped":
+			return instance, nil
+		case "running", "sleeping":
+			if !loggedOut {
+				err := leaveSandboxTailnet(stopCtx, client, instance.ID)
+				if err != nil && !agent37RetryAfterCheckpoint(err) {
+					return instance, fmt.Errorf("Tailscale logout failed for %s. Retry down: %w", name, err)
+				}
+				loggedOut = err == nil
+			}
+			if loggedOut {
+				update, err := client.Lifecycle(stopCtx, instance.ID, "stop")
+				if err == nil && update.ID == instance.ID && update.Status == "stopped" {
+					instance.Status = "stopped"
+					return instance, nil
+				}
+				if err != nil && !agent37RetryAfterCheckpoint(err) {
+					return instance, err
+				}
+			}
+		case "provisioning", "starting", "stopping", "restarting", "updating", "waking":
+			// Recheck while Agent37 completes the in-flight operation.
+		default:
+			return instance, fmt.Errorf("Agent37 cannot stop %s in state %q", name, instance.Status)
 		}
+		select {
+		case <-stopCtx.Done():
+			return instance, stopCtx.Err()
+		case <-time.After(time.Second):
+		}
+		current, err := readDownTarget(stopCtx, client, downReceipt{ID: instance.ID, Name: name})
+		if err != nil {
+			return instance, err
+		}
+		instance = current
 	}
-	update, err := client.Lifecycle(ctx, instance.ID, "stop")
-	if update.Status != "" {
-		instance.Status = update.Status
-	}
-	return instance, err
+}
+
+func agent37RetryAfterCheckpoint(err error) bool {
+	apiError, ok := errors.AsType[*agent37.Error](err)
+	return ok && apiError.Status == http.StatusConflict && apiError.Code == "try_again"
 }
 
 func startSandbox(ctx context.Context, client *agent37.Client, instance agent37.Instance, name string, peerLinks, githubAccess bool, diagnostic io.Writer) (agent37.Instance, setupProof, error) {

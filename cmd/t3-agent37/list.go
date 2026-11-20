@@ -76,7 +76,7 @@ func renderSandboxList(managed []agent37.Instance, width int, heading string) st
 }
 
 func sandboxDisplayName(instance agent37.Instance) string {
-	return cmp.Or(terminalText(instance.Name), terminalText(instance.Metadata["environment"]), "—")
+	return cmp.Or(terminalText(instance.Metadata["environment"]), terminalText(instance.Name), "—")
 }
 
 const sandboxColumnPadding = 2

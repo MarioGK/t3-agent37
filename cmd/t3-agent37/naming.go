@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -16,6 +18,7 @@ import (
 const maxNameSuffix = 999_999_999
 
 var errSandboxNameTaken = errors.New("generated sandbox name is in use")
+var windowsDeviceName = regexp.MustCompile(`^(con|prn|aux|nul|com[1-9]|lpt[1-9])$`)
 
 func occupiedSandboxNames(state string, instances []agent37.Instance) (map[string]struct{}, error) {
 	occupied := make(map[string]struct{}, len(instances))
@@ -32,7 +35,7 @@ func occupiedSandboxNames(state string, instances []agent37.Instance) (map[strin
 	}
 	for _, entry := range entries {
 		if name, ok := strings.CutSuffix(entry.Name(), ".pending"); ok {
-			occupied[name] = struct{}{}
+			occupied[strings.TrimPrefix(name, ".sandbox-")] = struct{}{}
 		}
 	}
 	return occupied, nil
@@ -69,7 +72,14 @@ func previewSandboxName(ctx context.Context, state, prefix string) (string, erro
 }
 
 func sandboxLock(state, name string) *flock.Flock {
-	return flock.New(filepath.Join(state, name+".lifecycle.lock"))
+	return flock.New(sandboxStatePath(state, name, ".lifecycle.lock"))
+}
+
+func sandboxStatePath(state, name, suffix string) string {
+	if runtime.GOOS == "windows" && windowsDeviceName.MatchString(name) {
+		name = ".sandbox-" + name
+	}
+	return filepath.Join(state, name+suffix)
 }
 
 func reserveSandboxName(ctx context.Context, state, prefix string, instances []agent37.Instance) (string, *flock.Flock, error) {

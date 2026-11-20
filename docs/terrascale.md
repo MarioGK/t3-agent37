@@ -60,14 +60,20 @@ confirmed client connects. A pending sandbox stays out of the mesh until you
 finish pairing with `link <name>`. Use `link` to pair each managed sandbox in
 turn, or `up --no-desktop` for unattended provisioning.
 `connect <name> --pair` prints a link for manual pairing.
-`down` logs out the device before deleting the newest managed sandbox.
-It saves the target on the workstation so a retry can resume if the delete
-response is lost. After deletion, bare `down` reuses that target until a
-newer sandbox exists. Use `delete <name>` to remove an older sandbox.
+`down` deletes the newest managed sandbox. It tries to log out its Tailscale
+device first. If the guest is unavailable, the CLI can remove its exact tagged
+device with Tailscale Devices Core Write. Without that grant, the ephemeral
+device expires and the CLI reports pending cleanup.
+`down` and `delete <name>` save the target ID on the workstation, so a retry
+can finish the same operation if its result is lost. Bare `down` retries
+pending cleanup before selecting a newer sandbox. Use `delete <name>` to
+choose another sandbox. After rotating an API key, use the `delete` picker
+if the CLI needs you to confirm a sandbox under the new key.
 `down <name>` logs out the device and stops that sandbox. Both unlink it from
 available T3 environments. Use `up <name>` to restore peer links after a stop.
-Cleanup warnings leave a successful sandbox deletion intact. Run `sync` when
-an unavailable peer comes back online.
+Cleanup warnings leave a successful sandbox deletion intact. JSON output
+includes `"cleanup_pending": true` when links still need attention. Run `sync`
+when an unavailable peer comes back online.
 Inside the sandbox, use
 `socks5h://127.0.0.1:1055` to reach tailnet services.
 
@@ -80,8 +86,10 @@ To include fixed T3 servers in the mesh, save the peers in
 configured T3 servers and managed sandboxes in the workspace. They can wake
 auto-sleeping sandboxes to link them. A sandbox stopped with `down <name>`
 returns to the mesh after `up <name>`. `sync` also removes links from available
-peers to stopped or deleted sandboxes. `sync --dry-run` previews stale links
-on currently available peers.
+peers to stopped or deleted sandboxes. For an ID Agent37 cannot find, `sync`
+requires a local deletion record before removing the link. An ID from another
+workspace can return the same 404. `sync --dry-run` checks configured servers
+without using sandbox exec, which can wake a sleeping sandbox.
 
 ```json
 [

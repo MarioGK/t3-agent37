@@ -139,3 +139,46 @@ func TestParseEnrollmentTags(t *testing.T) {
 		}
 	}
 }
+
+func TestRemovalUsesOnlyExactTaggedNode(t *testing.T) {
+	for _, tc := range []struct {
+		name, device string
+		wantDelete   bool
+		wantError    bool
+	}{
+		{"tagged target", `,{"name":"a37-ts-1-aaaaaaaaaa.dev.ts.net","hostname":"a37-ts-1-aaaaaaaaaa","nodeId":"nTarget","tags":["tag:agent37"]}`, true, false},
+		{"tag mismatch", `,{"name":"a37-ts-1-aaaaaaaaaa.dev.ts.net","hostname":"a37-ts-1-aaaaaaaaaa","nodeId":"nWrong","tags":["tag:another"]}`, false, true},
+		{"already gone", ``, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var deleted atomic.Bool
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch r.Method + " " + r.URL.Path {
+				case "POST /api/v2/oauth/token":
+					if r.ParseForm() != nil || r.Form.Get("scope") != "devices:core" || r.Form.Get("tags") != "tag:agent37" {
+						t.Error("unexpected device scope")
+					}
+					fmt.Fprint(w, `{"access_token":"fixture-token","token_type":"Bearer","expires_in":3600}`)
+				case "GET /api/v2/tailnet/-/devices":
+					fmt.Fprint(w, `{"devices":[{"name":"a37-ts-1-bbbbbbbbbb.dev.ts.net","hostname":"a37-ts-1-bbbbbbbbbb","nodeId":"nOther","tags":["tag:agent37"]}`+tc.device+`]}`)
+				case "DELETE /api/v2/device/nTarget":
+					deleted.Store(true)
+					w.WriteHeader(http.StatusNoContent)
+				default:
+					t.Errorf("unexpected Tailscale call %s %s", r.Method, r.URL.Path)
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+			base, err := url.Parse(server.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = removeSandboxDevice(t.Context(), server.Client(), base, "fixture-id", "fixture-secret", []string{DefaultEnrollmentTag}, "a37-ts-1-aaaaaaaaaa")
+			if deleted.Load() != tc.wantDelete || (err != nil) != tc.wantError {
+				t.Fatalf("device removal = %t, %v", deleted.Load(), err)
+			}
+		})
+	}
+}
