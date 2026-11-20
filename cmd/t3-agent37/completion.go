@@ -96,6 +96,16 @@ func runCompletion(ctx context.Context, args []string, output, diagnostic io.Wri
 			command.MarkFlagsMutuallyExclusive("dry-run", "verify")
 		case "create":
 			command.MarkFlagsMutuallyExclusive("yes", "dry-run")
+		case "config":
+			command.MarkFlagsMutuallyExclusive("show-size", "cpu")
+			command.MarkFlagsMutuallyExclusive("show-size", "ram")
+		}
+		if opts.cpu != nil {
+			for name, values := range map[string][]string{"cpu": {"2", "4"}, "ram": {"4", "8", "16", "32"}} {
+				if err := command.RegisterFlagCompletionFunc(name, cobra.FixedCompletions(values, cobra.ShellCompDirectiveNoFileComp)); err != nil {
+					return err
+				}
+			}
 		}
 		if opts.action == "create" || opts.action == "up" {
 			if err := command.RegisterFlagCompletionFunc("provider", cobra.FixedCompletions(

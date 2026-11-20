@@ -197,6 +197,11 @@ func setupStatus(output io.Writer, config workstationConfig, runtime runtimeConf
 	report(agent37Key != "", "Agent37 API key", "Create a workspace API key at "+agent37Dashboard)
 	report(strings.TrimSpace(config.Template) != "", "Agent37 template", "Choose a Tailscale-ready template. "+templateGuide)
 	report(validateNamePrefix(config.NamePrefix) == nil, "Sandbox name prefix", "Use t3-agent37 config to set a valid prefix.")
+	if size, err := selectSandboxSize(config.sandboxSize(), nil, nil); err != nil {
+		report(false, "Sandbox size", "Run t3-agent37 config --ram 8 to select a supported size.")
+	} else {
+		notice(output, success, "Configured sandbox size · %s", size)
+	}
 	report(config.Tailscale == nil || *config.Tailscale, "Tailscale enrollment", "Run t3-agent37 setup to enable it.")
 	tags, tagErr := peers.ParseEnrollmentTags(config.TailscaleTags)
 	if tagErr != nil {

@@ -50,6 +50,14 @@ Use `up --no-desktop` for headless runs.
 Confirm each desktop pairing in order. The CLI then syncs the mesh once.
 `up 10 --dry-run` previews the batch. `up 10 --no-desktop` runs it headless.
 Use `up <name>` to start an existing sandbox.
+New sandboxes default to **4 vCPU and 8 GB RAM**. Use `up --ram 16` for
+one launch or `up 10 --ram 4` to size every sandbox in a batch. The CLI
+selects the matching CPU count. Use `config --ram 16` to save a default or
+`config --show-size` to check it. Both `up` and `config` accept `--cpu` with
+`--ram`. The `config` menu also has a **Sandbox size** picker.
+Agent37 Default supports 2 vCPU with 4 GB, or 4 vCPU with 8, 16, or 32 GB.
+[Agent37 sizing](https://www.agent37.com/docs/agents-api/instance-sizing)
+
 Use `ls --json` for scripts. Sandbox previews and `start`, `stop`, and `delete`
 results keep their JSON output when piped.
 

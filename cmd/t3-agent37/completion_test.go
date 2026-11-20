@@ -72,6 +72,8 @@ func TestCompleteSandboxNamesAndTemplateRevisions(t *testing.T) {
 		{args: []string{"up", "--no-desktop", ""}, want: []string{"10", "2", "5", "agent-1", "agent-2"}},
 		{args: []string{"up", "1"}, want: []string{"10"}},
 		{args: []string{"up", "10", "--template", "terra-agent@"}, want: []string{"terra-agent@2", "terra-agent@4"}},
+		{args: []string{"up", "10", "--ram", ""}, want: []string{"4", "8", "16", "32"}},
+		{args: []string{"config", "--cpu", ""}, want: []string{"2", "4"}},
 		{args: []string{"down", "agent-1", ""}},
 		{args: []string{"up", "--template", ""}, want: []string{"terra-agent", "terra-agent@4"}},
 		{args: []string{"up", "--template", "terra-agent@"}, want: []string{"terra-agent@2", "terra-agent@4"}},

@@ -21,12 +21,13 @@ const defaultNamePrefix = "agent"
 var prefixPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,31}[a-z0-9])?$`)
 
 type workstationConfig struct {
-	NamePrefix    string `json:"name_prefix"`
-	Template      string `json:"template,omitempty"`
-	Provider      string `json:"provider,omitempty"`
-	Tailscale     *bool  `json:"tailscale,omitempty"`
-	TailscaleTags string `json:"tailscale_tags,omitempty"`
-	GitHubAccess  *bool  `json:"github_access,omitempty"`
+	NamePrefix    string       `json:"name_prefix"`
+	Template      string       `json:"template,omitempty"`
+	Provider      string       `json:"provider,omitempty"`
+	Tailscale     *bool        `json:"tailscale,omitempty"`
+	TailscaleTags string       `json:"tailscale_tags,omitempty"`
+	GitHubAccess  *bool        `json:"github_access,omitempty"`
+	Resources     *sandboxSize `json:"resources,omitempty"`
 }
 
 func validateNamePrefix(prefix string) error {
@@ -120,7 +121,7 @@ func (file configFile) save(ctx context.Context) error {
 	if err := json.Unmarshal(encoded, &fields); err != nil {
 		return err
 	}
-	for _, key := range []string{"name_prefix", "template", "provider", "tailscale", "tailscale_tags", "github_access"} {
+	for _, key := range []string{"name_prefix", "template", "provider", "tailscale", "tailscale_tags", "github_access", "resources"} {
 		delete(existing, key)
 	}
 	maps.Copy(fields, existing)

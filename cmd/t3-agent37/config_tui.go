@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"slices"
 	"strings"
 
 	"charm.land/huh/v2"
@@ -51,7 +52,7 @@ func editConfig(ctx context.Context, output io.Writer) error {
 	if err := file.save(ctx); err != nil {
 		return err
 	}
-	return printDetails(output, "Sandbox defaults saved", detail{"File", file.path})
+	return printDetails(output, "Sandbox defaults saved", detail{"Resources", values.sandboxSize().String()}, detail{"File", file.path})
 }
 
 func sandboxDefaultFields(values *workstationConfig, templateHint string) []huh.Field {
@@ -66,7 +67,29 @@ func sandboxDefaultFields(values *workstationConfig, templateHint string) []huh.
 			Description(templateHint).
 			Placeholder("terrascale-agent37").
 			Value(&values.Template),
+		sandboxSizeChoice(values),
 	}
+}
+
+func sandboxSizeChoice(values *workstationConfig) *huh.Select[sandboxSize] {
+	selected := values.sandboxSize()
+	if !slices.Contains(sandboxSizes, selected) {
+		selected = defaultSandboxSize
+	}
+	values.Resources = &selected
+	choices := make([]huh.Option[sandboxSize], 0, len(sandboxSizes))
+	for _, size := range sandboxSizes {
+		label := size.String()
+		if size == defaultSandboxSize {
+			label += " (default)"
+		}
+		choices = append(choices, huh.NewOption(label, size))
+	}
+	return huh.NewSelect[sandboxSize]().
+		Title("Sandbox size").
+		Description("Agent37 Default resources per new sandbox.").
+		Options(choices...).
+		Value(values.Resources)
 }
 
 func providerChoice(values *workstationConfig) *huh.Select[string] {

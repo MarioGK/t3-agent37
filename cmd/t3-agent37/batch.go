@@ -31,7 +31,8 @@ func previewBatch(ctx context.Context, opts options, state string, output io.Wri
 		return printDetails(output, fmt.Sprintf("Preview · create %d sandboxes", len(names)),
 			detail{"Sandboxes", strings.Join(names, ", ")}, detail{"Template", opts.template},
 			detail{"Provider", providerLabel(opts.provider)},
-			detail{"Per sandbox", fmt.Sprintf("%d vCPU · %d GB RAM · %d min auto-sleep", sandboxCPU, sandboxRAM, sandboxIdle/time.Minute)},
+			detail{"Per sandbox", fmt.Sprintf("%s · %d min auto-sleep", opts.size, sandboxIdle/time.Minute)},
+			detail{"Batch RAM", fmt.Sprintf("%d GB", len(names)*opts.size.RAM)},
 			detail{"Network", "Private Tailscale"})
 	}
 	plans := make([]map[string]any, 0, len(names))
@@ -161,7 +162,7 @@ func provisionBatchSandbox(ctx context.Context, client *agent37.Client, enrollme
 	}
 	if item.err != nil {
 		if apiError, ok := errors.AsType[*agent37.Error](item.err); ok && apiError.Code == "instance_limit_reached" {
-			item.err = fmt.Errorf("Agent37 workspace memory limit reached. %d new sandboxes need %d GB of running memory: %w", opts.batchSize, opts.batchSize*sandboxRAM, apiError)
+			item.err = fmt.Errorf("Agent37 workspace memory limit reached. %d new sandboxes need %d GB of running memory: %w", opts.batchSize, opts.batchSize*opts.size.RAM, apiError)
 		}
 		return item
 	}

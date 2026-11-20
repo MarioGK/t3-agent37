@@ -24,8 +24,6 @@ import (
 
 const (
 	owner       = "t3-agent37"
-	sandboxCPU  = 4
-	sandboxRAM  = 8
 	sandboxIdle = 15 * time.Minute
 )
 
@@ -40,6 +38,9 @@ type options struct {
 	namePrefix                       string
 	targetID                         string
 	batchSize                        int
+	size                             sandboxSize
+	cpu, ram                         *int
+	showSize                         bool
 	yes, dryRun, pair, tailscale     bool
 	deleteSandbox                    bool
 	checkSetup                       bool
@@ -76,6 +77,12 @@ func parse(args []string, output io.Writer) (options, error) {
 	if err := flags.Parse(args[1:]); err != nil {
 		return opts, err
 	}
+	if !flags.Changed("cpu") {
+		opts.cpu = nil
+	}
+	if !flags.Changed("ram") {
+		opts.ram = nil
+	}
 	if opts.action == "sync" {
 		if flags.NArg() != 0 {
 			return opts, errors.New("sync does not take a sandbox name")
@@ -94,6 +101,9 @@ func parse(args []string, output io.Writer) (options, error) {
 		}
 		if opts.dryRun && !opts.repairSetup {
 			return opts, errors.New("--dry-run requires --repair-tailscale")
+		}
+		if opts.showSize && (opts.cpu != nil || opts.ram != nil) {
+			return opts, errors.New("use --show-size on its own")
 		}
 		return opts, nil
 	}
@@ -156,6 +166,10 @@ func parse(args []string, output io.Writer) (options, error) {
 		if err != nil {
 			return opts, err
 		}
+		opts.size, err = selectSandboxSize(config.sandboxSize(), opts.cpu, opts.ram)
+		if err != nil {
+			return opts, err
+		}
 		opts.namePrefix = config.NamePrefix
 		if !flags.Changed("github") {
 			opts.githubAccess = config.GitHubAccess == nil || *config.GitHubAccess
@@ -194,6 +208,13 @@ func onlyStartFlags(flags *flag.FlagSet) bool {
 }
 
 func addCommandFlags(flags *flag.FlagSet, opts *options) {
+	if opts.action == "config" || opts.action == "create" || opts.action == "up" {
+		opts.cpu = flags.Int("cpu", 0, "vCPUs for each new sandbox (2 or 4)")
+		opts.ram = flags.Int("ram", 0, "RAM in GB for each new sandbox (4, 8, 16, or 32)")
+	}
+	if opts.action == "config" {
+		flags.BoolVar(&opts.showSize, "show-size", false, "Print the default sandbox size")
+	}
 	if opts.action == "list" {
 		flags.BoolVar(&opts.listJSON, "json", false, "Print JSON for scripts")
 	}
@@ -270,7 +291,7 @@ func createPayload(opts options, extraEnv map[string]string) map[string]any {
 	maps.Copy(env, extraEnv)
 	payload := map[string]any{
 		"name": opts.name, "template": opts.template, "metadata": metadata, "type": "default",
-		"resources":    map[string]int{"cpu": sandboxCPU, "memory": sandboxRAM},
+		"resources":    opts.size,
 		"public_ports": []int{}, "auto_sleep": true, "idle_timeout_seconds": int(sandboxIdle / time.Second), "env": env,
 	}
 	if opts.provider == "opencode" {
@@ -594,6 +615,9 @@ func run(ctx context.Context, args []string, output, diagnostic io.Writer) error
 		return err
 	}
 	if opts.action == "config" {
+		if opts.showSize || opts.cpu != nil || opts.ram != nil {
+			return configureSandboxSize(ctx, opts, output)
+		}
 		return editConfig(ctx, diagnostic)
 	}
 	if opts.action == "setup" {
@@ -622,7 +646,7 @@ func run(ctx context.Context, args []string, output, diagnostic io.Writer) error
 		if _, terminal := ttyOutput(output); terminal {
 			return printDetails(output, "Preview · create sandbox",
 				detail{"Sandbox", opts.name}, detail{"Template", opts.template}, detail{"Provider", providerLabel(opts.provider)},
-				detail{"Resources", fmt.Sprintf("%d vCPU · %d GB RAM", sandboxCPU, sandboxRAM)},
+				detail{"Resources", opts.size.String()},
 				detail{"Auto-sleep", fmt.Sprintf("%d minutes", sandboxIdle/time.Minute)}, detail{"Network", "Private Tailscale"})
 		}
 		return jsonOutput(output, createPayload(opts, nil), true)

@@ -76,6 +76,8 @@ func printCommandHelpAtWidth(output io.Writer, command cliCommand, flags *flag.F
 	switch command.name {
 	case "up":
 		description = "Create a sandbox, create a batch with a count such as 10, or start an existing sandbox by name."
+	case "config":
+		description = "Edit sandbox defaults in a menu, save a size with --ram or --cpu, or check it with --show-size."
 	case "create":
 		description += ". Omit the name to use the lowest available number."
 	case "down":

@@ -103,11 +103,15 @@ func TestBatchStartsTenCreatesInParallelAndReportsPartialResults(t *testing.T) {
 			return downResponse(200, `{"data":[{"name":"terra-1","status":"running"}]}`), nil
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/instances":
 			var request struct {
-				Name     string
-				Metadata map[string]string
+				Name      string
+				Metadata  map[string]string
+				Resources sandboxSize
 			}
 			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 				return nil, err
+			}
+			if request.Resources != (sandboxSize{4, 16}) {
+				t.Errorf("create sent the wrong size: %v", request.Resources)
 			}
 			if creates.Add(1) == 10 {
 				close(allStarted)
@@ -137,9 +141,9 @@ func TestBatchStartsTenCreatesInParallelAndReportsPartialResults(t *testing.T) {
 	defer cancel()
 	state := t.TempDir()
 	var output bytes.Buffer
-	opts := options{batchSize: 10, generatedName: true, namePrefix: "terra", provider: "codex", template: "fixture@1", tailscale: true, noDesktop: true}
+	opts := options{batchSize: 10, size: sandboxSize{4, 16}, generatedName: true, namePrefix: "terra", provider: "codex", template: "fixture@1", tailscale: true, noDesktop: true}
 	err := runBatch(ctx, agent37.New("fixture"), nil, opts, state, &output, io.Discard)
-	if err == nil || creates.Load() != 10 || !strings.Contains(err.Error(), "80 GB") || ctx.Err() != nil {
+	if err == nil || creates.Load() != 10 || !strings.Contains(err.Error(), "160 GB") || ctx.Err() != nil {
 		t.Fatalf("batch status: %d create requests, command error %v, context error %v", creates.Load(), err, ctx.Err())
 	}
 	var result struct {
