@@ -256,6 +256,9 @@ func terraTemplate(value string) bool {
 
 func createPayload(opts options, extraEnv map[string]string) map[string]any {
 	metadata := map[string]string{"managed_by": owner, "environment": opts.name, "provider": opts.provider}
+	if opts.generatedName && !opts.noDesktop {
+		metadata[desktopConfirmationKey] = "required"
+	}
 	env := map[string]string{"AGENT37_MANAGED_PLUGIN_COMPOSIO_ENABLED": "false"}
 	maps.Copy(env, extraEnv)
 	payload := map[string]any{
@@ -428,8 +431,15 @@ func getOrCreate(ctx context.Context, client *agent37.Client, opts options, stat
 func operate(ctx context.Context, client *agent37.Client, enrollment *peers.Enrollment, opts options, state string, output, diagnostic io.Writer) error {
 	var instance agent37.Instance
 	var configured []peers.Peer
+	var launcher []string
 	var err error
 	if opts.action == "create" {
+		if opts.generatedName && !opts.noDesktop {
+			launcher, err = desktopLauncher(ctx)
+			if err != nil {
+				return fmt.Errorf("desktop confirmation is unavailable. Use --no-desktop for headless provisioning: %w", err)
+			}
+		}
 		if opts.tailscale {
 			configured, err = peers.Configured()
 			if err != nil {
@@ -522,21 +532,18 @@ func operate(ctx context.Context, client *agent37.Client, enrollment *peers.Enro
 		if err != nil {
 			return err
 		}
-		linkStartedSandbox(ctx, client, instance, opts.name, configured, proof, diagnostic)
-		if !interactiveOutput {
-			fmt.Fprintf(output, "Cloud T3 ready (%s, %s).\n", instance.ID, proof.EnvironmentID)
-		}
 		if !proof.ProviderReady {
 			notice(diagnostic, warning, "%s needs sign-in. Run t3-agent37 terminal %s.", providerLabel(provider), opts.name)
 		}
-		if opts.generatedName && !opts.noDesktop {
-			if launcher, err := desktopLauncher(ctx); err == nil {
-				if err := handOffPairing(ctx, client, instance, proof.TailnetURL, launcher); err != nil {
-					notice(diagnostic, warning, "Desktop pairing for %s failed. Run t3-agent37 link %s. %v", opts.name, opts.name, err)
-				} else {
-					notice(diagnostic, info, "Confirm %s in T3 Code to add it to the desktop.", opts.name)
-				}
+		if launcher != nil {
+			if err := handOffPairing(ctx, client, instance, opts.name, proof, launcher, diagnostic); err != nil {
+				return fmt.Errorf("%s is running. Run t3-agent37 link %s to finish pairing: %w", opts.name, opts.name, err)
 			}
+			proof.DesktopConfirmed = true
+		}
+		linkStartedSandbox(ctx, client, instance, opts.name, configured, proof, diagnostic)
+		if !interactiveOutput {
+			fmt.Fprintf(output, "Cloud T3 ready (%s, %s).\n", instance.ID, proof.EnvironmentID)
 		}
 	} else {
 		if instance.Status == "stopped" {
@@ -565,7 +572,7 @@ func operate(ctx context.Context, client *agent37.Client, enrollment *peers.Enro
 		return outputErr
 	}
 	if opts.pair {
-		pairing, err := pairLink(ctx, client, instance.ID, proof.TailnetURL)
+		pairing, err := pairLink(ctx, client, instance.ID, proof.TailnetURL, "t3-agent37")
 		if err != nil {
 			return err
 		}

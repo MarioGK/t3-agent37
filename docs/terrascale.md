@@ -54,10 +54,12 @@ access rules are preserved. Use `--dry-run` to validate and preview the change.
 the OAuth secret and sends the guest a single-use, preauthorized ephemeral key
 valid for ten minutes. The CLI revokes the key on a failed join. T3 uses the
 private `https://<hostname>.<tailnet>.ts.net` address.
-`up` opens the stock T3 Code pairing dialog for a new sandbox on this PC.
-Use `link` to queue the same request for every managed sandbox, or
-`link <name>` for one sandbox. Confirm each private address in T3 Code
-within five minutes. `connect <name> --pair` prints a link for manual pairing.
+Bare `up` opens the stock T3 Code pairing dialog on this PC. Confirm the
+private address within five minutes. The CLI starts linking peers after the
+confirmed client connects. A pending sandbox stays out of the mesh until you
+finish pairing with `link <name>`. Use `link` to pair each managed sandbox in
+turn, or `up --no-desktop` for unattended provisioning.
+`connect <name> --pair` prints a link for manual pairing.
 `down` logs out the device before deleting the newest managed sandbox.
 `down <name>` logs out the device and stops that sandbox. Both unlink it from
 available T3 environments. Use `up <name>` to restore peer links after a stop.

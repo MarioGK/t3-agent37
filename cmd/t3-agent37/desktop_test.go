@@ -2,10 +2,13 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/url"
 	"testing"
+	"time"
 )
 
 func TestDesktopPairingURLPreservesPrivateOriginAndFragment(t *testing.T) {
@@ -16,6 +19,27 @@ func TestDesktopPairingURLPreservesPrivateOriginAndFragment(t *testing.T) {
 	}
 	if link.Scheme != "t3code" || link.Host != "pair" || link.Query().Get("pairingUrl") != pairing {
 		t.Fatal("incorrect T3 desktop pairing link")
+	}
+}
+
+func TestWaitForDesktopRequiresConfirmation(t *testing.T) {
+	attempts := 0
+	if err := waitForDesktop(t.Context(), time.Millisecond, func(context.Context) (bool, error) {
+		attempts++
+		if attempts == 1 {
+			return false, errors.New("temporary probe failure")
+		}
+		return attempts == 3, nil
+	}); err != nil || attempts != 3 {
+		t.Fatalf("waiting for desktop: attempts=%d, error=%v", attempts, err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	if err := waitForDesktop(ctx, time.Hour, func(context.Context) (bool, error) {
+		cancel()
+		return false, nil
+	}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled desktop wait: %v", err)
 	}
 }
 

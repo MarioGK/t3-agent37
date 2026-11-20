@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -14,7 +16,14 @@ import (
 	"time"
 
 	"github.com/MarioGK/t3-agent37/internal/agent37"
+	"github.com/MarioGK/t3-agent37/internal/peers"
 )
+
+const desktopConfirmationKey = "desktop_confirmation"
+
+func requiresDesktopConfirmation(instance agent37.Instance) bool {
+	return instance.Metadata[desktopConfirmationKey] == "required"
+}
 
 // desktopLauncher uses the OS's registered handler for the official pairing URI.
 func desktopLauncher(ctx context.Context) ([]string, error) {
@@ -49,19 +58,63 @@ func desktopPairingURL(pairing string) string {
 	return "t3code://pair?" + url.Values{"pairingUrl": {pairing}}.Encode()
 }
 
-func handOffPairing(ctx context.Context, client *agent37.Client, instance agent37.Instance, origin string, launcher []string) error {
-	pairing, err := pairLink(ctx, client, instance.ID, origin)
+func handOffPairing(ctx context.Context, client *agent37.Client, instance agent37.Instance, name string, proof setupProof, launcher []string, diagnostic io.Writer) error {
+	var nonce [16]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return err
+	}
+	label := "t3-agent37-desktop-" + hex.EncodeToString(nonce[:])
+	confirmation, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+	pairing, err := pairLink(confirmation, client, instance.ID, proof.TailnetURL, label)
 	if err != nil {
 		return err
 	}
 	args := append(slices.Clone(launcher[1:]), desktopPairingURL(pairing))
-	openCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
-	defer cancel()
+	openCtx, stopOpening := context.WithTimeout(confirmation, 8*time.Second)
+	defer stopOpening()
 	// Do not forward launcher errors or output that could contain the one-time link.
 	if err := exec.CommandContext(openCtx, launcher[0], args...).Run(); err != nil {
 		return errors.New("could not open the pairing request in T3 Code")
 	}
-	return nil
+	notice(diagnostic, info, "Confirm %s in T3 Code. Waiting before linking environments…", name)
+	command := remote + " pair-status " + shellQuote(label) + " " + shellQuote(proof.EnvironmentID)
+	err = waitForDesktop(confirmation, 2*time.Second, func(checkCtx context.Context) (bool, error) {
+		attempt, stop := context.WithTimeout(checkCtx, 15*time.Second)
+		defer stop()
+		state, err := client.ExecJSON[struct{ Confirmed bool }](attempt, instance.ID, command)
+		return state.Confirmed, err
+	})
+	if err == nil {
+		notice(diagnostic, success, "T3 Code confirmed %s.", name)
+	}
+	return err
+}
+
+func waitForDesktop(ctx context.Context, interval time.Duration, check func(context.Context) (bool, error)) error {
+	var failures int
+	for ctx.Err() == nil {
+		confirmed, err := check(ctx)
+		if err == nil {
+			if confirmed {
+				return nil
+			}
+			failures = 0
+		} else if ctx.Err() == nil {
+			failures++
+			if failures == 3 {
+				return errors.New("could not verify desktop confirmation on the sandbox")
+			}
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(interval):
+		}
+	}
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return errors.New("desktop confirmation timed out")
+	}
+	return ctx.Err()
 }
 
 func linkSandboxes(ctx context.Context, client *agent37.Client, opts options, output, diagnostic io.Writer) error {
@@ -94,6 +147,10 @@ func linkSandboxes(ctx context.Context, client *agent37.Client, opts options, ou
 	if err != nil {
 		return err
 	}
+	configured, err := peers.Configured()
+	if err != nil {
+		return err
+	}
 	state, err := statePath()
 	if err != nil {
 		return err
@@ -108,12 +165,10 @@ func linkSandboxes(ctx context.Context, client *agent37.Client, opts options, ou
 			return errors.Join(append(failures, ctx.Err())...)
 		}
 		name := instance.Metadata["environment"]
-		err := pairExistingSandbox(ctx, client, instance, state, name, launcher, diagnostic)
+		err := pairExistingSandbox(ctx, client, instance, state, name, launcher, configured, diagnostic)
 		if err != nil {
 			failures = append(failures, fmt.Errorf("%s: %w", name, err))
-			continue
 		}
-		notice(output, success, "Sent %s to T3 Code. Confirm its private address in the app.", name)
 	}
 	return errors.Join(failures...)
 }
@@ -141,7 +196,7 @@ func desktopTargets(instances []agent37.Instance, name string) ([]agent37.Instan
 	return targets, nil
 }
 
-func pairExistingSandbox(ctx context.Context, client *agent37.Client, target agent37.Instance, state, name string, launcher []string, diagnostic io.Writer) (err error) {
+func pairExistingSandbox(ctx context.Context, client *agent37.Client, target agent37.Instance, state, name string, launcher []string, configured []peers.Peer, diagnostic io.Writer) (err error) {
 	if !namePattern.MatchString(name) || agent37.ValidateID(target.ID) != nil {
 		return errors.New("Agent37 returned an invalid sandbox identity")
 	}
@@ -170,9 +225,14 @@ func pairExistingSandbox(ctx context.Context, client *agent37.Client, target age
 	default:
 		return errors.New("wait for the sandbox to become ready before retrying link")
 	}
-	_, proof, err := startSandbox(ctx, client, instance, name, false, false, diagnostic)
+	instance, proof, err := startSandbox(ctx, client, instance, name, true, false, diagnostic)
 	if err != nil {
 		return err
 	}
-	return handOffPairing(ctx, client, instance, proof.TailnetURL, launcher)
+	if err := handOffPairing(ctx, client, instance, name, proof, launcher, diagnostic); err != nil {
+		return err
+	}
+	proof.DesktopConfirmed = true
+	linkStartedSandbox(ctx, client, instance, name, configured, proof, diagnostic)
+	return nil
 }

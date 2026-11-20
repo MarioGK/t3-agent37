@@ -26,7 +26,8 @@ if peer is None or server is None:
 else:
     print(json.dumps({"environmentId": server["environmentId"],
                       "url": "https://" + peer["dnsName"],
-                      "peerProxy": (remote.ROOT / "peer-proxy-active").is_file()}))`
+                      "peerProxy": (remote.ROOT / "peer-proxy-active").is_file(),
+                      "desktopConfirmed": getattr(remote, "desktop_confirmed", lambda _: False)(server["environmentId"])}))`
 
 const listGuestPeers = `import os, subprocess, sys
 from pathlib import Path
@@ -39,9 +40,10 @@ raise SystemExit(subprocess.run([str(remote.T3), "environment", "list", "--json"
                                  env=env).returncode)`
 
 type sandboxPeer struct {
-	EnvironmentID string `json:"environmentId"`
-	URL           string `json:"url"`
-	PeerProxy     bool   `json:"peerProxy"`
+	EnvironmentID    string `json:"environmentId"`
+	URL              string `json:"url"`
+	PeerProxy        bool   `json:"peerProxy"`
+	DesktopConfirmed bool   `json:"desktopConfirmed"`
 }
 
 func meshNode(client *agent37.Client, id, name string, proof sandboxPeer) (peers.MeshNode, error) {
@@ -130,6 +132,9 @@ func cloudMeshNodes(ctx context.Context, client *agent37.Client, instances []age
 			}
 			proof, err := discoverSandboxPeer(ctx, client, instance, allowWake)
 			if err == nil {
+				if requiresDesktopConfirmation(instance) && !proof.DesktopConfirmed {
+					return
+				}
 				nodes[i], err = meshNode(client, instance.ID, name, proof)
 			}
 			if err != nil {
@@ -148,6 +153,10 @@ func cloudMeshNodes(ctx context.Context, client *agent37.Client, instances []age
 }
 
 func linkStartedSandbox(ctx context.Context, client *agent37.Client, instance agent37.Instance, name string, configured []peers.Peer, proof setupProof, diagnostic io.Writer) {
+	if requiresDesktopConfirmation(instance) && !proof.DesktopConfirmed {
+		notice(diagnostic, warning, "T3 linking awaits desktop confirmation. Run t3-agent37 link %s.", name)
+		return
+	}
 	node, err := meshNode(client, instance.ID, name, sandboxPeer{
 		EnvironmentID: proof.EnvironmentID, URL: proof.TailnetURL, PeerProxy: proof.PeerProxy,
 	})
@@ -160,10 +169,11 @@ func linkStartedSandbox(ctx context.Context, client *agent37.Client, instance ag
 	instances, inventoryErr := client.List(meshCtx)
 	others, discoveryErr := cloudMeshNodes(meshCtx, client, instances, instance.ID, true)
 	count, linkErr := peers.ReconcileMesh(meshCtx, configured, append([]peers.MeshNode{node}, others...))
-	reportMesh(count, diagnostic)
 	if err := errors.Join(inventoryErr, discoveryErr, linkErr); err != nil {
-		notice(diagnostic, warning, "T3 mesh has pending links. Run t3-agent37 sync. %v", err)
+		notice(diagnostic, warning, "T3 mesh incomplete (%d links verified). Run t3-agent37 sync. %v", count, err)
+		return
 	}
+	reportMesh(count, diagnostic)
 }
 
 func reportMesh(count int, diagnostic io.Writer) {

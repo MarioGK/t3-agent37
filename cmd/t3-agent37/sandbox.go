@@ -44,14 +44,15 @@ for filename, body in zip(sys.argv[1::2], sys.argv[2::2]):
     os.replace(stage.name, path / filename)`
 
 type setupProof struct {
-	EnvironmentID string `json:"environmentId"`
-	Label         string `json:"label"`
-	LabelSaved    bool   `json:"labelSaved"`
-	Port          int    `json:"port"`
-	ProviderReady bool   `json:"providerReady"`
-	PeerProxy     bool   `json:"peerProxy"`
-	TailnetURL    string `json:"-"`
-	RequestedName string `json:"-"`
+	EnvironmentID    string `json:"environmentId"`
+	Label            string `json:"label"`
+	LabelSaved       bool   `json:"labelSaved"`
+	Port             int    `json:"port"`
+	ProviderReady    bool   `json:"providerReady"`
+	PeerProxy        bool   `json:"peerProxy"`
+	DesktopConfirmed bool   `json:"desktopConfirmed"`
+	TailnetURL       string `json:"-"`
+	RequestedName    string `json:"-"`
 }
 
 func shellQuote(value string) string {
@@ -318,7 +319,7 @@ func prepare(ctx context.Context, client *agent37.Client, instance agent37.Insta
 	return nil
 }
 
-func pairLink(ctx context.Context, client *agent37.Client, id, origin string) (string, error) {
+func pairLink(ctx context.Context, client *agent37.Client, id, origin, label string) (string, error) {
 	base, err := url.Parse(origin)
 	if err != nil {
 		return "", err
@@ -326,7 +327,7 @@ func pairLink(ctx context.Context, client *agent37.Client, id, origin string) (s
 	if base.Scheme != "https" || !strings.HasSuffix(base.Hostname(), ".ts.net") {
 		return "", errors.New("T3 pairing requires a private Tailscale HTTPS address")
 	}
-	reply, err := client.ExecJSON[struct{ PairURL string }](ctx, id, remote+" pair "+shellQuote(origin))
+	reply, err := client.ExecJSON[struct{ PairURL string }](ctx, id, remote+" pair "+shellQuote(origin)+" "+shellQuote(label))
 	if err != nil {
 		return "", err
 	}

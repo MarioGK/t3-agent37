@@ -40,8 +40,9 @@ Tailscale HTTPS DNS name. It verifies Tailscale credentials before provisioning
 and mints an ephemeral key when the sandbox needs to join. It automatically
 links the managed sandboxes and [configured T3 servers](docs/terrascale.md#link-t3-servers)
 to each other over Tailscale. Run `sync` to retry pending links.
-On a workstation running T3 Code, bare `up` also opens the desktop pairing
-request for the new sandbox. Confirm its private address in T3 Code.
+Bare `up` opens the desktop pairing request and waits for the new sandbox to
+connect before linking it to other environments. Confirm its private address
+in T3 Code within five minutes. Run `link <name>` to retry a pending pairing.
 The desktop displays the same sandbox name as `t3-agent37 ls`.
 Use `up --no-desktop` for headless runs.
 Use `ls --json` for scripts. Sandbox previews and `start`, `stop`, and `delete`

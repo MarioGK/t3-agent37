@@ -346,19 +346,54 @@ def setup(provider, name, peer_links=False):
                 print(json.dumps({"environmentId": result["environmentId"], "version": VERSION,
                                   "label": result.get("label", ""), "labelSaved": label_saved,
                                   "port": PORT, "providerReady": ready,
-                                  "peerProxy": (ROOT / "peer-proxy-active").is_file()}))
+                                  "peerProxy": (ROOT / "peer-proxy-active").is_file(),
+                                  "desktopConfirmed": desktop_confirmed(result["environmentId"])}))
                 return
             time.sleep(1)
         raise RuntimeError("T3 did not start. See ~/.local/share/t3-agent37/server.log")
 
 
-def pair(address):
+def pair(address, label="t3-agent37"):
     result = subprocess.run([
         str(T3), "auth", "pairing", "create", "--base-dir", str(DATA),
-        "--ttl", "5m", "--label", "t3-agent37", "--base-url", address,
+        "--ttl", "5m", "--label", label, "--base-url", address,
         "--json",
     ], check=True, capture_output=True, text=True)
     print(result.stdout.strip())
+
+
+def desktop_confirmed(environment_id):
+    try:
+        return (ROOT / "desktop-confirmed").read_text().strip() == environment_id
+    except FileNotFoundError:
+        return False
+
+
+def pairing_status(label, environment_id):
+    if not re.fullmatch(r"t3-agent37-desktop-[a-f0-9]{32}", label):
+        raise RuntimeError("Invalid desktop confirmation label")
+    current = descriptor()
+    if current is None or current["environmentId"] != environment_id:
+        raise RuntimeError("T3 environment changed while confirming desktop pairing")
+    result = subprocess.run([
+        str(T3), "auth", "session", "list", "--base-dir", str(DATA), "--json",
+    ], check=True, capture_output=True, text=True, timeout=10)
+    # The grant label is carried to the session during token exchange. The
+    # first RPC connection follows redemption by the confirmed desktop.
+    confirmed = any(session.get("subject") == "one-time-token"
+                    and (session.get("client") or {}).get("label") == label
+                    and session.get("lastConnectedAt")
+                    for session in json.loads(result.stdout))
+    if confirmed:
+        with tempfile.NamedTemporaryFile(mode="w", dir=ROOT, delete=False) as staged:
+            path = Path(staged.name)
+            try:
+                staged.write(environment_id + "\n")
+                staged.flush()
+                path.replace(ROOT / "desktop-confirmed")
+            finally:
+                path.unlink(missing_ok=True)
+    print(json.dumps({"confirmed": confirmed}))
 
 
 def manage_tailnet(action, *args):
@@ -400,7 +435,9 @@ if __name__ == "__main__":
         if (ROOT / "tailnet.py").is_file():
             manage_tailnet("tailnet-restore")
     elif action == "pair":
-        pair(sys.argv[2])
+        pair(*sys.argv[2:])
+    elif action == "pair-status":
+        pairing_status(*sys.argv[2:])
     elif action == "peer-admin":
         result = subprocess.run([str(T3), "auth", "session", "issue", "--base-dir", str(DATA),
                                  "--json", "--ttl", "5m", "--label", "t3-agent37-peer-sync",

@@ -1,4 +1,5 @@
 import io
+from contextlib import redirect_stdout
 import json
 import os
 from pathlib import Path
@@ -6,9 +7,27 @@ import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
+from types import SimpleNamespace
 
 from remote import machine_info_with_label, select_runtime, unpack_runtime
-from remote import provider_ready
+from remote import desktop_confirmed, pairing_status, provider_ready
+
+
+class DesktopPairingTest(unittest.TestCase):
+    def test_only_matching_connected_pairing_session_confirms(self):
+        label = "t3-agent37-desktop-" + "a" * 32
+        session = {"subject": "one-time-token", "client": {"label": label}, "lastConnectedAt": "2026-11-20T18:00:00Z"}
+        with tempfile.TemporaryDirectory() as directory, patch("remote.ROOT", Path(directory)), \
+                patch("remote.descriptor", return_value={"environmentId": "sandbox-id"}):
+            for records, expected in (
+                    ([], False), ([dict(session, client={"label": "other"})], False),
+                    ([dict(session, lastConnectedAt=None)], False), ([session], True)):
+                with patch("remote.subprocess.run", return_value=SimpleNamespace(stdout=json.dumps(records))), \
+                        redirect_stdout(io.StringIO()) as output:
+                    pairing_status(label, "sandbox-id")
+                self.assertEqual(json.loads(output.getvalue()), {"confirmed": expected})
+                self.assertEqual(desktop_confirmed("sandbox-id"), expected)
+                self.assertFalse(desktop_confirmed("other-environment"))
 
 
 class ProvidersTest(unittest.TestCase):
