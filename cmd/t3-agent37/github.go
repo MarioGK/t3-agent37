@@ -115,26 +115,30 @@ func workstationGitHubToken(ctx context.Context) (string, error) {
 		})
 		gh.Env = append(gh.Env, "GH_PROMPT_DISABLED=1")
 		stdout, err := gh.Output()
+		defer clear(stdout)
 		if lookup.Err() != nil {
 			return "", errors.New("GitHub login lookup did not complete")
 		}
-		if errors.Is(err, exec.ErrNotFound) {
-			return "", nil
-		}
-		if _, missing := errors.AsType[*exec.ExitError](err); missing {
-			// gh auth token exits unsuccessfully without an active login.
+		if githubLoginMissing(err) {
 			return "", nil
 		}
 		if err != nil {
-			return "", errors.New("could not read GitHub CLI login")
+			return "", errors.New("GitHub CLI failed to read its login. Check gh auth status --hostname github.com")
 		}
 		token = strings.TrimSpace(string(stdout))
-		clear(stdout)
 	}
 	if token != "" && (len(token) > 4096 || !githubTokenPattern.MatchString(token)) {
 		return "", errors.New("GitHub login returned an invalid token format")
 	}
 	return token, nil
+}
+
+func githubLoginMissing(err error) bool {
+	if errors.Is(err, exec.ErrNotFound) {
+		return true
+	}
+	exit, ok := errors.AsType[*exec.ExitError](err)
+	return ok && strings.TrimSpace(string(exit.Stderr)) == "no oauth token found for github.com"
 }
 
 func workstationGitIdentity(ctx context.Context) (name, email string) {

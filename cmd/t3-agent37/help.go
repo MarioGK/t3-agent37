@@ -9,8 +9,14 @@ import (
 )
 
 func printHelp(output io.Writer) {
-	_, _ = lipgloss.Fprintf(output, "%s\n%s\n\n  %s\n", cliAccent.Render(owner),
-		"Run T3 Code in private Agent37 sandboxes.", cliStrong.Render("t3-agent37 <command> [flags]"))
+	width, _ := ttyOutput(output)
+	printMainHelp(output, width)
+}
+
+func printMainHelp(output io.Writer, width int) {
+	_, _ = lipgloss.Fprintf(output, "%s\n%s\n\n%s\n", wrapTerminal(cliAccent.Render(owner), width),
+		wrapTerminal("Run T3 Code in private Agent37 sandboxes.", width),
+		indentTerminal(cliStrong.Render("t3-agent37 <command> [flags]"), width, 2))
 	groups := []struct {
 		title    string
 		commands []string
@@ -19,9 +25,10 @@ func printHelp(output io.Writer) {
 		{"T3 Code and access", []string{"connect", "link", "sync", "terminal", "prepare"}},
 		{"Workstation", []string{"setup", "config", "completion"}},
 	}
-	width, _ := ttyOutput(output)
 	for _, group := range groups {
-		_, _ = lipgloss.Fprintf(output, "\n%s\n", cliAccent.Render(group.title))
+		_, _ = lipgloss.Fprintf(output, "\n%s\n", wrapTerminal(cliAccent.Render(group.title), width))
+		entries := make([]detail, 0, len(group.commands))
+		stack := false
 		for _, name := range group.commands {
 			command, _ := findCommand(name)
 			label, description := name, command.summary
@@ -33,19 +40,28 @@ func printHelp(output io.Writer) {
 			case "completion":
 				description = "Generate shell completions"
 			}
-			if width > 0 && width < 16+lipgloss.Width(description) {
-				printHelpEntry(output, width, label, description)
+			entries = append(entries, detail{label, description})
+			stack = stack || width > 0 && width < 16+lipgloss.Width(description)
+		}
+		for _, entry := range entries {
+			if stack {
+				printHelpEntry(output, width, entry.label, entry.value)
 				continue
 			}
-			_, _ = lipgloss.Fprintf(output, "  %s  %s\n", cliStrong.Width(12).Render(label), description)
+			_, _ = lipgloss.Fprintf(output, "  %s  %s\n", cliStrong.Width(12).Render(entry.label), entry.value)
 		}
 	}
-	_, _ = lipgloss.Fprintf(output, "\n%s\n", cliAccent.Render("Help and version"))
+	_, _ = lipgloss.Fprintf(output, "\n%s\n", wrapTerminal(cliAccent.Render("Help and version"), width))
 	printHelpEntry(output, width, "t3-agent37 help <command>", "Show command options")
 	printHelpEntry(output, width, "t3-agent37 --version", "Print the installed version")
 }
 
 func printCommandHelp(output io.Writer, command cliCommand, flags *flag.FlagSet) {
+	width, _ := ttyOutput(output)
+	printCommandHelpAtWidth(output, command, flags, width)
+}
+
+func printCommandHelpAtWidth(output io.Writer, command cliCommand, flags *flag.FlagSet, width int) {
 	usage := command.name
 	description := command.summary
 	if command.sandbox {
@@ -63,18 +79,14 @@ func printCommandHelp(output io.Writer, command cliCommand, flags *flag.FlagSet)
 	case "delete", "del":
 		description = "Permanently delete a sandbox and its disk. Omit the name to open the picker."
 	}
-	width, _ := ttyOutput(output)
 	flagHelp := strings.TrimRight(flags.FlagUsagesWrapped(max(0, width)), "\n")
 	if flagHelp != "" {
 		usage += " [flags]"
 	}
-	if width > 0 {
-		description = lipgloss.Wrap(description, width, "")
-	}
-	_, _ = lipgloss.Fprintf(output, "%s\n%s\n", cliAccent.Render(owner+" "+command.name), description)
-	_, _ = lipgloss.Fprintf(output, "\n%s\n  %s\n", cliAccent.Render("Usage"), owner+" "+usage)
+	_, _ = lipgloss.Fprintf(output, "%s\n%s\n", wrapTerminal(cliAccent.Render(owner+" "+command.name), width), wrapTerminal(description, width))
+	_, _ = lipgloss.Fprintf(output, "\n%s\n%s\n", wrapTerminal(cliAccent.Render("Usage"), width), indentTerminal(owner+" "+usage, width, 2))
 	if flagHelp != "" {
-		_, _ = lipgloss.Fprintf(output, "\n%s\n", cliAccent.Render("Options"))
+		_, _ = lipgloss.Fprintf(output, "\n%s\n", wrapTerminal(cliAccent.Render("Options"), width))
 		if width == 0 || width >= 56 {
 			_, _ = lipgloss.Fprintln(output, flagHelp)
 			return
@@ -89,6 +101,7 @@ func printCommandHelp(output io.Writer, command cliCommand, flags *flag.FlagSet)
 				label += " " + argument
 			} else if option.DefValue == "true" {
 				label += "[=false]"
+				description += " (default true)"
 			}
 			printHelpEntry(output, width, label, description)
 		})
@@ -96,8 +109,5 @@ func printCommandHelp(output io.Writer, command cliCommand, flags *flag.FlagSet)
 }
 
 func printHelpEntry(output io.Writer, width int, label, description string) {
-	if width > 0 {
-		description = lipgloss.Wrap(description, max(1, width-4), "")
-	}
-	_, _ = lipgloss.Fprintf(output, "  %s\n    %s\n", cliStrong.Render(label), strings.ReplaceAll(description, "\n", "\n    "))
+	_, _ = lipgloss.Fprintf(output, "%s\n%s\n", indentTerminal(cliStrong.Render(label), width, 2), indentTerminal(description, width, 4))
 }

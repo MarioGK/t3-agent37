@@ -102,8 +102,8 @@ func parse(args []string, output io.Writer) (options, error) {
 			opts.action = "create"
 			opts.yes = !opts.dryRun
 		} else {
-			if flags.NFlag() != 0 && !(flags.NFlag() == 1 && flags.Changed("github")) {
-				return opts, errors.New("up accepts only --github when you pass a sandbox name")
+			if !onlyStartFlags(flags) {
+				return opts, errors.New("up accepts --github and --no-desktop when you pass a sandbox name")
 			}
 			opts.githubAccess = flags.Changed("github") && opts.githubAccess
 			opts.action = "start"
@@ -174,6 +174,16 @@ func parse(args []string, output io.Writer) (options, error) {
 		opts.tailscale = true
 	}
 	return opts, nil
+}
+
+func onlyStartFlags(flags *flag.FlagSet) bool {
+	allowed := 0
+	for _, name := range []string{"github", "no-desktop"} {
+		if flags.Changed(name) {
+			allowed++
+		}
+	}
+	return flags.NFlag() == allowed
 }
 
 func addCommandFlags(flags *flag.FlagSet, opts *options) {

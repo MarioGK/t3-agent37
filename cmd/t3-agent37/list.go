@@ -37,33 +37,65 @@ func printSandboxTable(output io.Writer, managed []agent37.Instance, width int, 
 }
 
 func renderSandboxList(managed []agent37.Instance, width int, heading string) string {
-	slices.SortFunc(managed, func(a, b agent37.Instance) int {
-		return cmp.Or(cmp.Compare(a.Name, b.Name), cmp.Compare(a.ID, b.ID))
-	})
-
-	title := cliAccent.Render(heading)
+	title := cliAccent.Render(terminalText(heading))
 	if len(managed) == 0 {
 		message := "No sandboxes yet. Run " + cliStrong.Render("t3-agent37 up") + " to create one."
-		if width > 0 {
-			message = lipgloss.Wrap(message, width, "")
-		}
-		return title + "\n\n" + message
+		return wrapTerminal(title, width) + "\n\n" + wrapTerminal(message, width)
 	}
-	title += cliMuted.Render(fmt.Sprintf("  ·  %d total", len(managed)))
+	title = wrapTerminal(title+cliMuted.Render(fmt.Sprintf("  ·  %d total", len(managed))), width)
 
 	rows := make([][]string, 0, len(managed))
 	for _, instance := range managed {
 		provider := displayProvider(instance)
 		rows = append(rows, []string{
-			cmp.Or(terminalText(instance.Name), terminalText(instance.Metadata["environment"]), "—"),
+			sandboxDisplayName(instance),
 			listStatus(cmp.Or(terminalText(instance.Status), "unknown")),
 			cmp.Or(terminalText(providerLabel(provider)), "—"),
 			cmp.Or(terminalText(instance.Template), "—"),
 			cmp.Or(terminalText(instance.ID), "—"),
 		})
 	}
-	grid := table.New().
-		Headers("SANDBOX", "STATUS", "PROVIDER", "TEMPLATE", "ID").
+	slices.SortFunc(rows, func(a, b []string) int {
+		return cmp.Or(cmp.Compare(a[0], b[0]), cmp.Compare(a[4], b[4]))
+	})
+	headers := []string{"SANDBOX", "STATUS", "PROVIDER", "TEMPLATE", "ID"}
+	if width == 0 || sandboxTableWidth(headers, rows) <= width {
+		return title + "\n\n" + renderSandboxTable(headers, rows)
+	}
+
+	var compact strings.Builder
+	compact.WriteString(title)
+	for _, row := range rows {
+		block := cliStrong.Render(row[0]) + "  " + row[1] + "\n" +
+			cliMuted.Render("Provider  ") + row[2] + "\n" +
+			cliMuted.Render("Template  ") + row[3] + "\n" +
+			cliMuted.Render("ID        ") + row[4]
+		compact.WriteString("\n\n" + wrapTerminal(block, width))
+	}
+	return compact.String()
+}
+
+func sandboxDisplayName(instance agent37.Instance) string {
+	return cmp.Or(terminalText(instance.Name), terminalText(instance.Metadata["environment"]), "—")
+}
+
+const sandboxColumnPadding = 2
+
+func sandboxTableWidth(headers []string, rows [][]string) int {
+	var width int
+	for col, header := range headers {
+		column := lipgloss.Width(header)
+		for _, row := range rows {
+			column = max(column, lipgloss.Width(row[col]))
+		}
+		width += column
+	}
+	return width + sandboxColumnPadding*(len(headers)-1)
+}
+
+func renderSandboxTable(headers []string, rows [][]string) string {
+	return table.New().
+		Headers(headers...).
 		Rows(rows...).
 		BorderTop(false).BorderBottom(false).BorderLeft(false).BorderRight(false).BorderColumn(false).
 		BorderStyle(cliMuted).
@@ -80,22 +112,8 @@ func renderSandboxList(managed []agent37.Instance, width int, heading string) st
 			if col == 4 {
 				return style
 			}
-			return style.PaddingRight(2)
+			return style.PaddingRight(sandboxColumnPadding)
 		}).String()
-	if width == 0 || lipgloss.Width(grid) <= width {
-		return title + "\n\n" + grid
-	}
-
-	var compact strings.Builder
-	compact.WriteString(lipgloss.Wrap(title, width, ""))
-	for _, row := range rows {
-		block := cliStrong.Render(row[0]) + "  " + row[1] + "\n" +
-			cliMuted.Render("Provider  ") + row[2] + "\n" +
-			cliMuted.Render("Template  ") + row[3] + "\n" +
-			cliMuted.Render("ID        ") + row[4]
-		compact.WriteString("\n\n" + lipgloss.Wrap(block, width, ""))
-	}
-	return compact.String()
 }
 
 func listStatus(status string) string {

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"os/exec"
 	"regexp"
 	"strings"
 	"testing"
@@ -90,5 +91,14 @@ func TestWorkstationGitHubRejectsInvalidOverride(t *testing.T) {
 	t.Setenv("T3_AGENT37_GITHUB_TOKEN", "fixture-sentinel\nnot-a-token")
 	if _, err := workstationGitHubToken(t.Context()); err == nil || strings.Contains(err.Error(), "fixture-sentinel") {
 		t.Fatal("invalid token was accepted or included in an error")
+	}
+}
+
+func TestGitHubLoginMissingDistinguishesToolFailures(t *testing.T) {
+	if !githubLoginMissing(&exec.ExitError{Stderr: []byte("no oauth token found for github.com\n")}) {
+		t.Fatal("missing login was treated as a tool failure")
+	}
+	if githubLoginMissing(&exec.ExitError{Stderr: []byte("mise ERROR configuration is untrusted\n")}) {
+		t.Fatal("tool failure was treated as a missing login")
 	}
 }

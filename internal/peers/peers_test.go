@@ -2,16 +2,32 @@ package peers
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 
 	"github.com/gorilla/websocket"
 )
+
+func TestIncusOwnerDiagnosticPreservesKnownFailureOnly(t *testing.T) {
+	peer := Peer{Host: "dev", Incus: &IncusOwner{Host: "relay", Instance: "dev"}}
+	commandErr := &exec.ExitError{Stderr: []byte("Error: Failed to connect to the agent\nfixture-sensitive-output\n")}
+	err := ownerCommandError(peer, commandErr)
+	if !errors.Is(err, errGuestAgentUnavailable) || !strings.Contains(err.Error(), "for dev via relay") || strings.Contains(err.Error(), "fixture-sensitive-output") {
+		t.Fatalf("bad diagnostic: %v", err)
+	}
+	commandErr.Stderr = []byte("fixture-sensitive-output\n")
+	if err := ownerCommandError(peer, commandErr); errors.Is(err, errGuestAgentUnavailable) || strings.Contains(err.Error(), "fixture-sensitive-output") {
+		t.Fatalf("unexpected diagnostic: %v", err)
+	}
+}
 
 func TestConfiguredPeersValidatesPrivateOrigins(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())

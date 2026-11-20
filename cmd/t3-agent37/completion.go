@@ -81,6 +81,7 @@ func runCompletion(ctx context.Context, args []string, output, diagnostic io.Wri
 		// A name selects the start form of up, which has no provisioning flags.
 		if spec.name == "up" && len(args) > 3 && args[1] == "up" && namePattern.MatchString(args[2]) {
 			addCommandFlags(command.Flags(), &options{action: "start"})
+			command.Flags().Bool("no-desktop", false, "Skip the T3 Code desktop pairing request")
 			continue
 		}
 		opts := options{action: cmp.Or(spec.action, spec.name)}
@@ -141,8 +142,7 @@ const completionAPIDeadline = 1200 * time.Millisecond
 
 func completeSandboxNames(command *cobra.Command, args []string, prefix string) ([]string, cobra.ShellCompDirective) {
 	directive := cobra.ShellCompDirectiveNoFileComp
-	if len(args) > 0 || (command.Name() == "up" && command.Flags().NFlag() > 0 &&
-		!(command.Flags().NFlag() == 1 && command.Flags().Changed("github"))) {
+	if len(args) > 0 || (command.Name() == "up" && !onlyStartFlags(command.Flags())) {
 		return nil, directive
 	}
 	ctx, cancel := context.WithTimeout(command.Context(), completionAPIDeadline)

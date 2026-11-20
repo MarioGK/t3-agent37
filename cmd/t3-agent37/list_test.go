@@ -60,7 +60,28 @@ func TestSandboxListFitsNarrowTerminal(t *testing.T) {
 	if got := lipgloss.Width(text); got > width {
 		t.Errorf("compact list uses %d columns, want at most %d", got, width)
 	}
-	if got := terminalText("\x1b[31mabc\u202e\n\u2028"); got != "[31mabc" {
-		t.Errorf("list field retained terminal control characters: %q", got)
+	for _, width := range []int{12, 18, 28, 40, 56, 80} {
+		for _, instances := range [][]agent37.Instance{nil, {instance}} {
+			text := renderSandboxList(instances, width, "Agent37 sandboxes")
+			if got := lipgloss.Width(text); got > width {
+				t.Errorf("list with %d rows uses %d columns, want at most %d: %q", len(instances), got, width, text)
+			}
+		}
+	}
+}
+
+func TestSandboxListKeepsCallerOrderAndSortsDisplayNames(t *testing.T) {
+	instances := []agent37.Instance{
+		{Name: "zeta", ID: "zzzzzzzzzz"},
+		{Name: "\x1b[31m\x1b[0m", ID: "aaaaaaaaaa", Metadata: map[string]string{"environment": "alpha"}},
+		{Name: "beta", ID: "bbbbbbbbbb"},
+	}
+	text := renderSandboxList(instances, 80, "Agent37 sandboxes")
+	if strings.Index(text, "alpha") < 0 || strings.Index(text, "alpha") >= strings.Index(text, "beta") ||
+		strings.Index(text, "beta") >= strings.Index(text, "zeta") {
+		t.Fatalf("list should sort the names it shows: %q", text)
+	}
+	if instances[0].Name != "zeta" {
+		t.Errorf("rendering changed caller order: %+v", instances)
 	}
 }

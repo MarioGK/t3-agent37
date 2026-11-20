@@ -69,7 +69,7 @@ func TestCompleteSandboxNamesAndTemplateRevisions(t *testing.T) {
 		{args: []string{"delete", "agent-"}, want: []string{"agent-1", "agent-2"}},
 		{args: []string{"del", "agent-"}, want: []string{"agent-1", "agent-2"}},
 		{args: []string{"create", "agent-"}, want: []string{"agent-3"}},
-		{args: []string{"up", "--no-desktop", ""}},
+		{args: []string{"up", "--no-desktop", ""}, want: []string{"agent-1", "agent-2"}},
 		{args: []string{"down", "agent-1", ""}},
 		{args: []string{"up", "--template", ""}, want: []string{"terra-agent", "terra-agent@4"}},
 		{args: []string{"up", "--template", "terra-agent@"}, want: []string{"terra-agent@2", "terra-agent@4"}},

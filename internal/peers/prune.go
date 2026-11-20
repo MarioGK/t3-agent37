@@ -79,12 +79,15 @@ func prunePeer(ctx context.Context, peer Peer, dryRun bool,
 ) ([]SandboxLink, error) {
 	output, err := runOwnerCLI(ctx, peer, "environment", "list", "--json")
 	var entries []link
-	if err != nil || json.Unmarshal(output, &entries) != nil || entries == nil {
+	if err != nil {
+		return nil, fmt.Errorf("could not list T3 environments on %s: %w", peer.Host, err)
+	}
+	if json.Unmarshal(output, &entries) != nil || entries == nil {
 		return nil, fmt.Errorf("could not list T3 environments on %s over SSH", peer.Host)
 	}
 	return pruneEntries(ctx, peer, entries, dryRun, visit, func(sandbox SandboxLink) error {
 		if _, err := runOwnerCLI(ctx, peer, "environment", "unlink", sandbox.EnvironmentID); err != nil {
-			return fmt.Errorf("could not unlink %s from T3 on %s", sandbox.Name, peer.Host)
+			return fmt.Errorf("could not unlink %s from T3 on %s: %w", sandbox.Name, peer.Host, err)
 		}
 		return nil
 	})

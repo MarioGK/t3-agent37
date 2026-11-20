@@ -54,7 +54,7 @@ default. T3 Code starts with OpenCode selected.
 New sandboxes inherit the workstation's GitHub.com CLI login and Git author
 defaults. Use `up --github=false` to skip it, or set
 `T3_AGENT37_GITHUB_TOKEN` to use a scoped GitHub token. Run
-`up <name> --github` to set up access on an existing sandbox.
+`up <name> --github` to retry access on an existing sandbox after a GitHub warning.
 
 On another PC, join the same tailnet, run `t3-agent37 setup`, then run
 `t3-agent37 link`. It wakes existing sandboxes as needed and opens each

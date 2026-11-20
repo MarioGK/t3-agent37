@@ -150,6 +150,9 @@ func (node MeshNode) issue(ctx context.Context) (string, error) {
 		if err == nil && token != "" {
 			return token, nil
 		}
+		if errors.Is(err, errGuestAgentUnavailable) {
+			return "", err
+		}
 	}
 	return "", fmt.Errorf("could not authorize T3 peer administration on %s", node.Name)
 }

@@ -100,6 +100,13 @@ func TestLsUsesListCommand(t *testing.T) {
 	}
 }
 
+func TestNamedUpAcceptsHeadlessFlag(t *testing.T) {
+	opts, err := parse([]string{"up", "ts-1", "--github=false", "--no-desktop"}, io.Discard)
+	if err != nil || opts.action != "start" || opts.name != "ts-1" || opts.githubAccess || !opts.noDesktop {
+		t.Fatalf("named up = %+v, %v", opts, err)
+	}
+}
+
 func TestHelpIncludesCommandsAndPublicOptions(t *testing.T) {
 	var output bytes.Buffer
 	if err := run(t.Context(), []string{"--help"}, &output, io.Discard); err != nil {

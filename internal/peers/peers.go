@@ -35,6 +35,7 @@ const (
 var sshAlias = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
 var environmentID = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,127}$`)
 var unixUser = regexp.MustCompile(`^[a-z_][a-z0-9_-]*$`)
+var errGuestAgentUnavailable = errors.New("Incus guest agent unavailable")
 
 // Peer describes a trusted workstation SSH alias and the same T3 server's private API.
 type Peer struct {
@@ -177,7 +178,24 @@ func runOwnerCLI(ctx context.Context, peer Peer, args ...string) ([]byte, error)
 	ssh := []string{"-T", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=5", host}
 	command := exec.CommandContext(ctx, "ssh", append(ssh, remote...)...)
 	command.Stdin = strings.NewReader(ownerCLIScript)
-	return command.Output()
+	output, err := command.Output()
+	return output, ownerCommandError(peer, err)
+}
+
+func ownerCommandError(peer Peer, err error) error {
+	if err == nil {
+		return nil
+	}
+	// SSH output can include credential-bearing CLI diagnostics. Only expose
+	// the fixed Incus transport error, with names from the trusted peer file.
+	if exit, ok := errors.AsType[*exec.ExitError](err); ok && peer.Incus != nil {
+		for line := range strings.SplitSeq(string(exit.Stderr), "\n") {
+			if strings.TrimSpace(line) == "Error: Failed to connect to the agent" {
+				return fmt.Errorf("%w for %s via %s", errGuestAgentUnavailable, peer.Incus.Instance, peer.Incus.Host)
+			}
+		}
+	}
+	return errors.New("SSH owner command failed")
 }
 
 func issueOverSSH(ctx context.Context, peer Peer) (string, error) {
@@ -186,7 +204,10 @@ func issueOverSSH(ctx context.Context, peer Peer) (string, error) {
 	var response struct {
 		Token string `json:"token"`
 	}
-	if err != nil || json.Unmarshal(output, &response) != nil || response.Token == "" {
+	if err != nil {
+		return "", fmt.Errorf("could not authorize T3 peer administration on %s: %w", peer.Host, err)
+	}
+	if json.Unmarshal(output, &response) != nil || response.Token == "" {
 		return "", fmt.Errorf("could not authorize T3 peer administration over SSH on %s", peer.Host)
 	}
 	return response.Token, nil

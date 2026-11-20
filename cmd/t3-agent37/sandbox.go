@@ -171,7 +171,10 @@ func bootstrap(ctx context.Context, client *agent37.Client, enrollment *peers.En
 		// Wait for protected gateway health before sending the handoff, then
 		// publish the Tailscale endpoint and make it available to T3 peers.
 		if err := configureGitHubAccess(ctx, client, instance.ID, name, diagnostic); err != nil {
-			return proof, err
+			if ctx.Err() != nil {
+				return proof, ctx.Err()
+			}
+			notice(diagnostic, warning, "%v", err)
 		}
 	}
 	if proof.RequestedName != "" && proof.Label != proof.RequestedName {
