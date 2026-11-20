@@ -4,15 +4,12 @@ import (
 	"cmp"
 	"fmt"
 	"io"
-	"os"
 	"slices"
 	"strings"
-	"unicode"
 
 	"charm.land/lipgloss/v2"
 	"charm.land/lipgloss/v2/table"
 	"github.com/MarioGK/t3-agent37/internal/agent37"
-	"github.com/charmbracelet/x/term"
 )
 
 func printSandboxList(output io.Writer, instances []agent37.Instance, asJSON bool) error {
@@ -30,58 +27,55 @@ func printSandboxList(output io.Writer, instances []agent37.Instance, asJSON boo
 		return jsonOutput(output, rows, true)
 	}
 
-	var width int
-	if file, ok := output.(*os.File); ok && term.IsTerminal(file.Fd()) {
-		width, _, _ = term.GetSize(file.Fd())
-	}
-	_, err := lipgloss.Fprintln(output, renderSandboxList(managed, width))
+	width, _ := ttyOutput(output)
+	return printSandboxTable(output, managed, width, "Agent37 sandboxes")
+}
+
+func printSandboxTable(output io.Writer, managed []agent37.Instance, width int, title string) error {
+	_, err := lipgloss.Fprintln(output, renderSandboxList(managed, width, title))
 	return err
 }
 
-func renderSandboxList(managed []agent37.Instance, width int) string {
+func renderSandboxList(managed []agent37.Instance, width int, heading string) string {
 	slices.SortFunc(managed, func(a, b agent37.Instance) int {
 		return cmp.Or(cmp.Compare(a.Name, b.Name), cmp.Compare(a.ID, b.ID))
 	})
 
-	accent := lipgloss.NewStyle().Foreground(lipgloss.Color("6")).Bold(true)
-	strong := lipgloss.NewStyle().Bold(true)
-	muted := lipgloss.NewStyle().Faint(true)
-	title := accent.Render("Agent37 sandboxes")
+	title := cliAccent.Render(heading)
 	if len(managed) == 0 {
-		message := "No sandboxes yet. Run " + strong.Render("t3-agent37 up") + " to create one."
+		message := "No sandboxes yet. Run " + cliStrong.Render("t3-agent37 up") + " to create one."
 		if width > 0 {
 			message = lipgloss.Wrap(message, width, "")
 		}
 		return title + "\n\n" + message
 	}
-	title += muted.Render(fmt.Sprintf("  ·  %d total", len(managed)))
+	title += cliMuted.Render(fmt.Sprintf("  ·  %d total", len(managed)))
 
-	providerLabels := map[string]string{"cliproxy": "CLIProxy", "opencode": "OpenCode", "codex": "Codex", "claude": "Claude Code"}
 	rows := make([][]string, 0, len(managed))
 	for _, instance := range managed {
 		provider := displayProvider(instance)
 		rows = append(rows, []string{
-			cmp.Or(listCell(instance.Name), listCell(instance.Metadata["environment"]), "—"),
-			listStatus(cmp.Or(listCell(instance.Status), "unknown")),
-			cmp.Or(providerLabels[provider], listCell(provider), "—"),
-			cmp.Or(listCell(instance.Template), "—"),
-			cmp.Or(listCell(instance.ID), "—"),
+			cmp.Or(terminalText(instance.Name), terminalText(instance.Metadata["environment"]), "—"),
+			listStatus(cmp.Or(terminalText(instance.Status), "unknown")),
+			cmp.Or(terminalText(providerLabel(provider)), "—"),
+			cmp.Or(terminalText(instance.Template), "—"),
+			cmp.Or(terminalText(instance.ID), "—"),
 		})
 	}
 	grid := table.New().
 		Headers("SANDBOX", "STATUS", "PROVIDER", "TEMPLATE", "ID").
 		Rows(rows...).
 		BorderTop(false).BorderBottom(false).BorderLeft(false).BorderRight(false).BorderColumn(false).
-		BorderStyle(muted).
+		BorderStyle(cliMuted).
 		StyleFunc(func(row, col int) lipgloss.Style {
 			style := lipgloss.NewStyle()
 			switch {
 			case row == table.HeaderRow:
-				style = accent
+				style = cliAccent
 			case col == 0:
-				style = strong
+				style = cliStrong
 			case col == 4:
-				style = muted
+				style = cliMuted
 			}
 			if col == 4 {
 				return style
@@ -95,10 +89,10 @@ func renderSandboxList(managed []agent37.Instance, width int) string {
 	var compact strings.Builder
 	compact.WriteString(lipgloss.Wrap(title, width, ""))
 	for _, row := range rows {
-		block := strong.Render(row[0]) + "  " + row[1] + "\n" +
-			muted.Render("Provider  ") + row[2] + "\n" +
-			muted.Render("Template  ") + row[3] + "\n" +
-			muted.Render("ID        ") + row[4]
+		block := cliStrong.Render(row[0]) + "  " + row[1] + "\n" +
+			cliMuted.Render("Provider  ") + row[2] + "\n" +
+			cliMuted.Render("Template  ") + row[3] + "\n" +
+			cliMuted.Render("ID        ") + row[4]
 		compact.WriteString("\n\n" + lipgloss.Wrap(block, width, ""))
 	}
 	return compact.String()
@@ -119,13 +113,4 @@ func listStatus(status string) string {
 		return lipgloss.NewStyle().Foreground(lipgloss.Color(color)).Render(label)
 	}
 	return label
-}
-
-func listCell(text string) string {
-	return strings.TrimSpace(strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp) {
-			return -1
-		}
-		return r
-	}, text))
 }

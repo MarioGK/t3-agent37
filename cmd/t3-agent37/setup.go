@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"charm.land/huh/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/MarioGK/t3-agent37/internal/peers"
 )
 
@@ -61,17 +62,17 @@ func setupWorkstation(ctx context.Context, opts options, output, diagnostic io.W
 			return errors.New("workstation verification is incomplete")
 		}
 		if _, err := desktopLauncher(ctx); err == nil {
-			fmt.Fprintln(output, "  Desktop link launcher available. Run t3-agent37 link to add existing sandboxes here.")
+			notice(output, success, "Desktop link launcher available. Run t3-agent37 link to add existing sandboxes here.")
 		} else {
-			fmt.Fprintln(output, "  Desktop pairing unavailable in this session.", err)
+			notice(output, info, "Desktop pairing unavailable in this session. %v", err)
 		}
-		fmt.Fprintln(output, "Run t3-agent37 up to provision a sandbox and verify access.")
+		notice(output, info, "Run t3-agent37 up to provision a sandbox.")
 		return nil
 	}
 	if !ready {
 		return errors.New("workstation setup is incomplete")
 	}
-	fmt.Fprintln(output, "Run t3-agent37 setup --verify to check Tailscale.")
+	notice(output, info, "Run t3-agent37 setup --verify to check Tailscale.")
 	return nil
 }
 
@@ -88,7 +89,7 @@ func editWorkstationSetup(ctx context.Context, config configFile, runtime runtim
 	groups = append(groups,
 		huh.NewGroup(sandboxDefaultFields(values, "Enter a template with Tailscale installed. Add @revision to pin it.\nTo publish the TerraScale template, see "+templateGuide)...).
 			Title("Sandbox defaults"),
-		huh.NewGroup(providerChoice(values)).Title("Workstation setup"),
+		huh.NewGroup(providerChoice(values)).Title("Model access"),
 		huh.NewGroup(huh.NewNote().Title("Private Tailscale access").
 			Description("In Trust credentials, edit your OAuth client or choose Credential → OAuth.\n"+
 				"Set Auth Keys to Write and select the tags this sandbox will use.\n"+
@@ -122,7 +123,7 @@ func editWorkstationSetup(ctx context.Context, config configFile, runtime runtim
 	form := terminalForm(diagnostic, groups...)
 	err := form.RunWithContext(ctx)
 	if errors.Is(err, huh.ErrUserAborted) || (err == nil && !save) {
-		fmt.Fprintln(diagnostic, "Setup canceled.")
+		notice(diagnostic, info, "Setup canceled.")
 		return nil
 	}
 	if err != nil {
@@ -148,7 +149,7 @@ func editWorkstationSetup(ctx context.Context, config configFile, runtime runtim
 		if err := saveConfigJSON(ctx, runtime.path, runtime.original, runtime.values); err != nil {
 			return err
 		}
-		fmt.Fprintln(output, "Saved credentials to", runtime.path)
+		notice(output, success, "Saved credentials to %s", runtime.path)
 		key = cmp.Or(key, runtime.value(agent37KeyName))
 	}
 	values.Template = strings.TrimSpace(values.Template)
@@ -157,9 +158,9 @@ func editWorkstationSetup(ctx context.Context, config configFile, runtime runtim
 	if err := config.save(ctx); err != nil {
 		return err
 	}
-	fmt.Fprintln(output, "Saved sandbox defaults to", config.path)
+	notice(output, success, "Saved sandbox defaults to %s", config.path)
 	if setupStatus(output, *values, runtime, key) {
-		fmt.Fprintln(output, "Run t3-agent37 setup --verify to check Tailscale.")
+		notice(output, info, "Run t3-agent37 setup --verify to check Tailscale.")
 	}
 	return nil
 }
@@ -183,14 +184,14 @@ func validCLIProxyURL(value string) bool {
 }
 
 func setupStatus(output io.Writer, config workstationConfig, runtime runtimeConfig, agent37Key string) bool {
-	fmt.Fprintln(output, "Workstation configuration")
+	_, _ = lipgloss.Fprintf(output, "%s\n\n", cliAccent.Render("Workstation setup"))
 	ready := true
 	report := func(ok bool, name, detail string) {
 		if ok {
-			fmt.Fprintln(output, "  Configured", name)
+			notice(output, success, "Configured %s", name)
 		} else {
 			ready = false
-			fmt.Fprintf(output, "  Needs attention %s. %s\n", name, detail)
+			notice(output, warning, "Needs attention %s. %s", name, detail)
 		}
 	}
 	report(agent37Key != "", "Agent37 API key", "Create a workspace API key at "+agent37Dashboard)
@@ -201,7 +202,7 @@ func setupStatus(output io.Writer, config workstationConfig, runtime runtimeConf
 	if tagErr != nil {
 		report(false, "Tailscale enrollment tags", tagErr.Error()+". Run t3-agent37 setup.")
 	} else {
-		fmt.Fprintln(output, "  Configured Tailscale enrollment tags", strings.Join(tags, ", "))
+		notice(output, success, "Configured Tailscale enrollment tags · %s", strings.Join(tags, ", "))
 	}
 	report(runtime.value(tailClientID) != "" && runtime.value(tailSecret) != "", "Tailscale OAuth client",
 		"Create a client with Auth Keys Write and the configured tags. "+tailscaleGuide)
@@ -216,14 +217,15 @@ func setupStatus(output io.Writer, config workstationConfig, runtime runtimeConf
 	if err != nil {
 		report(false, "T3 peers", err.Error()+". "+templateGuide+"#link-t3-servers")
 	} else if len(configured) != 0 {
-		fmt.Fprintf(output, "  Configured T3 peers (%d)\n", len(configured))
+		notice(output, success, "Configured T3 peers · %d", len(configured))
 	} else {
-		fmt.Fprintln(output, "  Optional T3 peer linking", templateGuide+"#link-t3-servers")
+		notice(output, info, "Optional T3 peer linking. %s#link-t3-servers", templateGuide)
 	}
 	return ready
 }
 
 func verifySetupTailscale(ctx context.Context, output io.Writer, configuredTags string, runtime runtimeConfig) (verified, needsConsole bool) {
+	_, _ = lipgloss.Fprintf(output, "\n%s\n\n", cliAccent.Render("Tailscale verification"))
 	localOK := checkLocalTailscale(ctx, output)
 	id, secret := runtime.value(tailClientID), runtime.value(tailSecret)
 	if id == "" || secret == "" {
@@ -234,10 +236,10 @@ func verifySetupTailscale(ctx context.Context, output io.Writer, configuredTags 
 		return false, false
 	}
 	if _, err := peers.VerifyEnrollment(ctx, id, secret, tags); err != nil {
-		fmt.Fprintln(output, "  Needs attention", err)
+		notice(output, warning, "Needs attention Tailscale OAuth. %v", err)
 		return false, errors.Is(err, peers.ErrEnrollmentAuthorization)
 	}
-	fmt.Fprintln(output, "  Verified Tailscale OAuth can issue a scoped token for", strings.Join(tags, ", "))
+	notice(output, success, "Verified Tailscale OAuth for %s", strings.Join(tags, ", "))
 	return localOK, false
 }
 
@@ -260,16 +262,16 @@ func repairTailscaleSetup(ctx context.Context, dryRun bool, output io.Writer) er
 			return fmt.Errorf("the enrollment tags are already defined. Assign %s to the OAuth client in Trust credentials", strings.Join(tags, ", "))
 		}
 		if dryRun {
-			fmt.Fprintln(output, "Would define Tailscale tags", strings.Join(added, ", "))
+			notice(output, info, "Would define Tailscale tags %s", strings.Join(added, ", "))
 			return nil
 		}
-		fmt.Fprintln(output, "Defined Tailscale tags", strings.Join(added, ", "))
+		notice(output, success, "Defined Tailscale tags %s", strings.Join(added, ", "))
 		_, err = peers.VerifyEnrollment(ctx, id, secret, tags)
 	}
 	if err != nil {
 		return err
 	}
-	fmt.Fprintln(output, "Verified Tailscale OAuth can issue a scoped token for", strings.Join(tags, ", "))
+	notice(output, success, "Verified Tailscale OAuth for %s", strings.Join(tags, ", "))
 	return nil
 }
 
@@ -284,7 +286,7 @@ func openTailscaleConsole(diagnostic io.Writer) {
 		cmd = exec.Command("xdg-open", tailscaleGuide)
 	}
 	if err := cmd.Start(); err != nil {
-		fmt.Fprintln(diagnostic, "Open Tailscale Trust credentials at", tailscaleGuide)
+		notice(diagnostic, info, "Open Tailscale Trust credentials at %s", tailscaleGuide)
 		return
 	}
 	done := make(chan error, 1)
@@ -292,19 +294,19 @@ func openTailscaleConsole(diagnostic io.Writer) {
 	select {
 	case err := <-done:
 		if err != nil {
-			fmt.Fprintln(diagnostic, "Open Tailscale Trust credentials at", tailscaleGuide)
+			notice(diagnostic, info, "Open Tailscale Trust credentials at %s", tailscaleGuide)
 			return
 		}
 	case <-time.After(500 * time.Millisecond):
 		// Some launchers stay alive with the browser they start.
 	}
-	fmt.Fprintln(diagnostic, "Opening Tailscale Trust credentials at", tailscaleGuide)
+	notice(diagnostic, info, "Opening Tailscale Trust credentials…")
 }
 
 func checkLocalTailscale(ctx context.Context, output io.Writer) bool {
 	path, err := exec.LookPath("tailscale")
 	if err != nil {
-		fmt.Fprintln(output, "  Local Tailscale status unavailable. Check that the T3 Code machine has joined the tailnet.")
+		notice(output, info, "Local Tailscale status unavailable. Check that the T3 Code machine has joined the tailnet.")
 		return true
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -316,23 +318,23 @@ func checkLocalTailscale(ctx context.Context, output io.Writer) bool {
 		CertDomains    []string
 	}
 	if json.Unmarshal(data, &status) != nil || status.BackendState == "" {
-		fmt.Fprintln(output, "  Needs attention local Tailscale status. Start the Tailscale client and retry.")
+		notice(output, warning, "Needs attention local Tailscale status. Start Tailscale and retry.")
 		return false
 	}
 	if status.BackendState != "Running" || err != nil {
-		fmt.Fprintln(output, "  Needs attention local Tailscale connection. Sign in and connect to your tailnet.")
+		notice(output, warning, "Needs attention local Tailscale connection. Sign in and connect to your tailnet.")
 		return false
 	}
-	fmt.Fprintln(output, "  Verified local Tailscale connection")
+	notice(output, success, "Verified local Tailscale connection")
 	if status.CurrentTailnet.MagicDNSEnabled {
-		fmt.Fprintln(output, "  Verified MagicDNS")
+		notice(output, success, "Verified MagicDNS")
 	} else {
-		fmt.Fprintln(output, "  Needs attention MagicDNS. Enable it at", tailscaleDNS)
+		notice(output, warning, "Needs attention MagicDNS. Enable it at %s", tailscaleDNS)
 	}
 	if len(status.CertDomains) > 0 {
-		fmt.Fprintln(output, "  Verified Tailscale HTTPS certificates are enabled")
+		notice(output, success, "Verified Tailscale HTTPS certificates")
 	} else {
-		fmt.Fprintln(output, "  Needs attention Tailscale HTTPS certificates. Enable them at", tailscaleDNS)
+		notice(output, warning, "Needs attention Tailscale HTTPS certificates. Enable them at %s", tailscaleDNS)
 	}
 	return status.CurrentTailnet.MagicDNSEnabled && len(status.CertDomains) > 0
 }

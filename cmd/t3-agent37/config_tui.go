@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"strings"
 
@@ -22,7 +21,7 @@ func editConfig(ctx context.Context, output io.Writer) error {
 	values := &file.values
 	shareGitHub := values.GitHubAccess == nil || *values.GitHubAccess
 	var save bool
-	fields := sandboxDefaultFields(values, "Tailscale ready. @revision pins it.")
+	fields := sandboxDefaultFields(values, "Use a Tailscale-ready template. Add @revision to pin it.")
 	fields = append(fields,
 		providerChoice(values).Inline(true),
 		huh.NewConfirm().
@@ -40,7 +39,7 @@ func editConfig(ctx context.Context, output io.Writer) error {
 	form := terminalForm(output, huh.NewGroup(fields...).Title("Sandbox defaults"))
 	err = form.RunWithContext(ctx)
 	if errors.Is(err, huh.ErrUserAborted) || (err == nil && !save) {
-		fmt.Fprintln(output, "Config changes canceled.")
+		notice(output, info, "Config changes canceled.")
 		return nil
 	}
 	if err != nil {
@@ -52,8 +51,7 @@ func editConfig(ctx context.Context, output io.Writer) error {
 	if err := file.save(ctx); err != nil {
 		return err
 	}
-	fmt.Fprintln(output, "Saved sandbox defaults to", file.path)
-	return nil
+	return printDetails(output, "Sandbox defaults saved", detail{"File", file.path})
 }
 
 func sandboxDefaultFields(values *workstationConfig, templateHint string) []huh.Field {

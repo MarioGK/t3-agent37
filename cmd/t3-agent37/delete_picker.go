@@ -8,7 +8,6 @@ import (
 	"io"
 	"slices"
 	"strings"
-	"unicode"
 
 	"charm.land/huh/v2"
 	"charm.land/lipgloss/v2"
@@ -24,7 +23,7 @@ func pickSandboxToDelete(ctx context.Context, instances []agent37.Instance, prev
 		}
 	}
 	if len(candidates) == 0 {
-		fmt.Fprintln(output, "No managed Agent37 sandboxes available to delete.")
+		notice(output, info, "No managed Agent37 sandboxes available to delete.")
 		return agent37.Instance{}, nil
 	}
 	slices.SortFunc(candidates, func(a, b agent37.Instance) int {
@@ -33,25 +32,20 @@ func pickSandboxToDelete(ctx context.Context, instances []agent37.Instance, prev
 
 	choices := make([]huh.Option[int], 0, len(candidates))
 	for index, instance := range candidates {
-		status := strings.Map(func(r rune) rune {
-			if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
-				return -1
-			}
-			return r
-		}, instance.Status)
+		status := terminalText(instance.Status)
 		choices = append(choices, huh.NewOption(fmt.Sprintf("%s  ·  %s  ·  %s", instance.Metadata["environment"], cmp.Or(status, "unknown"), instance.ID), index))
 	}
 	var selected int
 	picker := huh.NewSelect[int]().
-		Title("Sandbox · status · ID").
+		Title("Select a sandbox").
 		Options(choices...).
 		Value(&selected).
 		Height(min(10, len(choices)+1))
-	title := "Delete a sandbox"
+	title := "Delete sandbox and disk"
 	if preview {
 		title = "Preview sandbox deletion"
 	}
-	groups := []*huh.Group{huh.NewGroup(picker).Title(title).Description("Press / to filter by name, status, or ID.")}
+	groups := []*huh.Group{huh.NewGroup(picker).Title(title).Description("Search by name, status, or ID with /.")}
 	confirmed := false
 	if !preview {
 		confirmation := huh.NewConfirm().
@@ -68,7 +62,7 @@ func pickSandboxToDelete(ctx context.Context, instances []agent37.Instance, prev
 	}
 	err := terminalForm(output, groups...).RunWithContext(ctx)
 	if errors.Is(err, huh.ErrUserAborted) || (err == nil && !preview && !confirmed) {
-		fmt.Fprintln(output, "Deletion canceled.")
+		notice(output, info, "Deletion canceled.")
 		return agent37.Instance{}, nil
 	}
 	if err != nil {

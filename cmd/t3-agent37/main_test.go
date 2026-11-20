@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -96,6 +97,27 @@ func TestLsUsesListCommand(t *testing.T) {
 		if err != nil || opts.action != "list" || !opts.listJSON {
 			t.Fatalf("%s --json = %+v, %v", command, opts, err)
 		}
+	}
+}
+
+func TestHelpIncludesCommandsAndPublicOptions(t *testing.T) {
+	var output bytes.Buffer
+	if err := run(t.Context(), []string{"--help"}, &output, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	text := output.String()
+	for _, command := range commands {
+		if !strings.Contains(text, command.name) {
+			t.Errorf("main help is missing %s", command.name)
+		}
+	}
+	output.Reset()
+	if err := run(t.Context(), []string{"help", "up"}, &output, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	text = output.String()
+	if !strings.Contains(text, "t3-agent37 up [name] [flags]") || !strings.Contains(text, "--dry-run") || strings.Contains(text, "--no-tailscale") {
+		t.Fatalf("unexpected up help: %s", text)
 	}
 }
 

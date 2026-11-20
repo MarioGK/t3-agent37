@@ -176,9 +176,9 @@ func bootstrap(ctx context.Context, client *agent37.Client, enrollment *peers.En
 	}
 	if proof.RequestedName != "" && proof.Label != proof.RequestedName {
 		if proof.LabelSaved {
-			fmt.Fprintf(diagnostic, "T3 will show %s after the sandbox restarts.\n", proof.RequestedName)
+			notice(diagnostic, info, "T3 will show %s after the sandbox restarts.", proof.RequestedName)
 		} else {
-			fmt.Fprintf(diagnostic, "The sandbox could not set the T3 display name to %s.\n", proof.RequestedName)
+			notice(diagnostic, warning, "The sandbox could not set the T3 display name to %s.", proof.RequestedName)
 		}
 	}
 	if instance.Metadata["tailnet"] == "tailscale" {
@@ -273,9 +273,9 @@ func configureGitHubAccess(ctx context.Context, client *agent37.Client, id, name
 		return fmt.Errorf("could not set up GitHub for %s. Retry with t3-agent37 up %s --github: %w", name, name, err)
 	}
 	if access.GitHub {
-		fmt.Fprintf(diagnostic, "GitHub CLI and HTTPS Git are ready on %s.\n", name)
+		notice(diagnostic, success, "GitHub CLI and HTTPS Git are ready on %s.", name)
 	} else {
-		fmt.Fprintf(diagnostic, "No GitHub login found on this workstation for %s. Sign in with gh, then run t3-agent37 up %s --github.\n", name, name)
+		notice(diagnostic, warning, "No GitHub login found. Sign in with gh, then run t3-agent37 up %s --github.", name)
 	}
 	return nil
 }
@@ -305,13 +305,13 @@ func prepare(ctx context.Context, client *agent37.Client, instance agent37.Insta
 		}
 	}
 	if provider == "cliproxy" {
-		fmt.Fprintf(output, "CLIProxy model catalog refreshed on %s.\n", name)
+		notice(output, success, "CLIProxy model catalog refreshed on %s.", name)
 		return nil
 	}
 	if err := client.SetProvider(ctx, instance, provider); err != nil {
 		return err
 	}
-	fmt.Fprintf(output, "Managed OpenCode is ready on %s (agent37/default).\n", name)
+	notice(output, success, "Managed OpenCode is ready on %s with agent37/default.", name)
 	return nil
 }
 

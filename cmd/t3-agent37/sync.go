@@ -30,7 +30,7 @@ func unlinkSandbox(ctx context.Context, client *agent37.Client, name, id string,
 	nodes, discoverErr := cloudMeshNodes(ctx, client, instances, id, false)
 	cloudRemoved, cloudErr := peers.PruneMeshSandboxLinks(ctx, nodes, false, visit)
 	for _, link := range append(fleetRemoved, cloudRemoved...) {
-		fmt.Fprintf(diagnostic, "Removed %s from T3 on %s.\n", name, link.Peer)
+		notice(diagnostic, success, "Removed %s from T3 on %s.", name, link.Peer)
 	}
 	return errors.Join(fleetErr, inventoryErr, discoverErr, cloudErr)
 }
@@ -83,10 +83,29 @@ func syncSandboxLinks(ctx context.Context, client *agent37.Client, dryRun bool, 
 		meshErr = err
 	}
 	removed := append(fleetRemoved, cloudRemoved...)
+	syncErr := errors.Join(inventoryErr, discoveryErr, fleetErr, cloudErr, meshErr)
+	if _, terminal := ttyOutput(output); terminal {
+		return errors.Join(printSyncResult(output, removed, dryRun, syncErr != nil), syncErr)
+	}
 	if removed == nil {
 		removed = []peers.SandboxLink{}
 	}
-	return errors.Join(jsonOutput(output, removed, true), inventoryErr, discoveryErr, fleetErr, cloudErr, meshErr)
+	return errors.Join(jsonOutput(output, removed, true), syncErr)
+}
+
+func printSyncResult(output io.Writer, links []peers.SandboxLink, preview, incomplete bool) error {
+	title, label := "T3 sync", "Removed"
+	if preview {
+		title, label = "Preview · T3 sync", "Would remove"
+	}
+	fields := []detail{{label, fmt.Sprintf("%d stale links", len(links))}}
+	if incomplete {
+		fields = append(fields, detail{"Status", "Some environments could not be checked"})
+	}
+	for _, link := range links {
+		fields = append(fields, detail{link.Name, link.Peer})
+	}
+	return printDetails(output, title, fields...)
 }
 
 func staleSandboxLink(ctx context.Context, client *agent37.Client, link peers.SandboxLink) (bool, error) {

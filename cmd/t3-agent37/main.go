@@ -23,7 +23,12 @@ import (
 	flag "github.com/spf13/pflag"
 )
 
-const owner = "t3-agent37"
+const (
+	owner       = "t3-agent37"
+	sandboxCPU  = 4
+	sandboxRAM  = 8
+	sandboxIdle = 15 * time.Minute
+)
 
 var version = "dev"
 var namePattern = regexp.MustCompile("^[a-z0-9][a-z0-9-]{0,42}$")
@@ -52,7 +57,7 @@ type options struct {
 
 func parse(args []string, output io.Writer) (options, error) {
 	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" || args[0] == "help" {
-		fmt.Fprintf(output, "Usage: t3-agent37 <%s> [name] [flags]\n       t3-agent37 --version\n", commandUsage())
+		printHelp(output)
 		return options{}, flag.ErrHelp
 	}
 	if len(args) == 1 && (args[0] == "--version" || args[0] == "version") {
@@ -66,48 +71,7 @@ func parse(args []string, output io.Writer) (options, error) {
 	opts := options{action: cmp.Or(command.action, command.name)}
 	flags := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	flags.SetOutput(output)
-	flags.Usage = func() {
-		if opts.action == "list" {
-			fmt.Fprintf(output, "Usage: t3-agent37 %s [--json]\nShow managed sandboxes and their status.\n", args[0])
-			flags.PrintDefaults()
-			return
-		}
-		if opts.action == "config" {
-			fmt.Fprintln(output, "Usage: t3-agent37 config\nEdit sandbox defaults in the terminal.")
-			return
-		}
-		if opts.action == "setup" {
-			fmt.Fprintln(output, "Usage: t3-agent37 setup [--check | --verify | --repair-tailscale] [--no-browser]\nSet up the Agent37 template, Tailscale enrollment, and the model provider.")
-			flags.PrintDefaults()
-			return
-		}
-		if opts.action == "sync" {
-			fmt.Fprintln(output, "Usage: t3-agent37 sync [--dry-run]\nLink T3 environments to each other and remove stale links.")
-			flags.PrintDefaults()
-			return
-		}
-		if opts.action == "delete" {
-			fmt.Fprintf(output, "Usage: t3-agent37 %s [name] [flags]\n", args[0])
-			fmt.Fprintln(output, "Choose a sandbox to delete or pass its name.")
-		} else {
-			fmt.Fprintf(output, "Usage: t3-agent37 %s [name] [flags]\n", args[0])
-		}
-		if opts.action == "create" {
-			fmt.Fprintln(output, "Omit the name to use the lowest available number.")
-		}
-		if opts.action == "up" {
-			fmt.Fprintln(output, "Run without a name to provision a sandbox with the lowest available number.")
-			fmt.Fprintln(output, "Pass a sandbox name to start it.")
-		}
-		if opts.action == "link" {
-			fmt.Fprintln(output, "Open desktop pairing for one sandbox or all managed sandboxes.")
-		}
-		if args[0] == "down" {
-			fmt.Fprintln(output, "Omit the name to permanently delete the newest managed sandbox and its disk.")
-			fmt.Fprintln(output, "Pass a sandbox name to stop it. Both forms unlink it from configured T3 servers.")
-		}
-		flags.PrintDefaults()
-	}
+	flags.Usage = func() { printCommandHelp(output, command, flags) }
 	addCommandFlags(flags, &opts)
 	if err := flags.Parse(args[1:]); err != nil {
 		return opts, err
@@ -286,8 +250,8 @@ func createPayload(opts options, extraEnv map[string]string) map[string]any {
 	maps.Copy(env, extraEnv)
 	payload := map[string]any{
 		"name": opts.name, "template": opts.template, "metadata": metadata, "type": "default",
-		"resources":    map[string]int{"cpu": 4, "memory": 8},
-		"public_ports": []int{}, "auto_sleep": true, "idle_timeout_seconds": 900, "env": env,
+		"resources":    map[string]int{"cpu": sandboxCPU, "memory": sandboxRAM},
+		"public_ports": []int{}, "auto_sleep": true, "idle_timeout_seconds": int(sandboxIdle / time.Second), "env": env,
 	}
 	if opts.provider == "opencode" {
 		payload["budget"] = map[string]int{"credit_micros": agent37.ManagedCreditMicros}
@@ -383,7 +347,7 @@ func latestManaged(instances []agent37.Instance) (agent37.Instance, error) {
 	return latest, nil
 }
 
-func getOrCreate(ctx context.Context, client *agent37.Client, opts options, state string, output io.Writer) (agent37.Instance, error) {
+func getOrCreate(ctx context.Context, client *agent37.Client, opts options, state string, diagnostic io.Writer) (agent37.Instance, error) {
 	marker := filepath.Join(state, opts.name+".pending")
 	if !opts.generatedName {
 		existing, err := lookup(ctx, client, opts.name)
@@ -433,9 +397,7 @@ func getOrCreate(ctx context.Context, client *agent37.Client, opts options, stat
 		}
 	}
 	keepMarker = true // The operation may have reached Agent37 even if the reply is lost.
-	if opts.generatedName {
-		fmt.Fprintf(output, "Creating sandbox %s.\n", opts.name)
-	}
+	notice(diagnostic, info, "Creating %s on Agent37…", opts.name)
 	instance, err := client.Create(ctx, createPayload(opts, extra))
 	if err != nil {
 		if response, ok := errors.AsType[*agent37.Error](err); ok {
@@ -464,7 +426,7 @@ func operate(ctx context.Context, client *agent37.Client, enrollment *peers.Enro
 				return err
 			}
 		}
-		instance, err = getOrCreate(ctx, client, opts, state, output)
+		instance, err = getOrCreate(ctx, client, opts, state, diagnostic)
 	} else if opts.targetID != "" {
 		instance, err = client.Get(ctx, opts.targetID)
 		if err == nil && (instance.ID != opts.targetID || !isManaged(instance) || instance.Metadata["environment"] != opts.name) {
@@ -497,41 +459,45 @@ func operate(ctx context.Context, client *agent37.Client, enrollment *peers.Enro
 		if err != nil {
 			return err
 		}
-		row := summary(instance)
 		if proof.TailnetURL != "" {
 			linkStartedSandbox(ctx, client, instance, opts.name, configured, proof, diagnostic)
-			row["t3_url"] = proof.TailnetURL
 		}
-		return jsonOutput(output, row, false)
+		return showLifecycleResult(output, "Sandbox started", instance, proof.TailnetURL)
 	case "stop":
 		instance, err = stopSandbox(ctx, client, instance, opts.name)
 		if err != nil {
 			return err
 		}
+		title := "Sandbox stopped"
 		if opts.deleteSandbox {
 			if err := client.Delete(ctx, instance.ID); err != nil {
 				return err
 			}
 			_ = os.Remove(filepath.Join(state, opts.name+".pending"))
 			instance.Status = "deleted"
+			title = "Sandbox deleted"
 		}
 		if tailnet {
 			if opts.deleteSandbox {
 				if _, err := desktopLauncher(ctx); err == nil {
-					fmt.Fprintf(diagnostic, "Saved desktop connections for %s can be removed in T3 Code → Settings → Connections.\n", opts.name)
+					notice(diagnostic, info, "Remove any saved entry for %s under T3 Code → Settings → Connections.", opts.name)
 				}
 			}
 			if err := unlinkSandbox(ctx, client, opts.name, instance.ID, diagnostic); err != nil {
 				err = fmt.Errorf("T3 cleanup pending for %s. Run t3-agent37 sync: %w", opts.name, err)
-				return errors.Join(jsonOutput(output, summary(instance), false), err)
+				return errors.Join(showLifecycleResult(output, title, instance, ""), err)
 			}
 		}
-		return jsonOutput(output, summary(instance), false)
+		return showLifecycleResult(output, title, instance, "")
 	case "terminal":
 		link, err := client.Terminal(ctx, instance.ID)
-		if err == nil {
-			fmt.Fprintln(output, link)
+		if err != nil {
+			return err
 		}
+		if _, terminal := ttyOutput(output); terminal {
+			return printDetails(output, "Agent37 terminal", detail{"Sandbox", opts.name}, detail{"Open", link})
+		}
+		_, err = fmt.Fprintln(output, link)
 		return err
 	case "prepare":
 		return prepare(ctx, client, instance, opts.name, output, diagnostic)
@@ -539,6 +505,7 @@ func operate(ctx context.Context, client *agent37.Client, enrollment *peers.Enro
 	if opts.action == "create" && (instance.Template != opts.template || provider != opts.provider || tailnet != opts.tailscale) {
 		return errors.New("this name already uses a different template, provider, or Tailscale setting")
 	}
+	_, interactiveOutput := ttyOutput(output)
 	var proof setupProof
 	if opts.action == "create" {
 		proof, err = prepareCreated(ctx, client, enrollment, instance, opts.name, opts.githubAccess, diagnostic)
@@ -546,16 +513,18 @@ func operate(ctx context.Context, client *agent37.Client, enrollment *peers.Enro
 			return err
 		}
 		linkStartedSandbox(ctx, client, instance, opts.name, configured, proof, diagnostic)
-		fmt.Fprintf(output, "Cloud T3 ready (%s, %s).\n", instance.ID, proof.EnvironmentID)
+		if !interactiveOutput {
+			fmt.Fprintf(output, "Cloud T3 ready (%s, %s).\n", instance.ID, proof.EnvironmentID)
+		}
 		if !proof.ProviderReady {
-			fmt.Fprintf(output, "%s needs sign-in. Run t3-agent37 terminal %s.\n", provider, opts.name)
+			notice(diagnostic, warning, "%s needs sign-in. Run t3-agent37 terminal %s.", providerLabel(provider), opts.name)
 		}
 		if opts.generatedName && !opts.noDesktop {
 			if launcher, err := desktopLauncher(ctx); err == nil {
 				if err := handOffPairing(ctx, client, instance, proof.TailnetURL, launcher); err != nil {
-					fmt.Fprintf(diagnostic, "Desktop pairing did not open for %s. Run t3-agent37 link %s. %v\n", opts.name, opts.name, err)
+					notice(diagnostic, warning, "Desktop pairing for %s failed. Run t3-agent37 link %s. %v", opts.name, opts.name, err)
 				} else {
-					fmt.Fprintf(diagnostic, "Confirm %s in T3 Code to add this sandbox to the desktop.\n", opts.name)
+					notice(diagnostic, info, "Confirm %s in T3 Code to add it to the desktop.", opts.name)
 				}
 			}
 		}
@@ -571,13 +540,30 @@ func operate(ctx context.Context, client *agent37.Client, enrollment *peers.Enro
 	if proof.TailnetURL == "" {
 		return errors.New("Agent37 did not provide the sandbox's Tailscale address")
 	}
-	fmt.Fprintln(output, "T3 Code on Tailscale", proof.TailnetURL)
+	var outputErr error
+	if interactiveOutput {
+		if opts.action == "create" {
+			instance.Status = "running"
+			outputErr = printSandboxResult(output, "Sandbox ready", instance, proof.TailnetURL, detail{"Environment ID", proof.EnvironmentID})
+		} else {
+			outputErr = printDetails(output, "T3 Code connection", detail{"Sandbox", opts.name}, detail{"Tailscale", proof.TailnetURL})
+		}
+	} else {
+		_, outputErr = fmt.Fprintln(output, "T3 Code on Tailscale", proof.TailnetURL)
+	}
+	if outputErr != nil {
+		return outputErr
+	}
 	if opts.pair {
 		pairing, err := pairLink(ctx, client, instance.ID, proof.TailnetURL)
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(output, "Pair in T3 Code (expires in 5 minutes): %s\n", pairing)
+		if interactiveOutput {
+			return printDetails(output, "T3 Code pairing · expires in 5 minutes", detail{"Open", pairing})
+		}
+		_, err = fmt.Fprintf(output, "Pair in T3 Code (expires in 5 minutes): %s\n", pairing)
+		return err
 	}
 	return nil
 }
@@ -618,6 +604,12 @@ func run(ctx context.Context, args []string, output, diagnostic io.Writer) error
 			if err != nil {
 				return err
 			}
+		}
+		if _, terminal := ttyOutput(output); terminal {
+			return printDetails(output, "Preview · create sandbox",
+				detail{"Sandbox", opts.name}, detail{"Template", opts.template}, detail{"Provider", providerLabel(opts.provider)},
+				detail{"Resources", fmt.Sprintf("%d vCPU · %d GB RAM", sandboxCPU, sandboxRAM)},
+				detail{"Auto-sleep", fmt.Sprintf("%d minutes", sandboxIdle/time.Minute)}, detail{"Network", "Private Tailscale"})
 		}
 		return jsonOutput(output, createPayload(opts, nil), true)
 	}
@@ -669,10 +661,17 @@ func run(ctx context.Context, args []string, output, diagnostic io.Writer) error
 			if !opts.latest {
 				return fmt.Errorf("no managed Agent37 environment named %s", opts.name)
 			}
-			fmt.Fprintln(output, "No managed Agent37 sandboxes.")
+			notice(output, info, "No managed Agent37 sandboxes.")
 			return nil
 		}
 		if opts.dryRun {
+			if _, terminal := ttyOutput(output); terminal {
+				title := "Preview · stop sandbox"
+				if opts.deleteSandbox {
+					title = "Preview · delete sandbox and disk"
+				}
+				return printSandboxResult(output, title, instance, "")
+			}
 			target := summary(instance)
 			target["action"] = "stop"
 			if opts.deleteSandbox {
@@ -728,7 +727,11 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
 	if err := run(ctx, os.Args[1:], os.Stdout, os.Stderr); err != nil && !errors.Is(err, context.Canceled) {
-		fmt.Fprintln(os.Stderr, "t3-agent37:", err)
+		for line := range strings.SplitSeq(err.Error(), "\n") {
+			if strings.TrimSpace(line) != "" {
+				notice(os.Stderr, failure, "t3-agent37: %s", line)
+			}
+		}
 		os.Exit(1)
 	}
 }

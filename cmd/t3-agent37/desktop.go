@@ -74,6 +74,12 @@ func linkSandboxes(ctx context.Context, client *agent37.Client, opts options, ou
 		return err
 	}
 	if opts.dryRun {
+		if width, terminal := ttyOutput(output); terminal {
+			if len(targets) == 0 {
+				return printDetails(output, "Preview · link sandboxes", detail{"Targets", "No managed sandboxes"})
+			}
+			return printSandboxTable(output, targets, width, "Preview · link sandboxes")
+		}
 		rows := make([]map[string]any, 0, len(targets))
 		for _, instance := range targets {
 			rows = append(rows, summary(instance))
@@ -81,7 +87,7 @@ func linkSandboxes(ctx context.Context, client *agent37.Client, opts options, ou
 		return jsonOutput(output, rows, true)
 	}
 	if len(targets) == 0 {
-		fmt.Fprintln(output, "No managed Agent37 sandboxes.")
+		notice(output, info, "No managed Agent37 sandboxes.")
 		return nil
 	}
 	launcher, err := desktopLauncher(ctx)
@@ -107,7 +113,7 @@ func linkSandboxes(ctx context.Context, client *agent37.Client, opts options, ou
 			failures = append(failures, fmt.Errorf("%s: %w", name, err))
 			continue
 		}
-		fmt.Fprintf(output, "Sent %s to T3 Code. Confirm its private address in the app.\n", name)
+		notice(output, success, "Sent %s to T3 Code. Confirm its private address in the app.", name)
 	}
 	return errors.Join(failures...)
 }

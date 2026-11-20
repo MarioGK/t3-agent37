@@ -10,8 +10,8 @@ import (
 )
 
 func terminalAvailable(output io.Writer) bool {
-	file, ok := output.(*os.File)
-	return ok && term.IsTerminal(os.Stdin.Fd()) && term.IsTerminal(file.Fd())
+	_, terminal := ttyOutput(output)
+	return terminal && term.IsTerminal(os.Stdin.Fd())
 }
 
 func terminalForm(output io.Writer, groups ...*huh.Group) *huh.Form {
@@ -32,12 +32,14 @@ func terminalTheme(danger bool) huh.ThemeFunc {
 	return func(dark bool) *huh.Styles {
 		styles := huh.ThemeCharm(dark)
 		pick := lipgloss.LightDark(dark)
-		accent := pick(lipgloss.Color("#00685d"), lipgloss.Color("#5eead4"))
+		accent := lipgloss.Color(accentColor)
 		text := pick(lipgloss.Color("#182830"), lipgloss.Color("#e5f0f3"))
 		muted := pick(lipgloss.Color("#4a6270"), lipgloss.Color("#9ab2be"))
 		rail := accent
+		button := pick(lipgloss.Color("#00685d"), lipgloss.Color("#5eead4"))
 		if danger {
 			rail = pick(lipgloss.Color("#9c2b32"), lipgloss.Color("#ff9da3"))
+			button = rail
 		}
 		styles.Form.Base = styles.Form.Base.Margin(0, 1)
 		styles.FieldSeparator = styles.FieldSeparator.SetString("\n")
@@ -55,7 +57,7 @@ func terminalTheme(danger bool) huh.ThemeFunc {
 		styles.Focused.UnselectedOption = lipgloss.NewStyle().Foreground(text)
 		styles.Focused.FocusedButton = styles.Focused.FocusedButton.
 			Foreground(pick(lipgloss.Color("#ffffff"), lipgloss.Color("#062a25"))).
-			Background(accent).Bold(true)
+			Background(button).Bold(true)
 		styles.Focused.Next = styles.Focused.FocusedButton
 		styles.Focused.BlurredButton = styles.Focused.BlurredButton.
 			Foreground(text).Background(pick(lipgloss.Color("#e7eef1"), lipgloss.Color("#23343c")))

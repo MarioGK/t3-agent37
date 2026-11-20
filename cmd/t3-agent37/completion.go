@@ -37,7 +37,7 @@ var commands = []cliCommand{
 	{name: "link", summary: "Pair existing sandboxes with T3 Code", sandbox: true},
 	{name: "connect", summary: "Show a sandbox's T3 Code address", sandbox: true},
 	{name: "prepare", summary: "Refresh a sandbox's model catalog", sandbox: true},
-	{name: "terminal", summary: "Open an Agent37 terminal link", sandbox: true},
+	{name: "terminal", summary: "Show the Agent37 terminal link", sandbox: true},
 }
 
 //go:embed completion.bash
@@ -50,14 +50,6 @@ func findCommand(name string) (cliCommand, bool) {
 		}
 	}
 	return cliCommand{}, false
-}
-
-func commandUsage() string {
-	names := make([]string, 0, len(commands)+1)
-	for _, command := range commands {
-		names = append(names, command.name)
-	}
-	return strings.Join(append(names, "completion"), "|")
 }
 
 func runCompletion(ctx context.Context, args []string, output, diagnostic io.Writer) error {
@@ -116,6 +108,14 @@ func runCompletion(ctx context.Context, args []string, output, diagnostic io.Wri
 
 func completionCommand(root *cobra.Command) *cobra.Command {
 	command := &cobra.Command{Use: "completion", Short: "Generate shell completion scripts"}
+	command.SetHelpFunc(func(cmd *cobra.Command, _ []string) {
+		if cmd == command {
+			_ = printDetails(cmd.OutOrStdout(), "Shell completions", detail{"Usage", "t3-agent37 completion <shell>"},
+				detail{"Shells", "bash, fish, zsh, powershell"})
+			return
+		}
+		_ = printDetails(cmd.OutOrStdout(), "Generate "+cmd.Name()+" completions", detail{"Usage", cmd.CommandPath()})
+	})
 	for _, shell := range []struct {
 		name     string
 		generate func(io.Writer) error

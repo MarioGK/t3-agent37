@@ -152,7 +152,7 @@ func linkStartedSandbox(ctx context.Context, client *agent37.Client, instance ag
 		EnvironmentID: proof.EnvironmentID, URL: proof.TailnetURL, PeerProxy: proof.PeerProxy,
 	})
 	if err != nil {
-		fmt.Fprintf(diagnostic, "T3 mesh pending for %s. %v\n", name, err)
+		notice(diagnostic, warning, "T3 mesh pending for %s. %v", name, err)
 		return
 	}
 	meshCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
@@ -162,12 +162,12 @@ func linkStartedSandbox(ctx context.Context, client *agent37.Client, instance ag
 	count, linkErr := peers.ReconcileMesh(meshCtx, configured, append([]peers.MeshNode{node}, others...))
 	reportMesh(count, diagnostic)
 	if err := errors.Join(inventoryErr, discoveryErr, linkErr); err != nil {
-		fmt.Fprintf(diagnostic, "T3 mesh has pending links. Run t3-agent37 sync. %v\n", err)
+		notice(diagnostic, warning, "T3 mesh has pending links. Run t3-agent37 sync. %v", err)
 	}
 }
 
 func reportMesh(count int, diagnostic io.Writer) {
 	if count != 0 {
-		fmt.Fprintf(diagnostic, "Verified %d directed T3 environment links.\n", count)
+		notice(diagnostic, success, "Verified %d T3 environment links.", count)
 	}
 }

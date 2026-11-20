@@ -53,14 +53,14 @@ func TestSandboxListFormats(t *testing.T) {
 func TestSandboxListFitsNarrowTerminal(t *testing.T) {
 	const width = 34
 	instance := agent37.Instance{ID: "rm17e5y9cm", Name: "proxyqa-bczaut-1", Template: "terrascale-agent37@5", Status: "sleeping"}
-	text := renderSandboxList([]agent37.Instance{instance}, width)
+	text := renderSandboxList([]agent37.Instance{instance}, width, "Agent37 sandboxes")
 	if !strings.Contains(text, instance.Template) || !strings.Contains(text, instance.ID) || !strings.Contains(text, "◐ sleeping") {
 		t.Fatalf("compact list lost values: %q", text)
 	}
 	if got := lipgloss.Width(text); got > width {
 		t.Errorf("compact list uses %d columns, want at most %d", got, width)
 	}
-	if got := listCell("\x1b[31mabc\u202e\n\u2028"); got != "[31mabc" {
+	if got := terminalText("\x1b[31mabc\u202e\n\u2028"); got != "[31mabc" {
 		t.Errorf("list field retained terminal control characters: %q", got)
 	}
 }
