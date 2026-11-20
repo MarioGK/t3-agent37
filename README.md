@@ -31,7 +31,7 @@ and saves new ones to an owner-only `runtime.json` beside `config.json`.
 With a policy-writing OAuth client, `setup --repair-tailscale` defines missing
 enrollment tags and verifies access. Add `--dry-run` to preview.
 
-`up` creates a sandbox with the next numbered name and serves T3 at its private
+`up` creates a sandbox with the lowest available number and serves T3 at its private
 Tailscale HTTPS DNS name. It verifies Tailscale credentials before provisioning
 and mints an ephemeral key when the sandbox needs to join. It automatically
 registers with [configured T3 servers](docs/terrascale.md#link-t3-servers)
@@ -57,8 +57,10 @@ letters, digits, or hyphens and must start and end with a letter or digit.
 {"name_prefix": "terra"}
 ```
 
-Each prefix has its own counter on this workstation. A failed create can leave
-a gap. `up --dry-run` previews the next local name without reserving it.
+Numbering starts at 1 for each prefix and reuses gaps after deletion.
+If `terra-1`, `terra-2`, and `terra-4` exist, the next sandbox is `terra-3`.
+Stopped sandboxes keep their names. `up --dry-run` checks the workspace when
+an Agent37 key is configured and previews the name without reserving it.
 
 [TerraScale template, CLIProxy, and Tailscale](docs/terrascale.md) · [Download the latest executable](https://github.com/MarioGK/t3-agent37/releases/latest)
 

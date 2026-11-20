@@ -94,7 +94,11 @@ func TestLsUsesListCommand(t *testing.T) {
 }
 
 func TestCreateWithoutName(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", home)
+	t.Setenv("AGENT37_API_KEY", "")
 	state := filepath.Join(t.TempDir(), "new-state")
 	t.Setenv("XDG_STATE_HOME", state)
 	var output bytes.Buffer
@@ -142,8 +146,11 @@ func TestProvisioningRequiresTailnetBeforeCreatingState(t *testing.T) {
 }
 
 func TestUpWithoutNameCreatesAndNamedUpStarts(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	t.Setenv("AGENT37_API_KEY", "")
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", home)
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	var output bytes.Buffer
 	opts, err := parse([]string{"up", "--template", "terrascale-agent37@3"}, &output)

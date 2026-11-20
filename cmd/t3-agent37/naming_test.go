@@ -1,12 +1,17 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/MarioGK/t3-agent37/internal/agent37"
+	"github.com/gofrs/flock"
 )
 
 func TestConfiguredNamePrefix(t *testing.T) {
@@ -52,57 +57,128 @@ func TestUpUsesTailnetDefaultsFromConfig(t *testing.T) {
 	}
 }
 
-func TestNameCounterContinuesAfterReservation(t *testing.T) {
-	state := filepath.Join(t.TempDir(), "state space #")
-	if err := os.Mkdir(state, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	ctx := t.Context()
-	instances := []agent37.Instance{
-		{Name: "terra-2"},
-		{Name: "different", Metadata: map[string]string{"environment": "terra-8"}},
-		{Name: "another-prefix-40"},
-		{Name: "terra-010"},
-		{Name: "terra-+10"},
-		{Name: "terra-1000000000"},
-	}
-	if got, err := reserveSandboxName(ctx, state, "terra", instances); err != nil || got != "terra-9" {
-		t.Fatalf("first reservation = %q, %v", got, err)
-	}
-	for range 2 {
-		if got, err := previewSandboxName(ctx, state, "terra"); err != nil || got != "terra-10" {
-			t.Fatalf("preview = %q, %v", got, err)
+func TestNumberedNamesFillGaps(t *testing.T) {
+	state := t.TempDir()
+	// Old counter files and unlocked lifecycle locks must not reserve a name.
+	for _, file := range []string{"names.sqlite3", "terra-1.lifecycle.lock"} {
+		if err := os.WriteFile(filepath.Join(state, file), nil, 0o600); err != nil {
+			t.Fatal(err)
 		}
 	}
-	if got, err := reserveSandboxName(ctx, state, "terra", nil); err != nil || got != "terra-10" {
-		t.Fatalf("next reservation with no existing sandboxes = %q, %v", got, err)
+	instances := []agent37.Instance{
+		{Name: "terra-1", Status: "stopped"},
+		{Name: "different", Metadata: map[string]string{"environment": "terra-2"}},
+		{Name: "terra-4", Status: "running"},
+		{Name: "terra-3", Status: "deleted"},
+		{Name: "terra-03"},
 	}
-	if got, err := reserveSandboxName(ctx, state, "other", nil); err != nil || got != "other-1" {
-		t.Fatalf("new prefix reservation = %q, %v", got, err)
+	for _, test := range []struct {
+		label     string
+		instances []agent37.Instance
+		want      string
+	}{
+		{label: "empty workspace", want: "terra-1"},
+		{label: "deleted third sandbox", instances: instances, want: "terra-3"},
+		{label: "contiguous names", instances: append([]agent37.Instance{{Name: "terra-3"}}, instances...), want: "terra-5"},
+	} {
+		t.Run(test.label, func(t *testing.T) {
+			got, lock, err := reserveSandboxName(t.Context(), state, "terra", test.instances)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer lock.Close()
+			if got != test.want {
+				t.Errorf("reserved %q, want %q", got, test.want)
+			}
+		})
 	}
 }
 
-func TestNameCounterReservesUniqueConcurrentNames(t *testing.T) {
+func TestNumberedNamesReserveUniqueConcurrentNames(t *testing.T) {
 	state := t.TempDir()
+	if err := os.WriteFile(filepath.Join(state, "agent-3.pending"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	ctx := t.Context()
 	const count = 12
-	results := make(chan string, count)
+	type reservation struct {
+		name string
+		lock *flock.Flock
+		err  error
+	}
+	results := make(chan reservation, count)
+	instances := []agent37.Instance{{Name: "agent-1"}}
 	for range count {
 		go func() {
-			name, err := reserveSandboxName(ctx, state, "agent", nil)
-			if err != nil {
-				t.Error(err)
-			}
-			results <- name
+			name, lock, err := reserveSandboxName(ctx, state, "agent", instances)
+			results <- reservation{name: name, lock: lock, err: err}
 		}()
 	}
 	got := make(map[string]bool, count)
 	for range count {
-		got[<-results] = true
+		result := <-results
+		if result.err != nil {
+			t.Error(result.err)
+			continue
+		}
+		t.Cleanup(func() {
+			if err := result.lock.Close(); err != nil {
+				t.Error(err)
+			}
+		})
+		got[result.name] = true
 	}
-	for index := range count {
-		if name := fmt.Sprintf("agent-%d", index+1); !got[name] {
+	expected := []string{"agent-2"}
+	for i := range count - 1 {
+		expected = append(expected, fmt.Sprintf("agent-%d", i+4))
+	}
+	for _, name := range expected {
+		if !got[name] {
 			t.Errorf("missing reservation %s", name)
 		}
+	}
+}
+
+type namingTestTransport func(*http.Request) string
+
+func (fn namingTestTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(fn(request)))}, nil
+}
+
+func TestNumberedNamePreviewUsesLiveNames(t *testing.T) {
+	t.Setenv(agent37KeyName, "naming-test")
+	original := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = original })
+	http.DefaultTransport = namingTestTransport(func(request *http.Request) string {
+		if request.Method != http.MethodGet || request.URL.Path != "/v1/instances" {
+			t.Errorf("unexpected request %s %s", request.Method, request.URL.Path)
+		}
+		return `{"data":[{"name":"terra-1"},{"name":"terra-2","status":"stopped"},{"name":"terra-4"}]}`
+	})
+	state := filepath.Join(t.TempDir(), "state")
+	if name, err := previewSandboxName(t.Context(), state, "terra"); err != nil || name != "terra-3" {
+		t.Fatalf("preview = %q, %v", name, err)
+	}
+	if _, err := os.Stat(state); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("preview wrote state: %v", err)
+	}
+}
+
+func TestGeneratedCreateRechecksAReservedName(t *testing.T) {
+	state := t.TempDir()
+	original := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = original })
+	http.DefaultTransport = namingTestTransport(func(request *http.Request) string {
+		if request.Method != http.MethodGet {
+			t.Errorf("unexpected %s for occupied name", request.Method)
+		}
+		return `{"data":[{"name":"terra-1","status":"provisioning"}]}`
+	})
+	opts := options{name: "terra-1", generatedName: true}
+	if _, err := getOrCreate(t.Context(), agent37.New("naming-test"), opts, state, io.Discard); !errors.Is(err, errSandboxNameTaken) {
+		t.Fatalf("occupied name result: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(state, "terra-1.pending")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("collision left a pending marker: %v", err)
 	}
 }

@@ -24,6 +24,8 @@ const (
 	proxyModel     = "T3_AGENT37_CLIPROXY_MODEL"
 )
 
+var errAgent37KeyMissing = errors.New("run t3-agent37 setup, set AGENT37_API_KEY, or save a key with agent37 ssh setup")
+
 func agent37APIKey() (string, error) {
 	key, err := existingAgent37APIKey()
 	if err != nil || key != "" {
@@ -34,7 +36,7 @@ func agent37APIKey() (string, error) {
 		return "", err
 	}
 	if key = values[agent37KeyName]; key == "" {
-		return "", errors.New("run t3-agent37 setup, set AGENT37_API_KEY, or save a key with agent37 ssh setup")
+		return "", errAgent37KeyMissing
 	}
 	return key, nil
 }

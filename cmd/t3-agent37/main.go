@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -87,10 +88,10 @@ func parse(args []string, output io.Writer) (options, error) {
 			fmt.Fprintf(output, "Usage: t3-agent37 %s [name] [flags]\n", args[0])
 		}
 		if opts.action == "create" {
-			fmt.Fprintln(output, "Omit the name to use the next numbered name.")
+			fmt.Fprintln(output, "Omit the name to use the lowest available number.")
 		}
 		if opts.action == "up" {
-			fmt.Fprintln(output, "Run without a name to provision a new sandbox.")
+			fmt.Fprintln(output, "Run without a name to provision a sandbox with the lowest available number.")
 			fmt.Fprintln(output, "Pass a sandbox name to start it.")
 		}
 		if args[0] == "down" {
@@ -113,7 +114,7 @@ func parse(args []string, output io.Writer) (options, error) {
 	if opts.action == "create" || opts.action == "up" {
 		flags.StringVar(&opts.provider, "provider", "", "Provider: opencode, cliproxy, codex or claude")
 		flags.StringVar(&opts.template, "template", "", "Agent37 template, optionally pinned by revision")
-		flags.BoolVar(&opts.dryRun, "dry-run", false, "Print the request without using the API")
+		flags.BoolVar(&opts.dryRun, "dry-run", false, "Preview the request without creating a sandbox")
 		flags.BoolVar(&opts.tailscale, "tailscale", false, "Enroll the sandbox in Tailscale")
 		flags.BoolVar(&noTailscale, "no-tailscale", false, "Disable Tailscale enrollment")
 		_ = flags.MarkHidden("no-tailscale")
@@ -343,7 +344,7 @@ func latestManaged(instances []agent37.Instance) (agent37.Instance, error) {
 	return latest, nil
 }
 
-func getOrCreate(ctx context.Context, client *agent37.Client, opts options, state string) (agent37.Instance, error) {
+func getOrCreate(ctx context.Context, client *agent37.Client, opts options, state string, output io.Writer) (agent37.Instance, error) {
 	marker := filepath.Join(state, opts.name+".pending")
 	if !opts.generatedName {
 		existing, err := lookup(ctx, client, opts.name)
@@ -356,6 +357,9 @@ func getOrCreate(ctx context.Context, client *agent37.Client, opts options, stat
 	}
 	file, err := os.OpenFile(marker, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if errors.Is(err, os.ErrExist) {
+		if opts.generatedName {
+			return agent37.Instance{}, errSandboxNameTaken
+		}
 		return agent37.Instance{}, fmt.Errorf("a create operation for %s is pending. Retry to check its state", opts.name)
 	}
 	if err != nil {
@@ -368,10 +372,17 @@ func getOrCreate(ctx context.Context, client *agent37.Client, opts options, stat
 			_ = os.Remove(marker)
 		}
 	}()
-	existing, err := lookup(ctx, client, opts.name)
-	if existing.ID != "" && opts.generatedName {
-		return existing, fmt.Errorf("generated name %s is already in use. Run create again", opts.name)
+	instances, err := client.List(ctx)
+	if err != nil {
+		return agent37.Instance{}, err
 	}
+	if opts.generatedName && slices.ContainsFunc(instances, func(instance agent37.Instance) bool {
+		return instance.Status != "deleted" &&
+			(instance.Name == opts.name || instance.Metadata["environment"] == opts.name)
+	}) {
+		return agent37.Instance{}, errSandboxNameTaken
+	}
+	existing, err := namedManaged(instances, opts.name)
 	if err != nil || existing.ID != "" {
 		return existing, err
 	}
@@ -383,6 +394,9 @@ func getOrCreate(ctx context.Context, client *agent37.Client, opts options, stat
 		}
 	}
 	keepMarker = true // The operation may have reached Agent37 even if the reply is lost.
+	if opts.generatedName {
+		fmt.Fprintf(output, "Creating sandbox %s.\n", opts.name)
+	}
 	instance, err := client.Create(ctx, createPayload(opts, extra))
 	if err != nil {
 		if response, ok := errors.AsType[*agent37.Error](err); ok {
@@ -411,7 +425,7 @@ func operate(ctx context.Context, client *agent37.Client, enrollment *peers.Enro
 				return err
 			}
 		}
-		instance, err = getOrCreate(ctx, client, opts, state)
+		instance, err = getOrCreate(ctx, client, opts, state, output)
 	} else if opts.targetID != "" {
 		instance, err = client.Get(ctx, opts.targetID)
 		if err == nil && (instance.ID != opts.targetID || !isManaged(instance) || instance.Metadata["environment"] != opts.name) {
@@ -458,6 +472,7 @@ func operate(ctx context.Context, client *agent37.Client, enrollment *peers.Enro
 			if err := client.Delete(ctx, instance.ID); err != nil {
 				return err
 			}
+			_ = os.Remove(filepath.Join(state, opts.name+".pending"))
 			instance.Status = "deleted"
 		}
 		return jsonOutput(output, summary(instance), false)
@@ -607,36 +622,36 @@ func run(ctx context.Context, args []string, output, diagnostic io.Writer) error
 	if err := os.MkdirAll(state, 0o700); err != nil {
 		return err
 	}
+	for {
+		lock, err := lockSandbox(ctx, client, state, &opts)
+		if err != nil {
+			return err
+		}
+		err = operate(ctx, client, enrollment, opts, state, output, diagnostic)
+		unlockErr := lock.Unlock()
+		if opts.generatedName && errors.Is(err, errSandboxNameTaken) && unlockErr == nil {
+			continue
+		}
+		return cmp.Or(err, unlockErr)
+	}
+}
+
+func lockSandbox(ctx context.Context, client *agent37.Client, state string, opts *options) (*flock.Flock, error) {
 	if opts.generatedName {
 		instances, err := client.List(ctx)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		opts.name, err = reserveSandboxName(ctx, state, opts.namePrefix, instances)
-		if err != nil {
-			return err
-		}
+		name, lock, err := reserveSandboxName(ctx, state, opts.namePrefix, instances)
+		opts.name = name
+		return lock, err
 	}
-	lock := flock.New(filepath.Join(state, opts.name+".lifecycle.lock"))
+	lock := sandboxLock(state, opts.name)
 	locked, err := lock.TryLockContext(ctx, 100*time.Millisecond)
-	if err != nil {
-		return err
+	if err == nil && !locked {
+		err = errors.New("could not acquire the sandbox lifecycle lock")
 	}
-	if !locked {
-		return errors.New("could not acquire the sandbox lifecycle lock")
-	}
-	if opts.generatedName {
-		fmt.Fprintf(output, "Creating sandbox %s.\n", opts.name)
-	}
-	err = operate(ctx, client, enrollment, opts, state, output, diagnostic)
-	unlockErr := lock.Unlock()
-	if err != nil {
-		return err
-	}
-	if unlockErr != nil {
-		return unlockErr
-	}
-	return nil
+	return lock, err
 }
 
 func main() {
