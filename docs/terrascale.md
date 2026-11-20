@@ -61,8 +61,13 @@ finish pairing with `link <name>`. Use `link` to pair each managed sandbox in
 turn, or `up --no-desktop` for unattended provisioning.
 `connect <name> --pair` prints a link for manual pairing.
 `down` logs out the device before deleting the newest managed sandbox.
+It saves the target on the workstation so a retry can resume if the delete
+response is lost. After deletion, bare `down` reuses that target until a
+newer sandbox exists. Use `delete <name>` to remove an older sandbox.
 `down <name>` logs out the device and stops that sandbox. Both unlink it from
 available T3 environments. Use `up <name>` to restore peer links after a stop.
+Cleanup warnings leave a successful sandbox deletion intact. Run `sync` when
+an unavailable peer comes back online.
 Inside the sandbox, use
 `socks5h://127.0.0.1:1055` to reach tailnet services.
 

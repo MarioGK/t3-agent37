@@ -64,12 +64,14 @@ pairing request in T3 Code. Use `link <name>` for one sandbox or
 
 `create dev --yes` creates a sandbox with an explicit name.
 `down` permanently deletes the newest managed sandbox and its disk.
-`down --dry-run` shows which sandbox it would delete.
+Rerunning `down` keeps the same target unless a newer sandbox was created.
+Use `down --dry-run` to preview the target.
 `down <name>` stops a specific sandbox and keeps its disk.
 `delete` (or `del`) opens a terminal picker. Press `/` to filter the list, then
 select a sandbox and confirm deletion. For scripts, use `delete <name>`. Add
 `--dry-run` to preview.
-`down` and `delete` unlink the sandbox from the other environments.
+`down` and `delete` unlink the sandbox from reachable environments. If a
+peer is offline, the command reports the deletion and warns about cleanup.
 `sync` repairs the mesh and clears stale links. It wakes auto-sleeping
 sandboxes as needed. Use `sync --dry-run` to preview stale links without waking
 sandboxes. Remove saved desktop entries under

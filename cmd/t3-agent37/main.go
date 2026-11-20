@@ -449,6 +449,9 @@ func operate(ctx context.Context, client *agent37.Client, enrollment *peers.Enro
 		instance, err = getOrCreate(ctx, client, opts, state, diagnostic)
 	} else if opts.targetID != "" {
 		instance, err = client.Get(ctx, opts.targetID)
+		if opts.deleteSandbox && (sandboxNotFound(err) || err == nil && instance.Status == "deleted" && instance.ID == opts.targetID) {
+			return showAbsentSandbox(output, opts.name, false)
+		}
 		if err == nil && (instance.ID != opts.targetID || !isManaged(instance) || instance.Metadata["environment"] != opts.name) {
 			return errors.New("the selected sandbox changed. Choose a target again")
 		}
@@ -459,6 +462,9 @@ func operate(ctx context.Context, client *agent37.Client, enrollment *peers.Enro
 		return err
 	}
 	if instance.ID == "" {
+		if opts.deleteSandbox {
+			return showAbsentSandbox(output, opts.name, false)
+		}
 		return fmt.Errorf("no managed Agent37 environment named %s", opts.name)
 	}
 	if err := agent37.ValidateID(instance.ID); err != nil {
@@ -484,31 +490,11 @@ func operate(ctx context.Context, client *agent37.Client, enrollment *peers.Enro
 		}
 		return showLifecycleResult(output, "Sandbox started", instance, proof.TailnetURL)
 	case "stop":
-		instance, err = stopSandbox(ctx, client, instance, opts.name)
+		instance, err = applySandboxDown(ctx, client, instance, opts.name, state, opts.deleteSandbox)
 		if err != nil {
 			return err
 		}
-		title := "Sandbox stopped"
-		if opts.deleteSandbox {
-			if err := client.Delete(ctx, instance.ID); err != nil {
-				return err
-			}
-			_ = os.Remove(filepath.Join(state, opts.name+".pending"))
-			instance.Status = "deleted"
-			title = "Sandbox deleted"
-		}
-		if tailnet {
-			if opts.deleteSandbox {
-				if _, err := desktopLauncher(ctx); err == nil {
-					notice(diagnostic, info, "Remove any saved entry for %s under T3 Code → Settings → Connections.", opts.name)
-				}
-			}
-			if err := unlinkSandbox(ctx, client, opts.name, instance.ID, diagnostic); err != nil {
-				err = fmt.Errorf("T3 cleanup pending for %s. Run t3-agent37 sync: %w", opts.name, err)
-				return errors.Join(showLifecycleResult(output, title, instance, ""), err)
-			}
-		}
-		return showLifecycleResult(output, title, instance, "")
+		return finishSandboxDown(ctx, client, instance, opts.name, output, diagnostic)
 	case "terminal":
 		link, err := client.Terminal(ctx, instance.ID)
 		if err != nil {
@@ -651,7 +637,10 @@ func run(ctx context.Context, args []string, output, diagnostic io.Writer) error
 	if opts.action == "link" {
 		return linkSandboxes(ctx, client, opts, output, diagnostic)
 	}
-	if opts.action == "list" || opts.latest || opts.dryRun || opts.pickDelete {
+	if opts.latest {
+		return runLatestDown(ctx, client, opts, output, diagnostic)
+	}
+	if opts.action == "list" || opts.dryRun || opts.pickDelete {
 		instances, err := client.List(ctx)
 		if err != nil {
 			return err
@@ -666,8 +655,6 @@ func run(ctx context.Context, args []string, output, diagnostic io.Writer) error
 			if err == nil && instance.ID == "" {
 				return nil
 			}
-		case opts.latest:
-			instance, err = latestManaged(instances)
 		default:
 			instance, err = namedManaged(instances, opts.name)
 		}
@@ -675,26 +662,13 @@ func run(ctx context.Context, args []string, output, diagnostic io.Writer) error
 			return err
 		}
 		if instance.ID == "" {
-			if !opts.latest {
-				return fmt.Errorf("no managed Agent37 environment named %s", opts.name)
+			if opts.deleteSandbox {
+				return showAbsentSandbox(output, opts.name, opts.dryRun)
 			}
-			notice(output, info, "No managed Agent37 sandboxes.")
-			return nil
+			return fmt.Errorf("no managed Agent37 environment named %s", opts.name)
 		}
 		if opts.dryRun {
-			if _, terminal := ttyOutput(output); terminal {
-				title := "Preview · stop sandbox"
-				if opts.deleteSandbox {
-					title = "Preview · delete sandbox and disk"
-				}
-				return printSandboxResult(output, title, instance, "")
-			}
-			target := summary(instance)
-			target["action"] = "stop"
-			if opts.deleteSandbox {
-				target["action"] = "delete"
-			}
-			return jsonOutput(output, target, true)
+			return previewSandboxDown(output, instance, opts.deleteSandbox)
 		}
 		opts.name = instance.Metadata["environment"]
 		opts.targetID = instance.ID

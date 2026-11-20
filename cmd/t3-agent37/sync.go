@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"time"
 
@@ -110,7 +109,7 @@ func printSyncResult(output io.Writer, links []peers.SandboxLink, preview, incom
 
 func staleSandboxLink(ctx context.Context, client *agent37.Client, link peers.SandboxLink) (bool, error) {
 	instance, err := client.Get(ctx, link.SandboxID)
-	if apiError, ok := errors.AsType[*agent37.Error](err); ok && apiError.Status == http.StatusNotFound {
+	if sandboxNotFound(err) {
 		// Retain links to a running T3 environment that may be in another workspace.
 		reachable := link.Reachable(ctx)
 		return !reachable, ctx.Err()

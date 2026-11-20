@@ -7,6 +7,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -98,6 +101,129 @@ func TestBareDeleteUsesPickerInATerminal(t *testing.T) {
 	if _, err := parse([]string{"delete", "two", "names"}, io.Discard); err == nil {
 		t.Fatal("delete accepted multiple names")
 	}
+}
+
+func TestDownRetriesExactTargetAfterLostDeleteResponse(t *testing.T) {
+	t.Setenv("AGENT37_API_KEY", "fixture-only")
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const older = `{"id":"aaaaaaaaaa","status":"stopped","created":100,"metadata":{"managed_by":"t3-agent37","environment":"ts-1"}}`
+	const target = `{"id":"bbbbbbbbbb","status":"stopped","created":200,"metadata":{"managed_by":"t3-agent37","environment":"ts-2"}}`
+	const replacement = `{"id":"cccccccccc","status":"stopped","created":300,"metadata":{"managed_by":"t3-agent37","environment":"ts-2"}}`
+	originalTransport := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = originalTransport })
+	var calls []string
+	var deletedTarget, createdReplacement bool
+	http.DefaultTransport = downTestTransport(func(r *http.Request) (*http.Response, error) {
+		call := r.Method + " " + r.URL.Path
+		calls = append(calls, call)
+		switch call {
+		case "GET /v1/instances":
+			rows := []string{older}
+			if !deletedTarget {
+				rows = append(rows, target)
+			}
+			if createdReplacement {
+				rows = append(rows, replacement)
+			}
+			return downResponse(http.StatusOK, `{"data":[`+strings.Join(rows, ",")+`]}`), nil
+		case "GET /v1/instances/bbbbbbbbbb":
+			if deletedTarget {
+				return downResponse(http.StatusNotFound, `{}`), nil
+			}
+			return downResponse(http.StatusOK, target), nil
+		case "DELETE /v1/instances/bbbbbbbbbb":
+			deletedTarget = true
+			return nil, io.ErrUnexpectedEOF
+		case "GET /v1/instances/cccccccccc":
+			return downResponse(http.StatusOK, replacement), nil
+		case "DELETE /v1/instances/cccccccccc":
+			createdReplacement = false
+			return downResponse(http.StatusNoContent, ""), nil
+		default:
+			return nil, fmt.Errorf("unexpected request %s", call)
+		}
+	})
+	var output bytes.Buffer
+	if err := run(t.Context(), []string{"down"}, &output, io.Discard); err == nil || !deletedTarget {
+		t.Fatalf("expected a lost response after delete, got %v", err)
+	}
+	createdReplacement = true
+	calls = nil
+	if row := runDownTest(t, "down"); row["id"] != "bbbbbbbbbb" || row["status"] != "deleted" ||
+		!slices.Equal(calls, []string{"GET /v1/instances/bbbbbbbbbb"}) {
+		t.Fatalf("retry selected a different target: %v, %v", row, calls)
+	}
+	if row := runDownTest(t, "down"); row["id"] != "cccccccccc" || row["status"] != "deleted" {
+		t.Fatalf("newer sandbox was not selected: %v", row)
+	}
+	calls = nil
+	if row := runDownTest(t, "down", "--dry-run"); row["id"] != "cccccccccc" || row["action"] != "none" ||
+		!slices.Equal(calls, []string{"GET /v1/instances"}) {
+		t.Fatalf("preview selected an older sandbox: %v, %v", row, calls)
+	}
+	if row := runDownTest(t, "delete", "ts-2"); row["name"] != "ts-2" || row["status"] != "absent" {
+		t.Fatalf("named deletion was not idempotent: %v", row)
+	}
+}
+
+func TestDownSucceedsAndRetriesPendingPeerCleanup(t *testing.T) {
+	t.Setenv("AGENT37_API_KEY", "fixture-only")
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("DISPLAY", "")
+	t.Setenv("WAYLAND_DISPLAY", "")
+	peerFile := filepath.Join(t.TempDir(), "peers.json")
+	t.Setenv("T3_AGENT37_PEERS_FILE", peerFile)
+	const target = `{"id":"bbbbbbbbbb","status":"stopped","created":200,"metadata":{"managed_by":"t3-agent37","environment":"ts-1","tailnet":"tailscale"}}`
+	originalTransport := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = originalTransport })
+	var deletes int
+	http.DefaultTransport = downTestTransport(func(r *http.Request) (*http.Response, error) {
+		call := r.Method + " " + r.URL.Path
+		switch call {
+		case "GET /v1/instances":
+			if deletes == 0 {
+				return downResponse(http.StatusOK, `{"data":[`+target+`]}`), nil
+			}
+			return downResponse(http.StatusOK, `{"data":[]}`), nil
+		case "GET /v1/instances/bbbbbbbbbb":
+			return downResponse(http.StatusOK, target), nil
+		case "DELETE /v1/instances/bbbbbbbbbb":
+			deletes++
+			return downResponse(http.StatusNoContent, ""), nil
+		default:
+			return nil, fmt.Errorf("unexpected request %s", call)
+		}
+	})
+	var output, diagnostic bytes.Buffer
+	if err := run(t.Context(), []string{"down"}, &output, &diagnostic); err != nil || deletes != 1 ||
+		!strings.Contains(output.String(), `"status":"deleted"`) || !strings.Contains(diagnostic.String(), "T3 cleanup pending for ts-1") {
+		t.Fatalf("deletion did not report the peer problem separately: %v, %d, %s, %s", err, deletes, &output, &diagnostic)
+	}
+	if err := os.WriteFile(peerFile, []byte(`[]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	output.Reset()
+	diagnostic.Reset()
+	if err := run(t.Context(), []string{"down"}, &output, &diagnostic); err != nil || deletes != 1 || diagnostic.Len() != 0 {
+		t.Fatalf("retry did not finish cleanup without deleting again: %v, %d, %s", err, deletes, &diagnostic)
+	}
+}
+
+func downResponse(status int, body string) *http.Response {
+	return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body))}
+}
+
+func runDownTest(t *testing.T, args ...string) map[string]any {
+	t.Helper()
+	var output bytes.Buffer
+	if err := run(t.Context(), args, &output, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	var row map[string]any
+	if err := json.Unmarshal(output.Bytes(), &row); err != nil {
+		t.Fatalf("invalid lifecycle output %q: %v", &output, err)
+	}
+	return row
 }
 
 func TestDelAlias(t *testing.T) {
