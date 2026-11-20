@@ -44,6 +44,7 @@ On a workstation running T3 Code, bare `up` also opens the desktop pairing
 request for the new sandbox. Confirm its private address in T3 Code.
 The desktop displays the same sandbox name as `t3-agent37 ls`.
 Use `up --no-desktop` for headless runs.
+Use `ls --json` for scripts.
 
 With the TerraScale template and CLIProxy selected, `up` configures Codex,
 Claude Code, and OpenCode with your CLIProxy key. All three use GLM 5.3 by

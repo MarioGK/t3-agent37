@@ -47,6 +47,7 @@ type options struct {
 	noDesktop                        bool
 	noTailscale                      bool
 	githubAccess                     bool
+	listJSON                         bool
 }
 
 func parse(args []string, output io.Writer) (options, error) {
@@ -67,7 +68,8 @@ func parse(args []string, output io.Writer) (options, error) {
 	flags.SetOutput(output)
 	flags.Usage = func() {
 		if opts.action == "list" {
-			fmt.Fprintf(output, "Usage: t3-agent37 %s\nList managed Agent37 sandboxes.\n", args[0])
+			fmt.Fprintf(output, "Usage: t3-agent37 %s [--json]\nShow managed sandboxes and their status.\n", args[0])
+			flags.PrintDefaults()
 			return
 		}
 		if opts.action == "config" {
@@ -143,7 +145,13 @@ func parse(args []string, output io.Writer) (options, error) {
 			opts.action = "start"
 		}
 	}
-	if (opts.action == "list" || opts.action == "link") && flags.NArg() == 0 {
+	if opts.action == "list" {
+		if flags.NArg() != 0 {
+			return opts, fmt.Errorf("%s does not take a sandbox name", args[0])
+		}
+		return opts, nil
+	}
+	if opts.action == "link" && flags.NArg() == 0 {
 		return opts, nil
 	}
 	if opts.action == "stop" && opts.yes != opts.deleteSandbox {
@@ -160,7 +168,7 @@ func parse(args []string, output io.Writer) (options, error) {
 		opts.deleteSandbox = true
 	case opts.action == "create" && flags.NArg() == 0:
 		opts.generatedName = true
-	case opts.action != "list" && flags.NArg() == 1 && namePattern.MatchString(flags.Arg(0)):
+	case flags.NArg() == 1 && namePattern.MatchString(flags.Arg(0)):
 		opts.name = flags.Arg(0)
 	default:
 		return opts, errors.New("expected a name with 1 to 43 lowercase letters, digits, or hyphens")
@@ -205,6 +213,9 @@ func parse(args []string, output io.Writer) (options, error) {
 }
 
 func addCommandFlags(flags *flag.FlagSet, opts *options) {
+	if opts.action == "list" {
+		flags.BoolVar(&opts.listJSON, "json", false, "Print JSON for scripts")
+	}
 	if opts.action == "setup" {
 		flags.BoolVar(&opts.checkSetup, "check", false, "Check workstation configuration without prompts or network requests")
 		flags.BoolVar(&opts.verifySetup, "verify", false, "Check local Tailscale status and verify OAuth access")
@@ -637,13 +648,7 @@ func run(ctx context.Context, args []string, output, diagnostic io.Writer) error
 			return err
 		}
 		if opts.action == "list" {
-			rows := make([]map[string]any, 0)
-			for _, instance := range instances {
-				if isManaged(instance) {
-					rows = append(rows, summary(instance))
-				}
-			}
-			return jsonOutput(output, rows, true)
+			return printSandboxList(output, instances, opts.listJSON)
 		}
 		var instance agent37.Instance
 		switch {

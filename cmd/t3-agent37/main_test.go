@@ -91,6 +91,12 @@ func TestLsUsesListCommand(t *testing.T) {
 	if _, err := parse([]string{"ls", "dev"}, &output); err == nil {
 		t.Fatal("ls accepted a sandbox name")
 	}
+	for _, command := range []string{"ls", "list"} {
+		opts, err := parse([]string{command, "--json"}, &output)
+		if err != nil || opts.action != "list" || !opts.listJSON {
+			t.Fatalf("%s --json = %+v, %v", command, opts, err)
+		}
+	}
 }
 
 func TestCreateWithoutName(t *testing.T) {
