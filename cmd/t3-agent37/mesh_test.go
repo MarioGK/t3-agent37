@@ -51,5 +51,11 @@ func TestCloudMeshExcludesPendingDesktopPairing(t *testing.T) {
 		if err != nil || (len(nodes) == 1) != confirmed {
 			t.Fatalf("confirmation=%t, nodes=%d, err=%v", confirmed, len(nodes), err)
 		}
+		// Batch up uses the full sync path, which can see an unpaired node for
+		// cleanup while still excluding it from peer-link creation.
+		nodes, err = discoverCloudNodes(t.Context(), agent37.New("fixture-key"), []agent37.Instance{instance}, "", false, true)
+		if err != nil || len(nodes) != 1 || nodes[0].CleanupOnly == confirmed {
+			t.Fatalf("sync ignored the pairing boundary: confirmation=%t, nodes=%+v, err=%v", confirmed, nodes, err)
+		}
 	}
 }

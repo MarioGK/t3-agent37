@@ -68,11 +68,15 @@ func printCommandHelpAtWidth(output io.Writer, command cliCommand, flags *flag.F
 		usage += " <name>"
 	}
 	switch command.name {
-	case "up", "create", "down", "delete", "del", "link":
+	case "up":
+		usage = "up [count|name]"
+	case "create", "down", "delete", "del", "link":
 		usage = command.name + " [name]"
 	}
 	switch command.name {
-	case "up", "create":
+	case "up":
+		description = "Create a sandbox, create a batch with a count such as 10, or start an existing sandbox by name."
+	case "create":
 		description += ". Omit the name to use the lowest available number."
 	case "down":
 		description = "Delete the newest managed sandbox and its disk. Retries keep the saved target while cleanup is pending. Pass a name to stop that sandbox and keep its disk."

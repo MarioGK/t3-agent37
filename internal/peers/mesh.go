@@ -61,7 +61,7 @@ func reconcileMesh(ctx context.Context, client *http.Client, candidates []MeshNo
 	forMeshNode(ctx, len(nodes), func(i int) {
 		node := nodes[i]
 		api := newPeerAPI(client, node.Name, node.URL, node.EnvironmentID)
-		if err := api.verify(ctx, 1, true); err != nil {
+		if err := api.verify(ctx, 2, true); err != nil {
 			availability[i] = err
 			return
 		}
@@ -108,7 +108,7 @@ func reconcileSource(ctx context.Context, source meshEndpoint, targets []meshEnd
 		if source.api.environmentID == target.api.environmentID {
 			continue
 		}
-		err := ensureListedLink(ctx, source.api, source.token, target.api, target.token, previous[target.api.environmentID])
+		err := ensureMeshLink(ctx, source, target, previous[target.api.environmentID])
 		if err != nil {
 			failures = append(failures, fmt.Errorf("%s to %s: %w", source.api.name, target.api.name, err))
 		} else {
@@ -116,6 +116,34 @@ func reconcileSource(ctx context.Context, source meshEndpoint, targets []meshEnd
 		}
 	}
 	return count, errors.Join(failures...)
+}
+
+func ensureMeshLink(ctx context.Context, source, target meshEndpoint, previous link) error {
+	var err error
+	for attempt := range 3 {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(time.Duration(attempt) * time.Second):
+			}
+			// Read back the source first. If the previous attempt linked it,
+			// preserve that grant and avoid issuing another pairing code.
+			entries, listErr := listPeerLinks(ctx, source.api, source.token)
+			if listErr != nil {
+				return errors.Join(err, listErr)
+			}
+			previous = link{}
+			if i := slices.IndexFunc(entries, func(entry link) bool { return entry.EnvironmentID == target.api.environmentID }); i >= 0 {
+				previous = entries[i]
+			}
+		}
+		err = ensureListedLink(ctx, source.api, source.token, target.api, target.token, previous)
+		if !errors.Is(err, errPeerUnreachable) {
+			break
+		}
+	}
+	return err
 }
 
 func normalizeMeshNodes(candidates []MeshNode, forCleanup bool) ([]MeshNode, error) {

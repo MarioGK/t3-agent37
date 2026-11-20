@@ -36,6 +36,7 @@ var sshAlias = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
 var environmentID = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,127}$`)
 var unixUser = regexp.MustCompile(`^[a-z_][a-z0-9_-]*$`)
 var errGuestAgentUnavailable = errors.New("Incus guest agent unavailable")
+var errPeerUnreachable = errors.New("unreachable")
 
 // Peer describes a trusted workstation SSH alias and the same T3 server's private API.
 type Peer struct {
@@ -430,7 +431,9 @@ func (p peerAPI) rpc(ctx context.Context, token, method string, payload, result 
 				return fmt.Errorf("%s (session scope denied)", failure)
 			}
 			switch reason := cause.Error.Reason; reason {
-			case "disabled", "unreachable", "incompatible", "self", "pairing_rejected", "storage":
+			case "unreachable":
+				return fmt.Errorf("%s (%w)", failure, errPeerUnreachable)
+			case "disabled", "incompatible", "self", "pairing_rejected", "storage":
 				return fmt.Errorf("%s (%s)", failure, strings.ReplaceAll(reason, "_", " "))
 			}
 		}
@@ -465,7 +468,7 @@ func ensureListedLink(ctx context.Context, source peerAPI, sourceToken string, t
 			return errors.New("review the existing address in T3")
 		}
 		if previous.Status == "unreachable" {
-			return errors.New("the existing T3 link is temporarily unreachable")
+			return fmt.Errorf("the existing T3 link is temporarily %w", errPeerUnreachable)
 		}
 		if previous.Status != "expired" {
 			return errors.New("review the existing link in T3")

@@ -22,6 +22,7 @@ irm https://raw.githubusercontent.com/MarioGK/t3-agent37/main/install.ps1 | iex
 t3-agent37 setup
 t3-agent37 setup --verify
 t3-agent37 up
+t3-agent37 up 10 --dry-run
 t3-agent37 ls
 t3-agent37 down
 ```
@@ -45,6 +46,10 @@ connect before linking it to other environments. Confirm its private address
 in T3 Code within five minutes. Run `link <name>` to retry a pending pairing.
 The desktop displays the same sandbox name as `t3-agent37 ls`.
 Use `up --no-desktop` for headless runs.
+`up 10` creates ten new sandboxes in parallel using the next free names.
+Confirm each desktop pairing in order. The CLI then syncs the mesh once.
+`up 10 --dry-run` previews the batch. `up 10 --no-desktop` runs it headless.
+Use `up <name>` to start an existing sandbox.
 Use `ls --json` for scripts. Sandbox previews and `start`, `stop`, and `delete`
 results keep their JSON output when piped.
 

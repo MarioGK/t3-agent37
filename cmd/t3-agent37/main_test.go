@@ -123,7 +123,7 @@ func TestHelpIncludesCommandsAndPublicOptions(t *testing.T) {
 		t.Fatal(err)
 	}
 	text = output.String()
-	if !strings.Contains(text, "t3-agent37 up [name] [flags]") || !strings.Contains(text, "--dry-run") || strings.Contains(text, "--no-tailscale") {
+	if !strings.Contains(text, "t3-agent37 up [count|name] [flags]") || !strings.Contains(text, "--dry-run") || strings.Contains(text, "--no-tailscale") {
 		t.Fatalf("unexpected up help: %s", text)
 	}
 }

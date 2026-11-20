@@ -315,8 +315,12 @@ func startSandbox(ctx context.Context, client *agent37.Client, instance agent37.
 	return instance, setupProof{}, nil
 }
 
-func prepareCreated(ctx context.Context, client *agent37.Client, enrollment *peers.Enrollment, instance agent37.Instance, name string, githubAccess bool, diagnostic io.Writer) (setupProof, error) {
-	if displayProvider(instance) == "opencode" {
+func prepareCreated(ctx context.Context, client *agent37.Client, enrollment *peers.Enrollment, instance agent37.Instance, opts options, diagnostic io.Writer) (setupProof, error) {
+	provider := displayProvider(instance)
+	if instance.Template != opts.template || provider != opts.provider || (instance.Metadata["tailnet"] == "tailscale") != opts.tailscale {
+		return setupProof{}, errors.New("this name already uses a different template, provider, or Tailscale setting")
+	}
+	if provider == "opencode" {
 		if err := client.RequireManagedBudget(ctx, instance.ID, false); err != nil {
 			return setupProof{}, err
 		}
@@ -329,7 +333,14 @@ func prepareCreated(ctx context.Context, client *agent37.Client, enrollment *pee
 			return setupProof{}, err
 		}
 	}
-	return bootstrap(ctx, client, enrollment, instance, name, true, wasStopped, githubAccess, diagnostic)
+	proof, err := bootstrap(ctx, client, enrollment, instance, opts.name, true, wasStopped, opts.githubAccess, diagnostic)
+	if err == nil && !proof.ProviderReady {
+		notice(diagnostic, warning, "%s needs sign-in. Run t3-agent37 terminal %s.", providerLabel(provider), opts.name)
+	}
+	if err == nil && proof.TailnetURL == "" {
+		err = errors.New("Agent37 did not provide the sandbox's Tailscale address")
+	}
+	return proof, err
 }
 
 func configureGitHubAccess(ctx context.Context, client *agent37.Client, id, name string, diagnostic io.Writer) error {

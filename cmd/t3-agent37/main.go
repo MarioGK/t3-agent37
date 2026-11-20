@@ -39,6 +39,7 @@ type options struct {
 	action, name, provider, template string
 	namePrefix                       string
 	targetID                         string
+	batchSize                        int
 	yes, dryRun, pair, tailscale     bool
 	deleteSandbox                    bool
 	checkSetup                       bool
@@ -97,7 +98,14 @@ func parse(args []string, output io.Writer) (options, error) {
 		return opts, nil
 	}
 	if opts.action == "up" {
-		if flags.NArg() == 0 {
+		if flags.NArg() == 1 && batchCountArgument(flags.Arg(0)) {
+			count, err := strconv.Atoi(flags.Arg(0))
+			if err != nil || count < 1 || count > maxBatchSize {
+				return opts, fmt.Errorf("up expects a sandbox count from 1 to %d", maxBatchSize)
+			}
+			opts.batchSize = count
+		}
+		if flags.NArg() == 0 || opts.batchSize > 0 {
 			opts.action = "create"
 			opts.yes = !opts.dryRun
 		} else {
@@ -129,7 +137,7 @@ func parse(args []string, output io.Writer) (options, error) {
 		}
 		opts.latest = true
 		opts.deleteSandbox = true
-	case opts.action == "create" && flags.NArg() == 0:
+	case opts.action == "create" && (flags.NArg() == 0 || opts.batchSize > 0):
 		opts.generatedName = true
 	case flags.NArg() == 1 && namePattern.MatchString(flags.Arg(0)):
 		opts.name = flags.Arg(0)
@@ -422,6 +430,9 @@ func getOrCreate(ctx context.Context, client *agent37.Client, opts options, stat
 			case 400, 401, 402, 403, 404, 422, 429:
 				keepMarker = false
 			}
+			if response.Code == "instance_limit_reached" || response.Code == "no_capacity" {
+				keepMarker = false
+			}
 		}
 		return instance, err
 	}
@@ -472,7 +483,6 @@ func operate(ctx context.Context, client *agent37.Client, enrollment *peers.Enro
 	if !tailnet && (opts.action == "start" || opts.action == "connect") {
 		return errors.New("this sandbox was created without Tailscale. Create a new sandbox with a Tailscale-ready template")
 	}
-	provider := displayProvider(instance)
 	switch opts.action {
 	case "start":
 		configured, err = peers.Configured()
@@ -512,18 +522,12 @@ func operate(ctx context.Context, client *agent37.Client, enrollment *peers.Enro
 	case "prepare":
 		return prepare(ctx, client, instance, opts.name, output, diagnostic)
 	}
-	if opts.action == "create" && (instance.Template != opts.template || provider != opts.provider || tailnet != opts.tailscale) {
-		return errors.New("this name already uses a different template, provider, or Tailscale setting")
-	}
 	_, interactiveOutput := ttyOutput(output)
 	var proof setupProof
 	if opts.action == "create" {
-		proof, err = prepareCreated(ctx, client, enrollment, instance, opts.name, opts.githubAccess, diagnostic)
+		proof, err = prepareCreated(ctx, client, enrollment, instance, opts, diagnostic)
 		if err != nil {
 			return err
-		}
-		if !proof.ProviderReady {
-			notice(diagnostic, warning, "%s needs sign-in. Run t3-agent37 terminal %s.", providerLabel(provider), opts.name)
 		}
 		if launcher != nil {
 			if err := handOffPairing(ctx, client, instance, opts.name, proof, launcher, diagnostic); err != nil {
@@ -605,6 +609,9 @@ func run(ctx context.Context, args []string, output, diagnostic io.Writer) error
 			return err
 		}
 	}
+	if opts.batchSize > 0 && opts.dryRun {
+		return previewBatch(ctx, opts, state, output)
+	}
 	if opts.dryRun && opts.action == "create" {
 		if opts.generatedName {
 			opts.name, err = previewSandboxName(ctx, state, opts.namePrefix)
@@ -635,6 +642,9 @@ func run(ctx context.Context, args []string, output, diagnostic io.Writer) error
 		return err
 	}
 	client := agent37.New(key)
+	if opts.batchSize > 0 {
+		return runBatch(ctx, client, enrollment, opts, state, output, diagnostic)
+	}
 	if opts.action == "sync" {
 		return syncSandboxLinks(ctx, client, opts.dryRun, output, diagnostic)
 	}

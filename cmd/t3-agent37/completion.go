@@ -25,7 +25,7 @@ var commands = []cliCommand{
 	{name: "setup", summary: "Set up Agent37, Tailscale, and the model provider"},
 	{name: "config", summary: "Edit sandbox defaults"},
 	{name: "create", summary: "Create a sandbox", sandbox: true},
-	{name: "up", summary: "Create a sandbox or start one by name", sandbox: true},
+	{name: "up", summary: "Create sandboxes or start one by name", sandbox: true},
 	{name: "start", summary: "Start an existing sandbox", sandbox: true},
 	{name: "down", action: "stop", summary: "Delete the newest sandbox or stop one by name", sandbox: true},
 	{name: "stop", summary: "Stop a sandbox and keep its disk", sandbox: true},
@@ -77,9 +77,12 @@ func runCompletion(ctx context.Context, args []string, output, diagnostic io.Wri
 			command.Use += " [name]"
 			command.ValidArgsFunction = completeSandboxNames
 		}
+		if spec.name == "up" {
+			command.Use = "up [count|name]"
+		}
 		root.AddCommand(command)
 		// A name selects the start form of up, which has no provisioning flags.
-		if spec.name == "up" && len(args) > 3 && args[1] == "up" && namePattern.MatchString(args[2]) {
+		if spec.name == "up" && len(args) > 3 && args[1] == "up" && namePattern.MatchString(args[2]) && !batchCountArgument(args[2]) {
 			addCommandFlags(command.Flags(), &options{action: "start"})
 			command.Flags().Bool("no-desktop", false, "Skip the T3 Code desktop pairing request")
 			continue
@@ -142,12 +145,22 @@ const completionAPIDeadline = 1200 * time.Millisecond
 
 func completeSandboxNames(command *cobra.Command, args []string, prefix string) ([]string, cobra.ShellCompDirective) {
 	directive := cobra.ShellCompDirectiveNoFileComp
-	if len(args) > 0 || (command.Name() == "up" && !onlyStartFlags(command.Flags())) {
+	if len(args) > 0 {
 		return nil, directive
+	}
+	var names []string
+	if command.Name() == "up" {
+		for _, count := range []string{"2", "5", "10"} {
+			if strings.HasPrefix(count, prefix) {
+				names = append(names, count+"\tCreate a batch of "+count+" sandboxes")
+			}
+		}
+		if !onlyStartFlags(command.Flags()) {
+			return names, directive
+		}
 	}
 	ctx, cancel := context.WithTimeout(command.Context(), completionAPIDeadline)
 	defer cancel()
-	var names []string
 	if command.Name() == "create" {
 		config, configErr := loadWorkstationConfig()
 		state, stateErr := statePath()
@@ -161,15 +174,18 @@ func completeSandboxNames(command *cobra.Command, args []string, prefix string) 
 	}
 	key, err := agent37APIKey()
 	if err != nil {
-		return nil, directive
+		return names, directive
 	}
 	instances, err := agent37.New(key).List(ctx)
 	if err != nil {
-		return nil, directive
+		return names, directive
 	}
 	seen := make(map[string]bool)
 	for _, instance := range instances {
 		name := instance.Metadata["environment"]
+		if command.Name() == "up" && batchCountArgument(name) {
+			continue
+		}
 		if isManaged(instance) && namePattern.MatchString(name) && strings.HasPrefix(name, prefix) && !seen[name] {
 			names = append(names, name)
 			seen[name] = true

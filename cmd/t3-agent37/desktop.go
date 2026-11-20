@@ -165,7 +165,9 @@ func linkSandboxes(ctx context.Context, client *agent37.Client, opts options, ou
 			return errors.Join(append(failures, ctx.Err())...)
 		}
 		name := instance.Metadata["environment"]
-		err := pairExistingSandbox(ctx, client, instance, state, name, launcher, configured, diagnostic)
+		_, err := pairSandbox(ctx, client, instance, setupProof{}, state, name, launcher, diagnostic, func(paired agent37.Instance, proof setupProof) {
+			linkStartedSandbox(ctx, client, paired, name, configured, proof, diagnostic)
+		})
 		if err != nil {
 			failures = append(failures, fmt.Errorf("%s: %w", name, err))
 		}
@@ -196,43 +198,47 @@ func desktopTargets(instances []agent37.Instance, name string) ([]agent37.Instan
 	return targets, nil
 }
 
-func pairExistingSandbox(ctx context.Context, client *agent37.Client, target agent37.Instance, state, name string, launcher []string, configured []peers.Peer, diagnostic io.Writer) (err error) {
+func pairSandbox(ctx context.Context, client *agent37.Client, target agent37.Instance, proof setupProof, state, name string, launcher []string, diagnostic io.Writer, onConfirmed func(agent37.Instance, setupProof)) (_ setupProof, err error) {
 	if !namePattern.MatchString(name) || agent37.ValidateID(target.ID) != nil {
-		return errors.New("Agent37 returned an invalid sandbox identity")
+		return proof, errors.New("Agent37 returned an invalid sandbox identity")
 	}
 	lock := sandboxLock(state, name)
 	locked, err := lock.TryLockContext(ctx, 100*time.Millisecond)
 	if err != nil {
-		return err
+		return proof, err
 	}
 	if !locked {
-		return errors.New("could not acquire the sandbox lifecycle lock")
+		return proof, errors.New("could not acquire the sandbox lifecycle lock")
 	}
 	defer func() { err = errors.Join(err, lock.Unlock()) }()
 
 	instance, err := client.Get(ctx, target.ID)
 	if err != nil {
-		return err
+		return proof, err
 	}
 	if instance.ID != target.ID || !isManaged(instance) || instance.Metadata["environment"] != name {
-		return errors.New("the selected sandbox changed")
+		return proof, errors.New("the selected sandbox changed")
 	}
 	if instance.Metadata["tailnet"] != "tailscale" {
-		return errors.New("desktop pairing requires a Tailscale sandbox")
+		return proof, errors.New("desktop pairing requires a Tailscale sandbox")
 	}
 	switch instance.Status {
 	case "running", "stopped", "sleeping":
 	default:
-		return errors.New("wait for the sandbox to become ready before retrying link")
+		return proof, errors.New("wait for the sandbox to become ready before retrying link")
 	}
-	instance, proof, err := startSandbox(ctx, client, instance, name, true, false, diagnostic)
-	if err != nil {
-		return err
+	if proof.TailnetURL == "" || instance.Status != "running" {
+		instance, proof, err = startSandbox(ctx, client, instance, name, true, false, diagnostic)
+		if err != nil {
+			return proof, err
+		}
 	}
 	if err := handOffPairing(ctx, client, instance, name, proof, launcher, diagnostic); err != nil {
-		return err
+		return proof, err
 	}
 	proof.DesktopConfirmed = true
-	linkStartedSandbox(ctx, client, instance, name, configured, proof, diagnostic)
-	return nil
+	if onConfirmed != nil {
+		onConfirmed(instance, proof)
+	}
+	return proof, nil
 }

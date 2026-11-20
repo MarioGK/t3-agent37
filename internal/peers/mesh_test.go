@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	json "encoding/json/v2"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -50,6 +51,19 @@ func TestMeshKeepsReconcilingAfterVerificationAndLinkFailures(t *testing.T) {
 	}
 }
 
+func TestMeshReconcilesTenNodesAndRetriesTemporaryReachability(t *testing.T) {
+	names := make([]string, 10)
+	for i := range names {
+		names[i] = fmt.Sprintf("sandbox-%d", i+1)
+	}
+	mesh := newMeshFixture(t, names...)
+	mesh.transientSource, mesh.transientTarget = names[0], names[1]
+	count, err := reconcileMesh(t.Context(), mesh.client, mesh.nodes)
+	if count != 90 || err != nil || mesh.grants != 91 || mesh.lists != 11 {
+		t.Fatalf("ten-node mesh: %d links, %d grants, %d lists, %v", count, mesh.grants, mesh.lists, err)
+	}
+}
+
 func TestCloudPruneDryRunUsesReadOnlyInventory(t *testing.T) {
 	mesh := newMeshFixture(t, "alpha")
 	node := mesh.nodes[0]
@@ -83,11 +97,12 @@ type meshFixture struct {
 	client *http.Client
 	nodes  []MeshNode
 
-	mu                         sync.Mutex
-	rejectSource, rejectTarget string
-	grants, issues, lists      int
-	unlinked                   []string
-	links                      map[string]map[string]link
+	mu                               sync.Mutex
+	rejectSource, rejectTarget       string
+	transientSource, transientTarget string
+	grants, issues, lists            int
+	unlinked                         []string
+	links                            map[string]map[string]link
 }
 
 func newMeshFixture(t *testing.T, names ...string) *meshFixture {
@@ -188,6 +203,13 @@ func (mesh *meshFixture) serve(t *testing.T, name string, w http.ResponseWriter,
 			}
 			if name == mesh.rejectSource && target == mesh.rejectTarget {
 				_ = ws.WriteJSON(map[string]any{"_tag": "Exit", "requestId": request.ID, "exit": map[string]string{"_tag": "Failure"}})
+				return
+			}
+			if name == mesh.transientSource && target == mesh.transientTarget {
+				mesh.transientSource, mesh.transientTarget = "", ""
+				_ = ws.WriteJSON(map[string]any{"_tag": "Exit", "requestId": request.ID, "exit": map[string]any{
+					"_tag": "Failure", "cause": []any{map[string]any{"error": map[string]string{"reason": "unreachable"}}},
+				}})
 				return
 			}
 			linked := link{EnvironmentID: target, Status: "reachable", Access: request.Payload["access"]}

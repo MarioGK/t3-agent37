@@ -60,6 +60,18 @@ confirmed client connects. A pending sandbox stays out of the mesh until you
 finish pairing with `link <name>`. Use `link` to pair each managed sandbox in
 turn, or `up --no-desktop` for unattended provisioning.
 `connect <name> --pair` prints a link for manual pairing.
+
+`up <count>` creates 1 to 100 new sandboxes with up to ten provisioning
+at once. The batch keeps successful sandboxes if others fail. Use `link <name>`
+to retry a pending desktop pairing. Desktop approvals are sequential and a
+single sync runs after the pairing attempts. Use `up <count> --no-desktop`
+for headless provisioning. An existing numeric sandbox name can be started
+with `start <name>`.
+
+At 8 GB per sandbox, ten new sandboxes require 80 GB of running memory in
+addition to the memory in use by existing sandboxes. Agent37 enforces the
+[workspace memory limit](https://www.agent37.com/docs/agents-api/errors#sandbox-api-codes).
+
 `down` deletes the newest managed sandbox. It tries to log out its Tailscale
 device first. If the guest is unavailable, the CLI can remove its exact tagged
 device with Tailscale Devices Core Write. Without that grant, the ephemeral
@@ -127,12 +139,17 @@ to configure a sandbox that already exists.
 
 ## Publish the template
 
-The image includes T3, OpenCode, Codex, Claude Code, Tailscale, .NET 10 and 11, Go 1.27.4,
-Rust 1.99.1 with rustfmt and Clippy, Python 3.12 with uv, and Node 24 with
-mise. The Node pins are 24.21.0 with npm 11.18.0 and 24.22.1. The image also
-includes Git, GitHub CLI, GCC, Make, Ruby, ShellCheck, actionlint, the TerraScale `ts`
-CLI, PostgreSQL 16 client, NSS tools, and Playwright with Chromium. Set
-`PLAYWRIGHT_BROWSERS_PATH=/opt/terrascale/playwright` to use the bundled browser.
+The image includes T3, OpenCode, Codex, Claude Code, Tailscale, .NET 11.0.100
+and .NET 10 (including 10.0.401 for SDK qualification), Go 1.27.4 on `PATH`
+and in mise, Rust 1.99.1 with rustfmt and Clippy, and Python 3.12 with uv.
+Use `mise exec node@24.21.0 -- npm` for npm 11.18.0 or
+`mise exec node@24.22.1 -- npm` for npm 12.0.2.
+
+The image also includes Git, GitHub CLI, GCC, Clang, Make, rsync, Ruby, jq,
+ShellCheck, actionlint, the TerraScale `ts` CLI, PostgreSQL 16 client, NSS
+tools, and Playwright with Chromium. Playwright uses the bundled browser
+from `/opt/terrascale/playwright` by default. TerraScale's local journey
+downloads its own checksum-pinned service binaries during preparation.
 For older sandboxes, the CLI can install missing `gh` and Claude Code binaries
 from checksum-pinned downloads.
 
