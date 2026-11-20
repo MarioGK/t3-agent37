@@ -90,10 +90,13 @@ RUN set -eu; \
 RUN HOME=/root PLAYWRIGHT_BROWSERS_PATH=/opt/terrascale/playwright playwright install --with-deps chromium \
  && rm -rf /var/lib/apt/lists/*
 
+ARG CLAUDE_VERSION=2.1.329
+RUN npm install --global --prefix /usr/local --no-audit --no-fund "@anthropic-ai/claude-code@${CLAUDE_VERSION}"
+
 USER node
 RUN set -eu; \
     export PATH=/usr/local/bin:/usr/bin:/bin; \
-    test "$(t3 --version)" = "t3 v$T3_VERSION"; codex --version; opencode --version; \
+    test "$(t3 --version)" = "t3 v$T3_VERSION"; codex --version; claude --version; opencode --version; \
     go version; gofmt -h >/dev/null 2>&1; \
     dotnet --list-sdks > /tmp/terrascale-sdks; \
     grep -E '^10\.' /tmp/terrascale-sdks; grep -E '^11\.' /tmp/terrascale-sdks; \

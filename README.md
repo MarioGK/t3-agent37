@@ -45,6 +45,10 @@ request for the new sandbox. Confirm its private address in T3 Code.
 The desktop displays the same sandbox name as `t3-agent37 ls`.
 Use `up --no-desktop` for headless runs.
 
+With the TerraScale template and CLIProxy selected, `up` configures Codex,
+Claude Code, and OpenCode with your CLIProxy key. All three use GLM 5.3 by
+default. T3 Code starts with OpenCode selected.
+
 New sandboxes inherit the workstation's GitHub.com CLI login and Git author
 defaults. Use `up --github=false` to skip it, or set
 `T3_AGENT37_GITHUB_TOKEN` to use a scoped GitHub token. Run

@@ -24,6 +24,12 @@ import (
 //go:embed guest/remote.py
 var guestRemote []byte
 
+//go:embed guest/codex_proxy.py
+var guestCodexProxy []byte
+
+//go:embed guest/claude_proxy.py
+var guestClaudeProxy []byte
+
 //go:embed guest/tailnet.py
 var guestTailnet []byte
 
@@ -58,6 +64,10 @@ func setup(ctx context.Context, client *agent37.Client, instance agent37.Instanc
 		return setupProof{}, errors.New("sandbox metadata names an unsupported T3 provider")
 	}
 	command := "python3 -c " + shellQuote(installGuest) + " remote.py " + base64.StdEncoding.EncodeToString(guestRemote)
+	if provider == "cliproxy" {
+		command += " codex_proxy.py " + base64.StdEncoding.EncodeToString(guestCodexProxy) +
+			" claude_proxy.py " + base64.StdEncoding.EncodeToString(guestClaudeProxy)
+	}
 	if instance.Metadata["tailnet"] == "tailscale" {
 		command += " tailnet.py " + base64.StdEncoding.EncodeToString(guestTailnet)
 	}

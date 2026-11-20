@@ -47,7 +47,7 @@ jobs:
         env:
           T3_AGENT37_NATIVE_SMOKE: '1'
         run: go test ./internal/agent37 -run '^TestNativeT3Smoke$' -v
-      - name: Test guest archive extraction
+      - name: Test guest setup
         if: matrix.os == 'linux' && matrix.arch == 'amd64'
         run: python3 -B -m unittest discover -s cmd/t3-agent37/guest
       - name: Build and smoke test the executable

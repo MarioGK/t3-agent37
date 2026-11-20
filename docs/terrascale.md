@@ -1,8 +1,8 @@
 # TerraScale Agent37 template
 
-Use t3-agent37 0.2.17 or later. Run `t3-agent37 setup` and choose
-`terrascale-agent37@4` if your workspace has access. This revision
-includes T3 Code `0.1.11-nightly.20261119.4954`.
+Use t3-agent37 0.2.25 or later. Run `t3-agent37 setup` and choose
+`terrascale-agent37` if your workspace has access. The current Dockerfile
+installs T3 Code `0.1.11-nightly.20261119.4954`.
 You can also [publish your own copy](#publish-the-template).
 Choose CLIProxy as the model provider, or use Automatic with the TerraScale
 template. For Tailscale, define `tag:agent37` in your tailnet policy and grant your
@@ -17,7 +17,7 @@ tailnet DNS settings. [Trust credentials](https://console.tailscale.com/admin/se
 
 ```sh
 t3-agent37 setup --verify
-t3-agent37 create terrascale-dev --template terrascale-agent37@4 --yes
+t3-agent37 create terrascale-dev --template terrascale-agent37 --yes
 ```
 
 You can supply these variables from your secret store on the workstation.
@@ -36,9 +36,12 @@ the official `agent37 ssh setup` config also takes precedence over `runtime.json
 Rerun `setup` to replace a saved OAuth credential. Leave both fields blank
 to keep the saved pair.
 
-T3 loads the CLIProxy text model catalog and defaults to `cliproxy/glm-5.3`.
-Set `T3_AGENT37_CLIPROXY_MODEL` before `create` to pick another model ID.
-Run `t3-agent37 prepare terrascale-dev` to refresh the catalog.
+`up` configures Codex, Claude Code, and OpenCode to use the sandbox's CLIProxy
+key. Each uses GLM 5.3 in T3 and at the terminal. T3 selects OpenCode
+`cliproxy/glm-5.3` for new threads. The key comes from the sandbox environment.
+Set `T3_AGENT37_CLIPROXY_MODEL` before `create` to pick another default model
+that CLIProxy supports across the three APIs. Run `t3-agent37 prepare terrascale-dev`
+to configure a running sandbox and refresh its OpenCode model catalog.
 
 `setup --verify` requests a Tailscale token for the configured tag set and
 checks MagicDNS and HTTPS if the local Tailscale CLI is available. On an OAuth
@@ -109,13 +112,14 @@ to configure a sandbox that already exists.
 
 ## Publish the template
 
-The image includes T3, OpenCode, Codex, Tailscale, .NET 10 and 11, Go 1.27.4,
+The image includes T3, OpenCode, Codex, Claude Code, Tailscale, .NET 10 and 11, Go 1.27.4,
 Rust 1.99.1 with rustfmt and Clippy, Python 3.12 with uv, and Node 24 with
 mise. The Node pins are 24.21.0 with npm 11.18.0 and 24.22.1. The image also
 includes Git, GitHub CLI, GCC, Make, Ruby, ShellCheck, actionlint, the TerraScale `ts`
 CLI, PostgreSQL 16 client, NSS tools, and Playwright with Chromium. Set
 `PLAYWRIGHT_BROWSERS_PATH=/opt/terrascale/playwright` to use the bundled browser.
-The CLI installs a checksum-pinned `gh` in older sandboxes if it is missing.
+For older sandboxes, the CLI can install missing `gh` and Claude Code binaries
+from checksum-pinned downloads.
 
 To publish your own copy, run this from the checkout with Agent37 CLI 0.4.1
 or later. Use the published revision in `--template`.

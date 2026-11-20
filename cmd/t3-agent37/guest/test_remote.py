@@ -1,10 +1,50 @@
 import io
+import json
+import os
 from pathlib import Path
 import tarfile
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from remote import machine_info_with_label, select_runtime, unpack_runtime
+from remote import provider_ready
+
+
+class ProvidersTest(unittest.TestCase):
+    def test_cliproxy_enables_all_harnesses_and_preserves_custom_settings(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            root = home / ".local/share/t3-agent37"
+            data = root / "data"
+            t3_path = data / "userdata/settings.json"
+            t3_path.parent.mkdir(parents=True)
+            t3_path.write_text(json.dumps({"linkedEnvironmentsEnabled": True, "providerInstances": {
+                "codex": {"config": {"customModels": [{"slug": "glm-5.3", "name": "GLM 5.3"}], "extra": True}},
+            }}))
+            profile = {"options": {"baseURL": "https://proxy.example/v1", "apiKey": "{env:T3_AGENT37_CLIPROXY_KEY}"},
+                       "models": {"glm-5.3": {}, "gpt-6.2-sol": {}}}
+            codex_config = {"binaryPath": "/usr/local/bin/codex", "customModels": ["glm-5.3", "gpt-6.2-sol"]}
+            with (patch("pathlib.Path.home", return_value=home),
+                  patch.dict(os.environ, {"XDG_CONFIG_HOME": str(home / ".config"), "CLAUDE_CONFIG_DIR": ""}),
+                  patch("remote.ROOT", root), patch("remote.DATA", data),
+                  patch("remote.cli_proxy_profile", return_value=("cliproxy/glm-5.3", profile)) as catalog,
+                  patch("remote.shutil.which", return_value="/usr/local/bin/opencode"),
+                  patch("codex_proxy.configure", return_value=codex_config),
+                  patch("claude_proxy.configure_claude", return_value=root / "bin/claude")):
+                self.assertTrue(provider_ready("cliproxy"))
+                catalog.assert_called_once()
+            settings = json.loads(t3_path.read_text())
+            self.assertTrue(settings["linkedEnvironmentsEnabled"])
+            self.assertEqual(settings["defaultModelSelection"], {"instanceId": "opencode", "model": "cliproxy/glm-5.3"})
+            instances = settings["providerInstances"]
+            self.assertTrue(all(instances[name]["enabled"] for name in ("opencode", "codex", "claudeAgent")))
+            self.assertEqual(instances["claudeAgent"]["config"]["customModels"], ["glm-5.3"])
+            self.assertEqual(instances["codex"]["config"]["customModels"],
+                             [{"slug": "glm-5.3", "name": "GLM 5.3"}, "gpt-6.2-sol"])
+            self.assertTrue(instances["codex"]["config"]["extra"])
+            opencode = json.loads((home / ".config/opencode/opencode.json").read_text())
+            self.assertEqual(opencode["provider"]["cliproxy"]["options"]["apiKey"], "{env:T3_AGENT37_CLIPROXY_KEY}")
 
 
 class MachineInfoTest(unittest.TestCase):

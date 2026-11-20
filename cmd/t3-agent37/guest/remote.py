@@ -134,9 +134,12 @@ def serve():
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
         return
-    local_bin = str(Path.home() / ".local/bin")
-    if local_bin not in os.get_exec_path():
-        os.environ["PATH"] = os.pathsep.join([local_bin, *os.get_exec_path()])
+    paths = [str(ROOT / "bin"), str(Path.home() / ".local/bin"), *os.get_exec_path()]
+    os.environ["PATH"] = os.pathsep.join(dict.fromkeys(paths))
+    if (ROOT / "bin/claude").is_file() and os.environ.get("T3_AGENT37_CLIPROXY_URL"):
+        from claude_proxy import claude_base_url
+
+        os.environ["ANTHROPIC_BASE_URL"] = claude_base_url(os.environ["T3_AGENT37_CLIPROXY_URL"])
     active_proxy = ROOT / "peer-proxy-active"
     if (ROOT / "peer-proxy").is_file():
         os.environ["NODE_USE_ENV_PROXY"] = "1"
@@ -210,10 +213,19 @@ def cli_proxy_profile():
     }
 
 
-def configure_managed_opencode(provider="opencode"):
+def configure_managed_providers(provider):
     profile = "cliproxy" if provider == "cliproxy" else "agent37"
     if profile == "cliproxy":
+        from claude_proxy import configure_claude, configure_claude_settings, configure_claude_t3
+        from codex_proxy import configure as configure_codex
+
         model, config = cli_proxy_profile()
+        base_url = config["options"]["baseURL"]
+        model_id = model.removeprefix("cliproxy/")
+        claude = configure_claude(ROOT, base_url, model_id)
+        codex = configure_codex(base_url, model_id, config["models"])
+        claude_home = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude").expanduser()
+        update_json(claude_home / "settings.json", lambda settings: configure_claude_settings(settings, base_url))
     else:
         if not os.environ.get("AGENT37_MANAGED_TOKEN") or not os.environ.get("AGENT37_LLM_PROXY_URL"):
             raise RuntimeError("The sandbox has no Agent37 managed model credentials")
@@ -251,9 +263,18 @@ def configure_managed_opencode(provider="opencode"):
         opencode = instances.setdefault("opencode", {"driver": "opencode"})
         opencode["enabled"] = True
         opencode.setdefault("config", {})["binaryPath"] = str(binary)
+        if profile == "cliproxy":
+            configure_claude_t3(settings, claude, model_id)
+            instance = instances.setdefault("codex", {})
+            instance.update(driver="codex", enabled=True)
+            codex_config = instance.setdefault("config", {})
+            custom_models = codex_config.get("customModels", [])
+            known = {entry if isinstance(entry, str) else entry.get("slug") for entry in custom_models}
+            new_models = [entry for entry in codex["customModels"] if entry not in known]
+            codex_config.update(codex, customModels=[*custom_models, *new_models])
         default = settings.get("defaultModelSelection") or {}
         previous = default.get("instanceId", default.get("provider"))
-        if (not previous or previous == "codex"
+        if (not previous or (previous == "codex" and profile == "agent37")
                 or (profile == "cliproxy" and default.get("model") == MANAGED_MODEL)):
             settings["defaultModelSelection"] = {"instanceId": "opencode", "model": model}
         return settings
@@ -265,7 +286,7 @@ def configure_managed_opencode(provider="opencode"):
 
 def provider_ready(provider):
     if provider in {"opencode", "cliproxy"}:
-        configure_managed_opencode(provider)
+        configure_managed_providers(provider)
         return True
     command = {"codex": ["codex", "login", "status"], "claude": ["claude", "auth", "status"]}
     if provider not in command or shutil.which(provider) is None:
