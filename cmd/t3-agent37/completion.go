@@ -33,7 +33,7 @@ var commands = []cliCommand{
 	{name: "del", action: "delete", summary: "Permanently delete a sandbox", sandbox: true},
 	{name: "list", summary: "List managed sandboxes"},
 	{name: "ls", action: "list", summary: "List managed sandboxes"},
-	{name: "sync", summary: "Remove stale T3 links"},
+	{name: "sync", summary: "Link T3 environments and remove stale links"},
 	{name: "link", summary: "Pair existing sandboxes with T3 Code", sandbox: true},
 	{name: "connect", summary: "Show a sandbox's T3 Code address", sandbox: true},
 	{name: "prepare", summary: "Refresh a sandbox's model catalog", sandbox: true},
@@ -88,6 +88,7 @@ func runCompletion(ctx context.Context, args []string, output, diagnostic io.Wri
 		root.AddCommand(command)
 		// A name selects the start form of up, which has no provisioning flags.
 		if spec.name == "up" && len(args) > 3 && args[1] == "up" && namePattern.MatchString(args[2]) {
+			addCommandFlags(command.Flags(), &options{action: "start"})
 			continue
 		}
 		opts := options{action: cmp.Or(spec.action, spec.name)}
@@ -140,7 +141,8 @@ const completionAPIDeadline = 1200 * time.Millisecond
 
 func completeSandboxNames(command *cobra.Command, args []string, prefix string) ([]string, cobra.ShellCompDirective) {
 	directive := cobra.ShellCompDirectiveNoFileComp
-	if len(args) > 0 || (command.Name() == "up" && command.Flags().NFlag() != 0) {
+	if len(args) > 0 || (command.Name() == "up" && command.Flags().NFlag() > 0 &&
+		!(command.Flags().NFlag() == 1 && command.Flags().Changed("github"))) {
 		return nil, directive
 	}
 	ctx, cancel := context.WithTimeout(command.Context(), completionAPIDeadline)

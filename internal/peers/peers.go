@@ -18,10 +18,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
-	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -426,29 +424,35 @@ type link struct {
 	URLs          []string `json:"urls"`
 }
 
-func ensureLink(ctx context.Context, source peerAPI, sourceToken string, target peerAPI, targetToken, targetURL string) error {
+func listPeerLinks(ctx context.Context, source peerAPI, token string) ([]link, error) {
 	var listed struct {
 		Links []link `json:"links"`
 	}
-	if err := source.rpc(ctx, sourceToken, "peerLinks.list", struct{}{}, &listed); err != nil {
-		return err
+	if err := source.rpc(ctx, token, "peerLinks.list", struct{}{}, &listed); err != nil {
+		return nil, err
 	}
+	return listed.Links, nil
+}
+
+func ensureListedLink(ctx context.Context, source peerAPI, sourceToken string, target peerAPI, targetToken string, previous link) error {
 	access := accessRequired
-	index := slices.IndexFunc(listed.Links, func(previous link) bool {
-		return previous.EnvironmentID == target.environmentID
-	})
-	if index >= 0 {
-		previous := listed.Links[index]
+	if previous.EnvironmentID != "" {
 		if previous.Status == "reachable" {
 			return nil
 		}
-		if previous.Status != "expired" || !slices.Contains(previous.URLs, targetURL) {
-			return fmt.Errorf("review the existing T3 link from %s to %s", source.name, target.name)
+		if len(previous.URLs) != 1 || !strings.EqualFold(strings.TrimSuffix(previous.URLs[0], "/"), target.origin) {
+			return errors.New("review the existing address in T3")
+		}
+		if previous.Status == "unreachable" {
+			return errors.New("the existing T3 link is temporarily unreachable")
+		}
+		if previous.Status != "expired" {
+			return errors.New("review the existing link in T3")
 		}
 		access = previous.Access
 	}
 	if access != accessRequired && access != "read-only" {
-		return fmt.Errorf("renew the existing link from %s to %s in T3", source.name, target.name)
+		return errors.New("renew the existing access grant in T3")
 	}
 	var grant struct {
 		Purpose    string `json:"purpose"`
@@ -465,73 +469,23 @@ func ensureLink(ctx context.Context, source peerAPI, sourceToken string, target 
 	}
 	var linked link
 	if err := source.rpc(ctx, sourceToken, "peerLinks.link", map[string]string{
-		"url": targetURL, "pairingCode": grant.Credential, "access": access,
+		"url": target.origin, "pairingCode": grant.Credential, "access": access,
 		"expectedEnvironmentId": target.environmentID,
 	}, &linked); err != nil {
 		return err
 	}
 	if linked.EnvironmentID != target.environmentID || linked.Access != access {
-		return fmt.Errorf("T3 did not verify the link from %s to %s", source.name, target.name)
+		return errors.New("T3 did not verify the link identity and access")
 	}
 	return nil
 }
 
-// Sync creates both directed links for each reachable peer over private HTTPS.
-func Sync(ctx context.Context, configured []Peer, name, sandboxID, privateURL, sandboxToken string) ([]string, error) {
-	privateURL, err := privateOrigin(privateURL)
-	if err != nil {
-		return nil, err
-	}
-	client := newHTTPClient(35 * time.Second)
-	defer client.CloseIdleConnections()
-
-	sandbox := newPeerAPI(client, name, privateURL, sandboxID)
-	if err := sandbox.verify(ctx, 3, true); err != nil {
-		return nil, err
-	}
-
-	failuresByPeer := make([]error, len(configured))
-	var group sync.WaitGroup
-	for i, peer := range configured {
-		group.Go(func() {
-			peerCtx, cancel := context.WithTimeout(ctx, time.Minute)
-			defer cancel()
-			target := newPeerAPI(client, peer.Host, peer.URL, peer.EnvironmentID)
-			failuresByPeer[i] = syncPeer(peerCtx, sandbox, sandboxToken, target, peer, privateURL)
-		})
-	}
-	group.Wait()
-	var linked []string
-	var failures []string
-	for i, peer := range configured {
-		if err := failuresByPeer[i]; err != nil {
-			failures = append(failures, fmt.Sprintf("%s: %s", peer.Host, err))
-		} else {
-			linked = append(linked, peer.Host)
-		}
-	}
-	if len(failures) != 0 {
-		return linked, errors.New(strings.Join(failures, "; "))
-	}
-	return linked, nil
-}
-
-func syncPeer(ctx context.Context, cloud peerAPI, cloudToken string, target peerAPI, peer Peer, privateURL string) error {
-	if err := target.verify(ctx, 1, true); err != nil {
-		return err
-	}
-	token, err := issueOverSSH(ctx, peer)
-	if err != nil {
-		return err
-	}
-	if err := ensureLink(ctx, cloud, cloudToken, target, token, peer.URL); err != nil {
-		return err
-	}
-	return ensureLink(ctx, target, token, cloud, cloudToken, privateURL)
-}
-
 func newHTTPClient(timeout time.Duration) *http.Client {
-	transport := http.DefaultTransport.(*http.Transport).Clone()
+	base, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		base = &http.Transport{ForceAttemptHTTP2: true}
+	}
+	transport := base.Clone()
 	transport.Proxy = nil
 	dialer := &net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}
 	transport.DialContext = dialer.DialContext

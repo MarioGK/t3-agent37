@@ -134,6 +134,9 @@ def serve():
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
         return
+    local_bin = str(Path.home() / ".local/bin")
+    if local_bin not in os.get_exec_path():
+        os.environ["PATH"] = os.pathsep.join([local_bin, *os.get_exec_path()])
     active_proxy = ROOT / "peer-proxy-active"
     if (ROOT / "peer-proxy").is_file():
         os.environ["NODE_USE_ENV_PROXY"] = "1"

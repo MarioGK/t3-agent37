@@ -23,11 +23,12 @@ const (
 )
 
 var (
-	idPattern         = regexp.MustCompile("^[a-z0-9]{10}$")
-	errorCodePattern  = regexp.MustCompile("^[a-z_]{1,80}$")
-	enrollmentPattern = regexp.MustCompile("^tailscale-enrollment-[a-f0-9]{32}$")
-	errRequest        = errors.New("Agent37 request failed or returned an invalid response")
-	errT3Ready        = errors.New("protected T3 endpoint did not become ready. Check instance status and retry")
+	idPattern          = regexp.MustCompile("^[a-z0-9]{10}$")
+	errorCodePattern   = regexp.MustCompile("^[a-z_]{1,80}$")
+	enrollmentPattern  = regexp.MustCompile("^tailscale-enrollment-[a-f0-9]{32}$")
+	githubStagePattern = regexp.MustCompile("^github-handoff-[a-f0-9]{32}$")
+	errRequest         = errors.New("Agent37 request failed or returned an invalid response")
+	errT3Ready         = errors.New("protected T3 endpoint did not become ready. Check instance status and retry")
 )
 
 type Error struct {
@@ -292,15 +293,28 @@ func (c *Client) ExecJSON[T any](ctx context.Context, id, command string) (T, er
 }
 
 func (c *Client) UploadEnrollmentKey(ctx context.Context, id, filename, key string) error {
-	if err := ValidateID(id); err != nil {
-		return err
-	}
 	if !enrollmentPattern.MatchString(filename) {
 		return errors.New("invalid enrollment file name")
 	}
-	query := url.Values{"path": {"~/.local/share/t3-agent37/" + filename}, "overwrite": {"false"}}
+	return c.uploadPrivateFile(ctx, id, filename, []byte(key))
+}
+
+// UploadGitHubHandoff writes credentials only inside a prepared private staging
+// directory on the target sandbox.
+func (c *Client) UploadGitHubHandoff(ctx context.Context, id, stage string, payload []byte) error {
+	if !githubStagePattern.MatchString(stage) {
+		return errors.New("invalid GitHub handoff directory")
+	}
+	return c.uploadPrivateFile(ctx, id, stage+"/access.json", payload)
+}
+
+func (c *Client) uploadPrivateFile(ctx context.Context, id, relativePath string, contents []byte) error {
+	if err := ValidateID(id); err != nil {
+		return err
+	}
+	query := url.Values{"path": {"~/.local/share/t3-agent37/" + relativePath}, "overwrite": {"false"}}
 	endpoint := "https://" + id + ".agent37.app/v1/files/content?" + query.Encode()
-	return c.request(ctx, http.MethodPut, endpoint, []byte(key), nil, true)
+	return c.request(ctx, http.MethodPut, endpoint, contents, nil, true)
 }
 
 func (c *Client) RequireManagedBudget(ctx context.Context, id string, initialize bool) error {

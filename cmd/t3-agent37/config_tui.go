@@ -20,10 +20,16 @@ func editConfig(ctx context.Context, output io.Writer) error {
 		return err
 	}
 	values := &file.values
+	shareGitHub := values.GitHubAccess == nil || *values.GitHubAccess
 	var save bool
 	fields := sandboxDefaultFields(values, "Tailscale ready. @revision pins it.")
 	fields = append(fields,
 		providerChoice(values).Inline(true),
+		huh.NewConfirm().
+			Title("Pass GitHub access to new sandboxes?").
+			Inline(true).
+			WithButtonAlignment(lipgloss.Left).
+			Value(&shareGitHub),
 		huh.NewConfirm().
 			Title("Save these defaults?").
 			WithButtonAlignment(lipgloss.Left).
@@ -42,6 +48,7 @@ func editConfig(ctx context.Context, output io.Writer) error {
 	}
 	values.Template = strings.TrimSpace(values.Template)
 	values.Tailscale = nil
+	values.GitHubAccess = &shareGitHub
 	if err := file.save(ctx); err != nil {
 		return err
 	}

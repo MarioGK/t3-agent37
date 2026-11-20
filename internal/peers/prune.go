@@ -9,7 +9,6 @@ import (
 	"regexp"
 	"slices"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -69,14 +68,10 @@ func PruneSandboxLinks(ctx context.Context, configured []Peer, dryRun bool,
 ) ([]SandboxLink, error) {
 	results := make([][]SandboxLink, len(configured))
 	failures := make([]error, len(configured))
-	var group sync.WaitGroup
-	for i, peer := range configured {
-		group.Go(func() {
-			results[i], failures[i] = prunePeer(ctx, peer, dryRun, visit)
-		})
-	}
-	group.Wait()
-	return slices.Concat(results...), errors.Join(failures...)
+	forMeshNode(ctx, len(configured), func(i int) {
+		results[i], failures[i] = prunePeer(ctx, configured[i], dryRun, visit)
+	})
+	return slices.Concat(results...), errors.Join(errors.Join(failures...), ctx.Err())
 }
 
 func prunePeer(ctx context.Context, peer Peer, dryRun bool,
@@ -87,6 +82,17 @@ func prunePeer(ctx context.Context, peer Peer, dryRun bool,
 	if err != nil || json.Unmarshal(output, &entries) != nil || entries == nil {
 		return nil, fmt.Errorf("could not list T3 environments on %s over SSH", peer.Host)
 	}
+	return pruneEntries(ctx, peer, entries, dryRun, visit, func(sandbox SandboxLink) error {
+		if _, err := runOwnerCLI(ctx, peer, "environment", "unlink", sandbox.EnvironmentID); err != nil {
+			return fmt.Errorf("could not unlink %s from T3 on %s", sandbox.Name, peer.Host)
+		}
+		return nil
+	})
+}
+
+func pruneEntries(ctx context.Context, peer Peer, entries []link, dryRun bool,
+	visit func(context.Context, SandboxLink, func() error) (bool, error), unlink func(SandboxLink) error,
+) ([]SandboxLink, error) {
 	var selected []SandboxLink
 	var failures []error
 	for _, entry := range entries {
@@ -98,10 +104,7 @@ func prunePeer(ctx context.Context, peer Peer, dryRun bool,
 			if dryRun {
 				return nil
 			}
-			if _, err := runOwnerCLI(ctx, peer, "environment", "unlink", sandbox.EnvironmentID); err != nil {
-				return fmt.Errorf("could not unlink %s from T3 on %s", sandbox.Name, peer.Host)
-			}
-			return nil
+			return unlink(sandbox)
 		}
 		pruned, err := visit(ctx, sandbox, remove)
 		if pruned {

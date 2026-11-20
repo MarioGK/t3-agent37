@@ -38,12 +38,17 @@ enrollment tags and verifies access. Add `--dry-run` to preview.
 `up` creates a sandbox with the lowest available number and serves T3 at its private
 Tailscale HTTPS DNS name. It verifies Tailscale credentials before provisioning
 and mints an ephemeral key when the sandbox needs to join. It automatically
-registers with [configured T3 servers](docs/terrascale.md#link-t3-servers)
-without prompts. Run `up <name>` to retry pending links.
+links the managed sandboxes and [configured T3 servers](docs/terrascale.md#link-t3-servers)
+to each other over Tailscale. Run `sync` to retry pending links.
 On a workstation running T3 Code, bare `up` also opens the desktop pairing
 request for the new sandbox. Confirm its private address in T3 Code.
 The desktop displays the same sandbox name as `t3-agent37 ls`.
 Use `up --no-desktop` for headless runs.
+
+New sandboxes inherit the workstation's GitHub.com CLI login and Git author
+defaults. Use `up --github=false` to skip it, or set
+`T3_AGENT37_GITHUB_TOKEN` to use a scoped GitHub token. Run
+`up <name> --github` to set up access on an existing sandbox.
 
 On another PC, join the same tailnet, run `t3-agent37 setup`, then run
 `t3-agent37 link`. It wakes existing sandboxes as needed and opens each
@@ -57,12 +62,13 @@ pairing request in T3 Code. Use `link <name>` for one sandbox or
 `delete` (or `del`) opens a terminal picker. Press `/` to filter the list, then
 select a sandbox and confirm deletion. For scripts, use `delete <name>`. Add
 `--dry-run` to preview.
-`down` and `delete` unlink the sandbox from configured T3 servers.
-`sync` clears stale links to stopped or deleted sandboxes. Use `sync --dry-run`
-to see which links would be removed. Remove saved desktop entries under
+`down` and `delete` unlink the sandbox from the other environments.
+`sync` repairs the mesh and clears stale links. It wakes auto-sleeping
+sandboxes as needed. Use `sync --dry-run` to preview stale links without waking
+sandboxes. Remove saved desktop entries under
 **Settings → Connections**.
 
-Run `t3-agent37 config` to edit the name prefix, default template, and provider.
+Run `t3-agent37 config` to edit the name prefix, template, provider, and GitHub default.
 The editor works offline. Provisioning flags override
 the saved defaults. Settings are stored in `~/.config/t3-agent37/config.json` (Windows uses
 `%APPDATA%\t3-agent37\config.json`). The prefix accepts 1 to 33 lowercase

@@ -13,25 +13,29 @@ import (
 	"github.com/MarioGK/t3-agent37/internal/peers"
 )
 
-func unlinkSandbox(ctx context.Context, name, id string, diagnostic io.Writer) error {
+func unlinkSandbox(ctx context.Context, client *agent37.Client, name, id string, diagnostic io.Writer) error {
 	configured, err := peers.Configured()
 	if err != nil {
 		return err
 	}
-	removed, err := peers.PruneSandboxLinks(ctx, configured, false, func(_ context.Context, link peers.SandboxLink, remove func() error) (bool, error) {
+	visit := func(_ context.Context, link peers.SandboxLink, remove func() error) (bool, error) {
 		if link.Name != name || link.SandboxID != id {
 			return false, nil
 		}
 		err := remove()
 		return err == nil, err
-	})
-	for _, link := range removed {
+	}
+	fleetRemoved, fleetErr := peers.PruneSandboxLinks(ctx, configured, false, visit)
+	instances, inventoryErr := client.List(ctx)
+	nodes, discoverErr := cloudMeshNodes(ctx, client, instances, id, false)
+	cloudRemoved, cloudErr := peers.PruneMeshSandboxLinks(ctx, nodes, false, visit)
+	for _, link := range append(fleetRemoved, cloudRemoved...) {
 		fmt.Fprintf(diagnostic, "Removed %s from T3 on %s.\n", name, link.Peer)
 	}
-	return err
+	return errors.Join(fleetErr, inventoryErr, discoverErr, cloudErr)
 }
 
-func syncSandboxLinks(ctx context.Context, client *agent37.Client, dryRun bool, output io.Writer) error {
+func syncSandboxLinks(ctx context.Context, client *agent37.Client, dryRun bool, output, diagnostic io.Writer) error {
 	configured, err := peers.Configured()
 	if err != nil {
 		return err
@@ -45,7 +49,11 @@ func syncSandboxLinks(ctx context.Context, client *agent37.Client, dryRun bool, 
 			return err
 		}
 	}
-	removed, err := peers.PruneSandboxLinks(ctx, configured, dryRun, func(ctx context.Context, link peers.SandboxLink, remove func() error) (pruned bool, err error) {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	instances, inventoryErr := client.List(ctx)
+	nodes, discoveryErr := cloudMeshNodes(ctx, client, instances, "", !dryRun)
+	visit := func(ctx context.Context, link peers.SandboxLink, remove func() error) (pruned bool, err error) {
 		if !dryRun {
 			lock := sandboxLock(state, link.Name)
 			locked, err := lock.TryLockContext(ctx, 100*time.Millisecond)
@@ -65,11 +73,20 @@ func syncSandboxLinks(ctx context.Context, client *agent37.Client, dryRun bool, 
 		}
 		err = remove()
 		return err == nil, err
-	})
+	}
+	fleetRemoved, fleetErr := peers.PruneSandboxLinks(ctx, configured, dryRun, visit)
+	cloudRemoved, cloudErr := peers.PruneMeshSandboxLinks(ctx, nodes, dryRun, visit)
+	var meshErr error
+	if !dryRun {
+		count, err := peers.ReconcileMesh(ctx, configured, nodes)
+		reportMesh(count, diagnostic)
+		meshErr = err
+	}
+	removed := append(fleetRemoved, cloudRemoved...)
 	if removed == nil {
 		removed = []peers.SandboxLink{}
 	}
-	return errors.Join(jsonOutput(output, removed, true), err)
+	return errors.Join(jsonOutput(output, removed, true), inventoryErr, discoveryErr, fleetErr, cloudErr, meshErr)
 }
 
 func staleSandboxLink(ctx context.Context, client *agent37.Client, link peers.SandboxLink) (bool, error) {

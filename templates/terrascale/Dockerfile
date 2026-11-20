@@ -44,6 +44,7 @@ ARG T3_VERSION=0.1.11-nightly.20261119.4954
 ARG OPENCODE_VERSION=1.19.5
 ARG MISE_VERSION=2026.11.9
 ARG ACTIONLINT_VERSION=1.7.12
+ARG GH_VERSION=2.105.0
 ARG TS_VERSION=0.0.82
 ARG TAILSCALE_VERSION=1.104.2
 RUN set -eu; \
@@ -59,6 +60,9 @@ RUN set -eu; \
       23ba592fcbc61f057e2b82c1eafd085832712ba0c759b714ca16cd06babca378; \
     fetch "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" actionlint.tar.gz \
       8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8; \
+    gh_archive="gh_${GH_VERSION}_linux_amd64"; \
+    fetch "https://github.com/cli/cli/releases/download/v${GH_VERSION}/$gh_archive.tar.gz" gh.tar.gz \
+      79e7ab5db738c48777b696e374f8b428f0647debfb424f44d2f426370407fe2f; \
     fetch "https://github.com/TerraScale/terrascale/releases/download/sdk/go/v${TS_VERSION}/ts_linux_amd64.tar.gz" ts.tar.gz \
       72dcfbdc6fa1a3ce50598c3097efc88096b12e9d14a770592fd5ec88355f1e56; \
     fetch "https://pkgs.tailscale.com/stable/tailscale_${TAILSCALE_VERSION}_amd64.tgz" tailscale.tgz \
@@ -70,6 +74,7 @@ RUN set -eu; \
     ln -s "$runtime/t3" /usr/local/bin/t3; \
     tar -xzf "$downloads/mise.tar.gz" -C /usr/local/bin --strip-components=2 mise/bin/mise; \
     tar -xzf "$downloads/actionlint.tar.gz" -C /usr/local/bin actionlint; \
+    tar -xzf "$downloads/gh.tar.gz" --strip-components=2 -C /usr/local/bin "$gh_archive/bin/gh"; \
     tar -xzf "$downloads/ts.tar.gz" -C /usr/local/bin ts; \
     tailscale_archive="tailscale_${TAILSCALE_VERSION}_amd64"; \
     tar -xzf "$downloads/tailscale.tgz" --strip-components=1 -C /usr/local/bin \
@@ -100,7 +105,7 @@ RUN set -eu; \
     python3.12 --version; managed_python=$(uv python find 3.12); "$managed_python" --version; \
     rustup show active-toolchain; rustc --version; cargo --version; \
     rustfmt --version; cargo clippy --version; \
-    ruby --version; shellcheck --version; actionlint --version; \
+    ruby --version; shellcheck --version; actionlint --version; gh --version; \
     ts --version; psql --version; command -v certutil unshare nsenter strace; \
     tailscale version; tailscaled --version; \
     playwright --version

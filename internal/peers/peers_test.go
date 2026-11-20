@@ -162,7 +162,15 @@ func TestT3PeersLinkWithNativeScopedGrantAndReuseReachableLink(t *testing.T) {
 		t.Fatal(err)
 	}
 	for range 2 {
-		if err := ensureLink(ctx, sourceAPI, "fixture-owner-token", targetAPI, "fixture-peer-token", target.URL); err != nil {
+		current, err := listPeerLinks(ctx, sourceAPI, "fixture-owner-token")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var previous link
+		if len(current) > 0 {
+			previous = current[0]
+		}
+		if err := ensureListedLink(ctx, sourceAPI, "fixture-owner-token", targetAPI, "fixture-peer-token", previous); err != nil {
 			t.Fatal(err)
 		}
 	}

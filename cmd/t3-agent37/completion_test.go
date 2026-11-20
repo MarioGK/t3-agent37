@@ -25,7 +25,7 @@ func TestCompleteCommandsAndFlags(t *testing.T) {
 		{args: []string{"setup", "--repair-tailscale", "--"}, present: "--dry-run", absent: "--verify"},
 		{args: []string{"setup", "--check", "--"}, present: "--no-browser", absent: "--dry-run"},
 		{args: []string{"up", "--"}, present: "--no-desktop", absent: "--yes"},
-		{args: []string{"up", "ts-1", "--"}, present: "--help", absent: "--provider"},
+		{args: []string{"up", "ts-1", "--"}, present: "--github", absent: "--provider"},
 		{args: []string{"up", "--provider", ""}, present: "cliproxy"},
 		{args: []string{"connect", "ts-1", "--"}, present: "--pair"},
 		{args: []string{"del", "--"}, present: "--dry-run"},

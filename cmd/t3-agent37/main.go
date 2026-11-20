@@ -46,6 +46,7 @@ type options struct {
 	pickDelete                       bool
 	noDesktop                        bool
 	noTailscale                      bool
+	githubAccess                     bool
 }
 
 func parse(args []string, output io.Writer) (options, error) {
@@ -79,7 +80,7 @@ func parse(args []string, output io.Writer) (options, error) {
 			return
 		}
 		if opts.action == "sync" {
-			fmt.Fprintln(output, "Usage: t3-agent37 sync [--dry-run]\nRemove stopped and deleted sandboxes from configured T3 servers.")
+			fmt.Fprintln(output, "Usage: t3-agent37 sync [--dry-run]\nLink T3 environments to each other and remove stale links.")
 			flags.PrintDefaults()
 			return
 		}
@@ -135,9 +136,10 @@ func parse(args []string, output io.Writer) (options, error) {
 			opts.action = "create"
 			opts.yes = !opts.dryRun
 		} else {
-			if flags.NFlag() != 0 {
-				return opts, errors.New("up accepts provisioning flags only when you omit the sandbox name")
+			if flags.NFlag() != 0 && !(flags.NFlag() == 1 && flags.Changed("github")) {
+				return opts, errors.New("up accepts only --github when you pass a sandbox name")
 			}
+			opts.githubAccess = flags.Changed("github") && opts.githubAccess
 			opts.action = "start"
 		}
 	}
@@ -176,6 +178,9 @@ func parse(args []string, output io.Writer) (options, error) {
 			return opts, err
 		}
 		opts.namePrefix = config.NamePrefix
+		if !flags.Changed("github") {
+			opts.githubAccess = config.GitHubAccess == nil || *config.GitHubAccess
+		}
 		if !flags.Changed("template") {
 			opts.template = config.Template
 		}
@@ -209,6 +214,9 @@ func addCommandFlags(flags *flag.FlagSet, opts *options) {
 	}
 	if opts.action == "create" {
 		flags.BoolVar(&opts.yes, "yes", false, "Authorize paid provisioning")
+	}
+	if opts.action == "create" || opts.action == "up" || opts.action == "start" {
+		flags.BoolVar(&opts.githubAccess, "github", opts.action != "start", "Pass GitHub CLI access and Git identity from this workstation")
 	}
 	if opts.action == "create" || opts.action == "up" {
 		flags.StringVar(&opts.provider, "provider", "", "Provider: opencode, cliproxy, codex or claude")
@@ -474,13 +482,14 @@ func operate(ctx context.Context, client *agent37.Client, enrollment *peers.Enro
 		if err != nil {
 			return err
 		}
-		instance, tailnetURL, err := startSandbox(ctx, client, instance, opts.name, configured, diagnostic)
+		instance, proof, err := startSandbox(ctx, client, instance, opts.name, true, opts.githubAccess, diagnostic)
 		if err != nil {
 			return err
 		}
 		row := summary(instance)
-		if tailnetURL != "" {
-			row["t3_url"] = tailnetURL
+		if proof.TailnetURL != "" {
+			linkStartedSandbox(ctx, client, instance, opts.name, configured, proof, diagnostic)
+			row["t3_url"] = proof.TailnetURL
 		}
 		return jsonOutput(output, row, false)
 	case "stop":
@@ -501,7 +510,7 @@ func operate(ctx context.Context, client *agent37.Client, enrollment *peers.Enro
 					fmt.Fprintf(diagnostic, "Saved desktop connections for %s can be removed in T3 Code → Settings → Connections.\n", opts.name)
 				}
 			}
-			if err := unlinkSandbox(ctx, opts.name, instance.ID, diagnostic); err != nil {
+			if err := unlinkSandbox(ctx, client, opts.name, instance.ID, diagnostic); err != nil {
 				err = fmt.Errorf("T3 cleanup pending for %s. Run t3-agent37 sync: %w", opts.name, err)
 				return errors.Join(jsonOutput(output, summary(instance), false), err)
 			}
@@ -521,10 +530,11 @@ func operate(ctx context.Context, client *agent37.Client, enrollment *peers.Enro
 	}
 	var proof setupProof
 	if opts.action == "create" {
-		proof, err = prepareCreated(ctx, client, enrollment, instance, opts.name, configured, diagnostic)
+		proof, err = prepareCreated(ctx, client, enrollment, instance, opts.name, opts.githubAccess, diagnostic)
 		if err != nil {
 			return err
 		}
+		linkStartedSandbox(ctx, client, instance, opts.name, configured, proof, diagnostic)
 		fmt.Fprintf(output, "Cloud T3 ready (%s, %s).\n", instance.ID, proof.EnvironmentID)
 		if !proof.ProviderReady {
 			fmt.Fprintf(output, "%s needs sign-in. Run t3-agent37 terminal %s.\n", provider, opts.name)
@@ -542,7 +552,7 @@ func operate(ctx context.Context, client *agent37.Client, enrollment *peers.Enro
 		if instance.Status == "stopped" {
 			return errors.New("the sandbox is stopped. Run t3-agent37 up first")
 		}
-		proof, err = bootstrap(ctx, client, nil, instance, opts.name, nil, false, diagnostic)
+		proof, err = bootstrap(ctx, client, nil, instance, opts.name, false, false, false, diagnostic)
 		if err != nil {
 			return err
 		}
@@ -616,7 +626,7 @@ func run(ctx context.Context, args []string, output, diagnostic io.Writer) error
 	}
 	client := agent37.New(key)
 	if opts.action == "sync" {
-		return syncSandboxLinks(ctx, client, opts.dryRun, output)
+		return syncSandboxLinks(ctx, client, opts.dryRun, output, diagnostic)
 	}
 	if opts.action == "link" {
 		return linkSandboxes(ctx, client, opts, output, diagnostic)

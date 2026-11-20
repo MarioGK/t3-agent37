@@ -154,12 +154,20 @@ func TestUpWithoutNameCreatesAndNamedUpStarts(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	var output bytes.Buffer
 	opts, err := parse([]string{"up", "--template", "terrascale-agent37@3"}, &output)
-	if err != nil || opts.action != "create" || !opts.generatedName || !opts.yes || opts.dryRun {
+	if err != nil || opts.action != "create" || !opts.generatedName || !opts.yes || opts.dryRun || !opts.githubAccess {
 		t.Fatalf("bare up = %+v, %v", opts, err)
 	}
 	opts, err = parse([]string{"up", "dev"}, &output)
-	if err != nil || opts.action != "start" || opts.name != "dev" || opts.generatedName {
+	if err != nil || opts.action != "start" || opts.name != "dev" || opts.generatedName || opts.githubAccess {
 		t.Fatalf("named up = %+v, %v", opts, err)
+	}
+	opts, err = parse([]string{"up", "dev", "--github"}, &output)
+	if err != nil || !opts.githubAccess {
+		t.Fatalf("named up with GitHub = %+v, %v", opts, err)
+	}
+	opts, err = parse([]string{"up", "--github=false", "--template", "terrascale-agent37@3"}, &output)
+	if err != nil || opts.githubAccess {
+		t.Fatalf("new up without GitHub = %+v, %v", opts, err)
 	}
 	if _, err := parse([]string{"up", "dev", "--dry-run"}, &output); err == nil {
 		t.Fatal("named up accepted a provisioning flag")

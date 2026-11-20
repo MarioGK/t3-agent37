@@ -164,9 +164,9 @@ func pairExistingSandbox(ctx context.Context, client *agent37.Client, target age
 	default:
 		return errors.New("wait for the sandbox to become ready before retrying link")
 	}
-	_, origin, err := startSandbox(ctx, client, instance, name, nil, diagnostic)
+	_, proof, err := startSandbox(ctx, client, instance, name, false, false, diagnostic)
 	if err != nil {
 		return err
 	}
-	return handOffPairing(ctx, client, instance, origin, launcher)
+	return handOffPairing(ctx, client, instance, proof.TailnetURL, launcher)
 }

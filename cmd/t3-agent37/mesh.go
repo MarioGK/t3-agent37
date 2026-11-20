@@ -1,0 +1,173 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net/url"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/MarioGK/t3-agent37/internal/agent37"
+	"github.com/MarioGK/t3-agent37/internal/peers"
+)
+
+// These read-only commands also work with the guest programs installed by older CLIs.
+const inspectGuestPeer = `import json, sys
+from pathlib import Path
+sys.path.insert(0, str(Path.home() / ".local/share/t3-agent37"))
+import remote, tailnet
+peer = tailnet.identity(tailnet.status())
+server = remote.descriptor()
+if peer is None or server is None:
+    print("{}")
+else:
+    print(json.dumps({"environmentId": server["environmentId"],
+                      "url": "https://" + peer["dnsName"],
+                      "peerProxy": (remote.ROOT / "peer-proxy-active").is_file()}))`
+
+const listGuestPeers = `import os, subprocess, sys
+from pathlib import Path
+sys.path.insert(0, str(Path.home() / ".local/share/t3-agent37"))
+import remote
+env = dict(os.environ, NODE_USE_ENV_PROXY="1", HTTPS_PROXY="http://127.0.0.1:1055",
+           NO_PROXY="127.0.0.1,localhost,::1")
+raise SystemExit(subprocess.run([str(remote.T3), "environment", "list", "--json",
+                                 "--base-dir", str(remote.DATA)], stderr=subprocess.DEVNULL,
+                                 env=env).returncode)`
+
+type sandboxPeer struct {
+	EnvironmentID string `json:"environmentId"`
+	URL           string `json:"url"`
+	PeerProxy     bool   `json:"peerProxy"`
+}
+
+func meshNode(client *agent37.Client, id, name string, proof sandboxPeer) (peers.MeshNode, error) {
+	origin, err := url.Parse(proof.URL)
+	if err != nil || origin.Scheme != "https" || origin.Port() != "" || origin.User != nil ||
+		(origin.Path != "" && origin.Path != "/") || origin.RawQuery != "" || origin.Fragment != "" {
+		return peers.MeshNode{}, errors.New("sandbox did not report a valid Tailscale HTTPS address")
+	}
+	host, suffix, _ := strings.Cut(origin.Hostname(), ".")
+	if host != "a37-"+name+"-"+id || !strings.HasSuffix(suffix, ".ts.net") || proof.EnvironmentID == "" {
+		return peers.MeshNode{}, errors.New("sandbox did not report its assigned Tailscale and T3 identities")
+	}
+	if !proof.PeerProxy {
+		return peers.MeshNode{}, errors.New("sandbox needs a fresh boot for T3 peer routing")
+	}
+	return peers.MeshNode{
+		Name: name, URL: proof.URL, EnvironmentID: proof.EnvironmentID,
+		IssueToken: func(ctx context.Context) (string, error) {
+			admin, err := client.ExecJSON[struct{ Token string }](ctx, id, remote+" peer-admin")
+			if err != nil {
+				return "", err
+			}
+			if admin.Token == "" {
+				return "", errors.New("sandbox did not issue a T3 owner session")
+			}
+			return admin.Token, nil
+		},
+		ListLinksJSON: func(ctx context.Context) ([]byte, error) {
+			value, err := client.Exec(ctx, id, "python3 -B -c "+shellQuote(listGuestPeers))
+			return []byte(value), err
+		},
+	}, nil
+}
+
+func discoverSandboxPeer(ctx context.Context, client *agent37.Client, instance agent37.Instance, allowWake bool) (sandboxPeer, error) {
+	probe, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	woke := instance.Status == "sleeping" && allowWake
+	if woke {
+		if _, err := wake(probe, client, instance); err != nil {
+			return sandboxPeer{}, err
+		}
+	}
+	command := "python3 -B -c " + shellQuote(inspectGuestPeer)
+	for {
+		running, err := client.ExecJSON[sandboxPeer](probe, instance.ID, command)
+		if running.EnvironmentID != "" && err == nil {
+			return running, nil
+		}
+		if !woke {
+			if err != nil {
+				return sandboxPeer{}, err
+			}
+			return sandboxPeer{}, errors.New("sandbox T3 on Tailscale is unavailable")
+		}
+		select {
+		case <-probe.Done():
+			return sandboxPeer{}, errors.New("sandbox T3 on Tailscale did not become ready after waking")
+		case <-time.After(time.Second):
+		}
+	}
+}
+
+func cloudMeshNodes(ctx context.Context, client *agent37.Client, instances []agent37.Instance, skipID string, allowWake bool) ([]peers.MeshNode, error) {
+	var group sync.WaitGroup
+	limit := make(chan struct{}, 6)
+	nodes := make([]peers.MeshNode, len(instances))
+	failures := make([]error, len(instances))
+	for i, instance := range instances {
+		if instance.ID == skipID || !isManaged(instance) || instance.Metadata["tailnet"] != "tailscale" ||
+			(instance.Status != "running" && (!allowWake || instance.Status != "sleeping")) {
+			continue
+		}
+		group.Go(func() {
+			select {
+			case limit <- struct{}{}:
+				defer func() { <-limit }()
+			case <-ctx.Done():
+				failures[i] = ctx.Err()
+				return
+			}
+			name := instance.Metadata["environment"]
+			if agent37.ValidateID(instance.ID) != nil || !namePattern.MatchString(name) {
+				failures[i] = errors.New("a managed sandbox has an invalid identity")
+				return
+			}
+			proof, err := discoverSandboxPeer(ctx, client, instance, allowWake)
+			if err == nil {
+				nodes[i], err = meshNode(client, instance.ID, name, proof)
+			}
+			if err != nil {
+				failures[i] = fmt.Errorf("%s: %w", name, err)
+			}
+		})
+	}
+	group.Wait()
+	var ready []peers.MeshNode
+	for _, node := range nodes {
+		if node.EnvironmentID != "" {
+			ready = append(ready, node)
+		}
+	}
+	return ready, errors.Join(failures...)
+}
+
+func linkStartedSandbox(ctx context.Context, client *agent37.Client, instance agent37.Instance, name string, configured []peers.Peer, proof setupProof, diagnostic io.Writer) {
+	node, err := meshNode(client, instance.ID, name, sandboxPeer{
+		EnvironmentID: proof.EnvironmentID, URL: proof.TailnetURL, PeerProxy: proof.PeerProxy,
+	})
+	if err != nil {
+		fmt.Fprintf(diagnostic, "T3 mesh pending for %s. %v\n", name, err)
+		return
+	}
+	meshCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
+	instances, inventoryErr := client.List(meshCtx)
+	others, discoveryErr := cloudMeshNodes(meshCtx, client, instances, instance.ID, true)
+	count, linkErr := peers.ReconcileMesh(meshCtx, configured, append([]peers.MeshNode{node}, others...))
+	reportMesh(count, diagnostic)
+	if err := errors.Join(inventoryErr, discoveryErr, linkErr); err != nil {
+		fmt.Fprintf(diagnostic, "T3 mesh has pending links. Run t3-agent37 sync. %v\n", err)
+	}
+}
+
+func reportMesh(count int, diagnostic io.Writer) {
+	if count != 0 {
+		fmt.Fprintf(diagnostic, "Verified %d directed T3 environment links.\n", count)
+	}
+}

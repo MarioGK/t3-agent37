@@ -52,7 +52,7 @@ func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
-func setup(ctx context.Context, client *agent37.Client, instance agent37.Instance, configured []peers.Peer) (setupProof, error) {
+func setup(ctx context.Context, client *agent37.Client, instance agent37.Instance, peerLinks bool) (setupProof, error) {
 	provider := displayProvider(instance)
 	if _, allowed := providers[provider]; !allowed {
 		return setupProof{}, errors.New("sandbox metadata names an unsupported T3 provider")
@@ -63,7 +63,7 @@ func setup(ctx context.Context, client *agent37.Client, instance agent37.Instanc
 	}
 	name := cmp.Or(instance.Name, instance.Metadata["environment"])
 	command += " && " + remote + " setup " + provider + " " + shellQuote(name)
-	if len(configured) != 0 {
+	if peerLinks {
 		command += " --peer-links"
 	}
 	proof, err := client.ExecJSON[setupProof](ctx, instance.ID, command)
@@ -142,32 +142,25 @@ func joinTailnetOnce(ctx context.Context, client *agent37.Client, enrollment *pe
 	})
 }
 
-func linkFleet(ctx context.Context, client *agent37.Client, id, name string, configured []peers.Peer, proof setupProof, diagnostic io.Writer) error {
-	if !proof.PeerProxy {
-		return fmt.Errorf("%s needs a fresh boot for T3 peer routing; run down and up when idle", name)
-	}
-	admin, err := client.ExecJSON[struct{ Token string }](ctx, id, remote+" peer-admin")
-	if err != nil {
-		return err
-	}
-	hosts, err := peers.Sync(ctx, configured, name, proof.EnvironmentID, proof.TailnetURL, admin.Token)
-	if len(hosts) != 0 {
-		fmt.Fprintf(diagnostic, "Linked %s with %s.\n", name, strings.Join(hosts, ", "))
-	}
-	return err
-}
-
-func bootstrap(ctx context.Context, client *agent37.Client, enrollment *peers.Enrollment, instance agent37.Instance, name string, configured []peers.Peer, mayRestart bool, diagnostic io.Writer) (setupProof, error) {
-	proof, err := setup(ctx, client, instance, configured)
+func bootstrap(ctx context.Context, client *agent37.Client, enrollment *peers.Enrollment, instance agent37.Instance, name string, peerLinks, mayRestart, githubAccess bool, diagnostic io.Writer) (setupProof, error) {
+	proof, err := setup(ctx, client, instance, peerLinks)
 	if err != nil {
 		return proof, err
 	}
-	if len(configured) != 0 && !proof.PeerProxy && mayRestart {
+	if peerLinks && !proof.PeerProxy && mayRestart {
 		if _, err := client.Lifecycle(ctx, instance.ID, "restart"); err != nil {
 			return proof, err
 		}
-		proof, err = setup(ctx, client, instance, configured)
+		proof, err = setup(ctx, client, instance, peerLinks)
 		if err != nil {
+			return proof, err
+		}
+	}
+	if githubAccess {
+		// Agent37's private file endpoint can lag exec during provisioning.
+		// Wait for protected gateway health before sending the handoff, then
+		// publish the Tailscale endpoint and make it available to T3 peers.
+		if err := configureGitHubAccess(ctx, client, instance.ID, name, diagnostic); err != nil {
 			return proof, err
 		}
 	}
@@ -189,11 +182,6 @@ func bootstrap(ctx context.Context, client *agent37.Client, enrollment *peers.En
 		proof.TailnetURL, err = peers.VerifyTailnet(ctx, name, proof.EnvironmentID, private.URL)
 		if err != nil {
 			return proof, err
-		}
-	}
-	if len(configured) != 0 {
-		if err := linkFleet(ctx, client, instance.ID, name, configured, proof, diagnostic); err != nil {
-			fmt.Fprintf(diagnostic, "T3 peer registration pending for %s. %v\n", name, err)
 		}
 	}
 	return proof, nil
@@ -224,35 +212,35 @@ func stopSandbox(ctx context.Context, client *agent37.Client, instance agent37.I
 	return instance, err
 }
 
-func startSandbox(ctx context.Context, client *agent37.Client, instance agent37.Instance, name string, configured []peers.Peer, diagnostic io.Writer) (agent37.Instance, string, error) {
+func startSandbox(ctx context.Context, client *agent37.Client, instance agent37.Instance, name string, peerLinks, githubAccess bool, diagnostic io.Writer) (agent37.Instance, setupProof, error) {
 	wasStopped := instance.Status == "stopped"
 	var enrollment *peers.Enrollment
 	if wasStopped && instance.Metadata["tailnet"] == "tailscale" {
 		var err error
 		enrollment, err = verifyTailscaleEnrollment(ctx)
 		if err != nil {
-			return instance, "", err
+			return instance, setupProof{}, err
 		}
 	}
 	if instance.Status != "running" {
 		var err error
 		instance, err = wake(ctx, client, instance)
 		if err != nil {
-			return instance, "", err
+			return instance, setupProof{}, err
 		}
 	}
 	if instance.Metadata["tailnet"] == "tailscale" {
-		proof, err := bootstrap(ctx, client, enrollment, instance, name, configured, wasStopped, diagnostic)
+		proof, err := bootstrap(ctx, client, enrollment, instance, name, peerLinks, wasStopped, githubAccess, diagnostic)
 		if err != nil {
-			return instance, proof.TailnetURL, err
+			return instance, proof, err
 		}
 		instance, err = client.Get(ctx, instance.ID)
-		return instance, proof.TailnetURL, err
+		return instance, proof, err
 	}
-	return instance, "", nil
+	return instance, setupProof{}, nil
 }
 
-func prepareCreated(ctx context.Context, client *agent37.Client, enrollment *peers.Enrollment, instance agent37.Instance, name string, configured []peers.Peer, diagnostic io.Writer) (setupProof, error) {
+func prepareCreated(ctx context.Context, client *agent37.Client, enrollment *peers.Enrollment, instance agent37.Instance, name string, githubAccess bool, diagnostic io.Writer) (setupProof, error) {
 	if displayProvider(instance) == "opencode" {
 		if err := client.RequireManagedBudget(ctx, instance.ID, false); err != nil {
 			return setupProof{}, err
@@ -266,7 +254,20 @@ func prepareCreated(ctx context.Context, client *agent37.Client, enrollment *pee
 			return setupProof{}, err
 		}
 	}
-	return bootstrap(ctx, client, enrollment, instance, name, configured, wasStopped, diagnostic)
+	return bootstrap(ctx, client, enrollment, instance, name, true, wasStopped, githubAccess, diagnostic)
+}
+
+func configureGitHubAccess(ctx context.Context, client *agent37.Client, id, name string, diagnostic io.Writer) error {
+	access, err := inheritGitHub(ctx, client, id)
+	if err != nil {
+		return fmt.Errorf("could not set up GitHub for %s. Retry with t3-agent37 up %s --github: %w", name, name, err)
+	}
+	if access.GitHub {
+		fmt.Fprintf(diagnostic, "GitHub CLI and HTTPS Git are ready on %s.\n", name)
+	} else {
+		fmt.Fprintf(diagnostic, "No GitHub login found on this workstation for %s. Sign in with gh, then run t3-agent37 up %s --github.\n", name, name)
+	}
+	return nil
 }
 
 func prepare(ctx context.Context, client *agent37.Client, instance agent37.Instance, name string, output, diagnostic io.Writer) error {
@@ -280,7 +281,7 @@ func prepare(ctx context.Context, client *agent37.Client, instance agent37.Insta
 	start := instance.Status == "stopped" || instance.Status == "sleeping"
 	if start {
 		var err error
-		instance, _, err = startSandbox(ctx, client, instance, name, nil, diagnostic)
+		instance, _, err = startSandbox(ctx, client, instance, name, false, false, diagnostic)
 		if err != nil {
 			return err
 		}
@@ -289,7 +290,7 @@ func prepare(ctx context.Context, client *agent37.Client, instance agent37.Insta
 		// Pass the requested provider to bootstrap before updating cloud metadata.
 		override := instance
 		override.Metadata = map[string]string{"provider": provider, "tailnet": instance.Metadata["tailnet"]}
-		if _, err := setup(ctx, client, override, nil); err != nil {
+		if _, err := setup(ctx, client, override, false); err != nil {
 			return err
 		}
 	}

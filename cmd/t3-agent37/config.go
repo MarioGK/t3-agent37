@@ -26,6 +26,7 @@ type workstationConfig struct {
 	Provider      string `json:"provider,omitempty"`
 	Tailscale     *bool  `json:"tailscale,omitempty"`
 	TailscaleTags string `json:"tailscale_tags,omitempty"`
+	GitHubAccess  *bool  `json:"github_access,omitempty"`
 }
 
 func validateNamePrefix(prefix string) error {
@@ -119,7 +120,7 @@ func (file configFile) save(ctx context.Context) error {
 	if err := json.Unmarshal(encoded, &fields); err != nil {
 		return err
 	}
-	for _, key := range []string{"name_prefix", "template", "provider", "tailscale", "tailscale_tags"} {
+	for _, key := range []string{"name_prefix", "template", "provider", "tailscale", "tailscale_tags", "github_access"} {
 		delete(existing, key)
 	}
 	maps.Copy(fields, existing)

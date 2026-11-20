@@ -6,7 +6,9 @@ includes T3 Code `0.1.11-nightly.20261119.4954`.
 You can also [publish your own copy](#publish-the-template).
 Choose CLIProxy as the model provider, or use Automatic with the TerraScale
 template. For Tailscale, define `tag:agent37` in your tailnet policy and grant your
-T3 clients access to that tag on TCP 443. Setup opens **Trust credentials**.
+T3 clients and other sandboxes access to that tag on TCP 443. Allow the
+sandboxes to reach the configured T3 servers on their private HTTPS ports.
+Setup opens **Trust credentials**.
 Select **Credential → OAuth**, set **Auth Keys** to **Write**, and select
 `tag:agent37`. For an existing OAuth client, enter its granted tags in the wizard.
 Use commas between multiple tags. Enable MagicDNS and HTTPS certificates in the
@@ -26,6 +28,7 @@ You can supply these variables from your secret store on the workstation.
 | `T3_AGENT37_CLIPROXY_URL` | HTTPS base URL for CLIProxy |
 | `T3_AGENT37_CLIPROXY_KEY` | CLIProxy client API key |
 | `T3_AGENT37_TAILSCALE_CLIENT_ID`, `T3_AGENT37_TAILSCALE_CLIENT_SECRET` | OAuth client with `auth_keys` write access for `tag:agent37` |
+| `T3_AGENT37_GITHUB_TOKEN` | Optional scoped GitHub.com credential for new sandboxes |
 
 The CLI reads keys saved by setup in an owner-only `runtime.json` beside
 `config.json`. Environment variables take precedence. For the Agent37 key,
@@ -54,18 +57,21 @@ Use `link` to queue the same request for every managed sandbox, or
 within five minutes. `connect <name> --pair` prints a link for manual pairing.
 `down` logs out the device before deleting the newest managed sandbox.
 `down <name>` logs out the device and stops that sandbox. Both unlink it from
-configured T3 servers. Use `up <name>` to restore peer links after a stop.
+available T3 environments. Use `up <name>` to restore peer links after a stop.
 Inside the sandbox, use
 `socks5h://127.0.0.1:1055` to reach tailnet services.
 
 ## Link T3 servers
 
-To link a Tailscale-enabled sandbox on `create` and `up`, save the peers in
+To include fixed T3 servers in the mesh, save the peers in
 `~/.config/t3-agent37/peers.json` or set `T3_AGENT37_PEERS_FILE`.
 
-`sync` compares private sandbox links on these peers with the configured
-Agent37 workspace. If a peer was offline during `down`, run `sync` when it
-comes back. `sync --dry-run` lists the links it would remove.
+`create`, `up`, and `sync` establish links in both directions between
+configured T3 servers and managed sandboxes in the workspace. They can wake
+auto-sleeping sandboxes to link them. A sandbox stopped with `down <name>`
+returns to the mesh after `up <name>`. `sync` also removes links from available
+peers to stopped or deleted sandboxes. `sync --dry-run` previews stale links
+on currently available peers.
 
 ```json
 [
@@ -77,7 +83,7 @@ Use the environment ID from `/.well-known/t3/environment` on each peer and
 an SSH alias that reaches the T3 owner. Each server must have Linked
 Environments enabled. Registration runs over private Tailscale HTTPS and
 adds approval-required links in both directions without opening the desktop
-app. A pending peer leaves the sandbox ready to use. Run `up <name>` after
+app. A pending peer leaves the sandbox ready to use. Run `sync` after
 the peer recovers to add the missing links and reuse the working ones.
 
 For a peer running inside Incus, an optional `incus` object directs the
@@ -86,16 +92,30 @@ owner command through an SSH host with Incus access. Set `ssh`, `instance`,
 guest, with its home at `/home/<user>`. The peer's top-level `url` still
 points to its private Tailscale HTTPS address.
 
-Set `T3_AGENT37_PEERS_FILE` to an empty string to skip sync.
+Set `T3_AGENT37_PEERS_FILE` to an empty string for a sandbox-only mesh.
+
+## GitHub access
+
+Bare `up` and `create` use the invoking workstation's active GitHub.com
+CLI login. A sandbox can use the same GitHub permissions and the workstation's
+global Git author name and email. GitHub SSH-style remotes use authenticated
+HTTPS inside the sandbox. The login stays in the guest's private GitHub
+CLI store until the sandbox disk is deleted. Use a repository-scoped
+`T3_AGENT37_GITHUB_TOKEN` to limit the permissions.
+
+Set `github_access` to `false` in `config` or use `--github=false` for a
+sandbox that should launch without this handoff. Use `up <name> --github`
+to configure a sandbox that already exists.
 
 ## Publish the template
 
 The image includes T3, OpenCode, Codex, Tailscale, .NET 10 and 11, Go 1.27.4,
 Rust 1.99.1 with rustfmt and Clippy, Python 3.12 with uv, and Node 24 with
 mise. The Node pins are 24.21.0 with npm 11.18.0 and 24.22.1. The image also
-includes Git, GCC, Make, Ruby, ShellCheck, actionlint, the TerraScale `ts`
+includes Git, GitHub CLI, GCC, Make, Ruby, ShellCheck, actionlint, the TerraScale `ts`
 CLI, PostgreSQL 16 client, NSS tools, and Playwright with Chromium. Set
 `PLAYWRIGHT_BROWSERS_PATH=/opt/terrascale/playwright` to use the bundled browser.
+The CLI installs a checksum-pinned `gh` in older sandboxes if it is missing.
 
 To publish your own copy, run this from the checkout with Agent37 CLI 0.4.1
 or later. Use the published revision in `--template`.
