@@ -7,6 +7,7 @@ require (
 	github.com/charmbracelet/x/term v0.2.2
 	github.com/gofrs/flock v0.13.2
 	github.com/gorilla/websocket v1.5.3
+	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.1.0
 	github.com/tailscale/hujson v0.0.0-20220506213045-af5ed07155e5
 	golang.org/x/oauth2 v0.38.0
@@ -30,6 +31,7 @@ require (
 	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
 	github.com/dustin/go-humanize v1.1.0 // indirect
 	github.com/google/go-cmp v0.6.0 // indirect
+	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/lucasb-eyer/go-colorful v1.3.0 // indirect
 	github.com/mattn/go-runewidth v0.0.20 // indirect
 	github.com/mitchellh/hashstructure/v2 v2.0.2 // indirect

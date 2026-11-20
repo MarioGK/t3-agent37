@@ -8,6 +8,10 @@ Linux and macOS
 curl -fsSL https://raw.githubusercontent.com/MarioGK/t3-agent37/main/install.sh | sh
 ```
 
+The installer enables Bash, Fish, and Zsh completion for new shells.
+Tab completes commands, flags, providers, workspace templates, and sandbox names.
+Use `t3-agent37 completion --help` to generate scripts for custom shell setups.
+
 Windows PowerShell
 
 ```powershell

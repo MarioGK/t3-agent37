@@ -17,6 +17,7 @@ import (
 
 const (
 	apiBase             = "https://api.agent37.com/v1/instances"
+	templatesBase       = "https://api.agent37.com/v1/templates"
 	execBase            = "https://sandbox.agent37.app/v1/instances"
 	ManagedCreditMicros = 1_000_000
 )
@@ -186,6 +187,29 @@ func (c *Client) List(ctx context.Context) ([]Instance, error) {
 	}{Data: []Instance{}}
 	err := c.request(ctx, http.MethodGet, apiBase, nil, &result, false)
 	return result.Data, err
+}
+
+type Template struct {
+	Name      string `json:"name"`
+	Scope     string `json:"scope"`
+	Revision  int    `json:"revision"`
+	Revisions []struct {
+		Number int `json:"revision"`
+	} `json:"revisions"`
+}
+
+func (c *Client) ListTemplates(ctx context.Context) ([]Template, error) {
+	var result struct {
+		Data []Template `json:"data"`
+	}
+	err := c.request(ctx, http.MethodGet, templatesBase, nil, &result, false)
+	return result.Data, err
+}
+
+func (c *Client) GetTemplate(ctx context.Context, name string) (Template, error) {
+	var result Template
+	err := c.request(ctx, http.MethodGet, templatesBase+"/"+url.PathEscape(name), nil, &result, false)
+	return result, err
 }
 
 func (c *Client) Create(ctx context.Context, payload any) (Instance, error) {

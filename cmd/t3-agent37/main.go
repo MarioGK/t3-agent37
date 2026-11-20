@@ -45,27 +45,23 @@ type options struct {
 	latest                           bool
 	pickDelete                       bool
 	noDesktop                        bool
+	noTailscale                      bool
 }
 
 func parse(args []string, output io.Writer) (options, error) {
 	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" || args[0] == "help" {
-		fmt.Fprintln(output, "Usage: t3-agent37 <setup|create|list|ls|up|down|delete|sync|link|connect|prepare|terminal|config> [name] [flags]\n       t3-agent37 --version")
+		fmt.Fprintf(output, "Usage: t3-agent37 <%s> [name] [flags]\n       t3-agent37 --version\n", commandUsage())
 		return options{}, flag.ErrHelp
 	}
 	if len(args) == 1 && (args[0] == "--version" || args[0] == "version") {
 		fmt.Fprintln(output, version)
 		return options{}, flag.ErrHelp
 	}
-	opts := options{action: args[0]}
-	switch opts.action {
-	case "down":
-		opts.action = "stop"
-	case "ls":
-		opts.action = "list"
-	case "create", "up", "delete", "sync", "link", "connect", "start", "stop", "prepare", "terminal", "list", "config", "setup":
-	default:
-		return opts, fmt.Errorf("unknown command %q", opts.action)
+	command, ok := findCommand(args[0])
+	if !ok {
+		return options{}, fmt.Errorf("unknown command %q", args[0])
 	}
+	opts := options{action: cmp.Or(command.action, command.name)}
 	flags := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	flags.SetOutput(output)
 	flags.Usage = func() {
@@ -109,44 +105,7 @@ func parse(args []string, output io.Writer) (options, error) {
 		}
 		flags.PrintDefaults()
 	}
-	var noTailscale bool
-	if opts.action == "setup" {
-		flags.BoolVar(&opts.checkSetup, "check", false, "Check workstation configuration without prompts or network requests")
-		flags.BoolVar(&opts.verifySetup, "verify", false, "Check local Tailscale status and verify OAuth access")
-		flags.BoolVar(&opts.repairSetup, "repair-tailscale", false, "Use the OAuth client to define missing enrollment tags")
-		flags.BoolVar(&opts.dryRun, "dry-run", false, "Preview Tailscale tag repair without saving the policy")
-		flags.BoolVar(&opts.noSetupBrowser, "no-browser", false, "Keep setup in the terminal")
-	}
-	if opts.action == "create" {
-		flags.BoolVar(&opts.yes, "yes", false, "Authorize paid provisioning")
-	}
-	if opts.action == "create" || opts.action == "up" {
-		flags.StringVar(&opts.provider, "provider", "", "Provider: opencode, cliproxy, codex or claude")
-		flags.StringVar(&opts.template, "template", "", "Agent37 template, optionally pinned by revision")
-		flags.BoolVar(&opts.dryRun, "dry-run", false, "Preview the request without creating a sandbox")
-		flags.BoolVar(&opts.tailscale, "tailscale", false, "Enroll the sandbox in Tailscale")
-		flags.BoolVar(&noTailscale, "no-tailscale", false, "Disable Tailscale enrollment")
-		_ = flags.MarkHidden("no-tailscale")
-	}
-	if opts.action == "connect" {
-		flags.BoolVar(&opts.pair, "pair", false, "Print a one-time T3 pairing link")
-	}
-	if opts.action == "up" || opts.action == "create" {
-		flags.BoolVar(&opts.noDesktop, "no-desktop", false, "Skip the T3 Code desktop pairing request")
-	}
-	if opts.action == "link" {
-		flags.BoolVar(&opts.dryRun, "dry-run", false, "List the sandboxes without waking or pairing them")
-	}
-	if opts.action == "stop" {
-		flags.BoolVar(&opts.deleteSandbox, "delete", false, "Permanently delete the managed sandbox and its disk")
-		flags.BoolVar(&opts.yes, "yes", false, "Confirm permanent deletion")
-	}
-	if opts.action == "sync" {
-		flags.BoolVar(&opts.dryRun, "dry-run", false, "Show stale T3 links without removing them")
-	}
-	if opts.action == "stop" || opts.action == "delete" {
-		flags.BoolVar(&opts.dryRun, "dry-run", false, "Show which sandbox would be stopped or deleted")
-	}
+	addCommandFlags(flags, &opts)
 	if err := flags.Parse(args[1:]); err != nil {
 		return opts, err
 	}
@@ -231,13 +190,53 @@ func parse(args []string, output io.Writer) (options, error) {
 		if opts.template == "" {
 			return opts, errors.New("choose a Tailscale-ready template in t3-agent37 setup or with --template")
 		}
-		if noTailscale || (flags.Changed("tailscale") && !opts.tailscale) ||
+		if opts.noTailscale || (flags.Changed("tailscale") && !opts.tailscale) ||
 			(!flags.Changed("tailscale") && config.Tailscale != nil && !*config.Tailscale) {
 			return opts, errors.New("Tailscale is required. Enable it in the workstation config")
 		}
 		opts.tailscale = true
 	}
 	return opts, nil
+}
+
+func addCommandFlags(flags *flag.FlagSet, opts *options) {
+	if opts.action == "setup" {
+		flags.BoolVar(&opts.checkSetup, "check", false, "Check workstation configuration without prompts or network requests")
+		flags.BoolVar(&opts.verifySetup, "verify", false, "Check local Tailscale status and verify OAuth access")
+		flags.BoolVar(&opts.repairSetup, "repair-tailscale", false, "Use the OAuth client to define missing enrollment tags")
+		flags.BoolVar(&opts.dryRun, "dry-run", false, "Preview Tailscale tag repair without saving the policy")
+		flags.BoolVar(&opts.noSetupBrowser, "no-browser", false, "Keep setup in the terminal")
+	}
+	if opts.action == "create" {
+		flags.BoolVar(&opts.yes, "yes", false, "Authorize paid provisioning")
+	}
+	if opts.action == "create" || opts.action == "up" {
+		flags.StringVar(&opts.provider, "provider", "", "Provider: opencode, cliproxy, codex or claude")
+		flags.StringVar(&opts.template, "template", "", "Agent37 template, optionally pinned by revision")
+		flags.BoolVar(&opts.dryRun, "dry-run", false, "Preview the request without creating a sandbox")
+		flags.BoolVar(&opts.tailscale, "tailscale", false, "Enroll the sandbox in Tailscale")
+		flags.BoolVar(&opts.noTailscale, "no-tailscale", false, "Disable Tailscale enrollment")
+		_ = flags.MarkHidden("no-tailscale")
+	}
+	if opts.action == "connect" {
+		flags.BoolVar(&opts.pair, "pair", false, "Print a one-time T3 pairing link")
+	}
+	if opts.action == "up" || opts.action == "create" {
+		flags.BoolVar(&opts.noDesktop, "no-desktop", false, "Skip the T3 Code desktop pairing request")
+	}
+	if opts.action == "link" {
+		flags.BoolVar(&opts.dryRun, "dry-run", false, "List the sandboxes without waking or pairing them")
+	}
+	if opts.action == "stop" {
+		flags.BoolVar(&opts.deleteSandbox, "delete", false, "Permanently delete the managed sandbox and its disk")
+		flags.BoolVar(&opts.yes, "yes", false, "Confirm permanent deletion")
+	}
+	if opts.action == "sync" {
+		flags.BoolVar(&opts.dryRun, "dry-run", false, "Show stale T3 links without removing them")
+	}
+	if opts.action == "stop" || opts.action == "delete" {
+		flags.BoolVar(&opts.dryRun, "dry-run", false, "Show which sandbox would be stopped or deleted")
+	}
 }
 
 func sandboxProvider(provider, template string) string {
@@ -558,6 +557,12 @@ func operate(ctx context.Context, client *agent37.Client, enrollment *peers.Enro
 }
 
 func run(ctx context.Context, args []string, output, diagnostic io.Writer) error {
+	if len(args) == 2 && args[0] == "help" {
+		args = []string{args[1], "--help"}
+	}
+	if len(args) != 0 && slices.Contains([]string{"completion", "__complete", "__completeNoDesc"}, args[0]) {
+		return runCompletion(ctx, args, output, diagnostic)
+	}
 	opts, err := parse(args, output)
 	if errors.Is(err, flag.ErrHelp) {
 		return nil
