@@ -60,6 +60,11 @@ func setupWorkstation(ctx context.Context, opts options, output, diagnostic io.W
 		if !ready || !verified {
 			return errors.New("workstation verification is incomplete")
 		}
+		if _, err := desktopLauncher(ctx); err == nil {
+			fmt.Fprintln(output, "  Desktop link launcher available. Run t3-agent37 link to add existing sandboxes here.")
+		} else {
+			fmt.Fprintln(output, "  Desktop pairing unavailable in this session.", err)
+		}
 		fmt.Fprintln(output, "Run t3-agent37 up to provision a sandbox and verify access.")
 		return nil
 	}

@@ -44,11 +44,12 @@ type options struct {
 	generatedName                    bool
 	latest                           bool
 	pickDelete                       bool
+	noDesktop                        bool
 }
 
 func parse(args []string, output io.Writer) (options, error) {
 	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" || args[0] == "help" {
-		fmt.Fprintln(output, "Usage: t3-agent37 <setup|create|list|ls|up|down|delete|connect|prepare|terminal|config> [name] [flags]\n       t3-agent37 --version")
+		fmt.Fprintln(output, "Usage: t3-agent37 <setup|create|list|ls|up|down|delete|link|connect|prepare|terminal|config> [name] [flags]\n       t3-agent37 --version")
 		return options{}, flag.ErrHelp
 	}
 	if len(args) == 1 && (args[0] == "--version" || args[0] == "version") {
@@ -61,7 +62,7 @@ func parse(args []string, output io.Writer) (options, error) {
 		opts.action = "stop"
 	case "ls":
 		opts.action = "list"
-	case "create", "up", "delete", "connect", "start", "stop", "prepare", "terminal", "list", "config", "setup":
+	case "create", "up", "delete", "link", "connect", "start", "stop", "prepare", "terminal", "list", "config", "setup":
 	default:
 		return opts, fmt.Errorf("unknown command %q", opts.action)
 	}
@@ -94,6 +95,9 @@ func parse(args []string, output io.Writer) (options, error) {
 			fmt.Fprintln(output, "Run without a name to provision a sandbox with the lowest available number.")
 			fmt.Fprintln(output, "Pass a sandbox name to start it.")
 		}
+		if opts.action == "link" {
+			fmt.Fprintln(output, "Open desktop pairing for one sandbox or all managed sandboxes.")
+		}
 		if args[0] == "down" {
 			fmt.Fprintln(output, "Omit the name to permanently delete the newest managed sandbox and its disk.")
 			fmt.Fprintln(output, "Pass a sandbox name to stop it.")
@@ -121,6 +125,12 @@ func parse(args []string, output io.Writer) (options, error) {
 	}
 	if opts.action == "connect" {
 		flags.BoolVar(&opts.pair, "pair", false, "Print a one-time T3 pairing link")
+	}
+	if opts.action == "up" || opts.action == "create" {
+		flags.BoolVar(&opts.noDesktop, "no-desktop", false, "Skip the T3 Code desktop pairing request")
+	}
+	if opts.action == "link" {
+		flags.BoolVar(&opts.dryRun, "dry-run", false, "List the sandboxes without waking or pairing them")
 	}
 	if opts.action == "stop" {
 		flags.BoolVar(&opts.deleteSandbox, "delete", false, "Permanently delete the managed sandbox and its disk")
@@ -158,7 +168,7 @@ func parse(args []string, output io.Writer) (options, error) {
 			opts.action = "start"
 		}
 	}
-	if opts.action == "list" && flags.NArg() == 0 {
+	if (opts.action == "list" || opts.action == "link") && flags.NArg() == 0 {
 		return opts, nil
 	}
 	if opts.action == "stop" && opts.yes != opts.deleteSandbox {
@@ -498,6 +508,15 @@ func operate(ctx context.Context, client *agent37.Client, enrollment *peers.Enro
 		if !proof.ProviderReady {
 			fmt.Fprintf(output, "%s needs sign-in. Run t3-agent37 terminal %s.\n", provider, opts.name)
 		}
+		if opts.generatedName && !opts.noDesktop {
+			if launcher, err := desktopLauncher(ctx); err == nil {
+				if err := handOffPairing(ctx, client, instance, proof.TailnetURL, launcher); err != nil {
+					fmt.Fprintf(diagnostic, "Desktop pairing did not open for %s. Run t3-agent37 link %s. %v\n", opts.name, opts.name, err)
+				} else {
+					fmt.Fprintf(diagnostic, "Confirm %s in T3 Code to add this sandbox to the desktop.\n", opts.name)
+				}
+			}
+		}
 	} else {
 		if instance.Status == "stopped" {
 			return errors.New("the sandbox is stopped. Run t3-agent37 up first")
@@ -569,6 +588,9 @@ func run(ctx context.Context, args []string, output, diagnostic io.Writer) error
 		return err
 	}
 	client := agent37.New(key)
+	if opts.action == "link" {
+		return linkSandboxes(ctx, client, opts, output, diagnostic)
+	}
 	if opts.action == "list" || opts.latest || opts.dryRun || opts.pickDelete {
 		instances, err := client.List(ctx)
 		if err != nil {
