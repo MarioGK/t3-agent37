@@ -52,7 +52,11 @@ pairing request in T3 Code. Use `link <name>` for one sandbox or
 `down <name>` stops a specific sandbox and keeps its disk.
 `delete` opens a terminal picker. Use the arrow keys to select a sandbox and
 confirm before deleting its disk. For scripts, use `delete <name>`. Add
-`--dry-run` to preview. `connect` prints the verified Tailscale address.
+`--dry-run` to preview.
+`down` and `delete` unlink the sandbox from configured T3 servers.
+`sync` clears stale links to stopped or deleted sandboxes. Use `sync --dry-run`
+to see which links would be removed. Remove saved desktop entries under
+**Settings → Connections**.
 
 Run `t3-agent37 config` to edit the name prefix, default template, and provider.
 The editor works offline. Provisioning flags override

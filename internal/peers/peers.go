@@ -142,9 +142,7 @@ func privateOrigin(raw string) (string, error) {
 	return strings.TrimSuffix(raw, "/"), nil
 }
 
-func issueOverSSH(ctx context.Context, peer Peer) (string, error) {
-	// The SSH stream is captured and the owner session is never passed in argv.
-	const script = `set -eu
+const ownerCLIScript = `set -eu
 base=${T3CODE_HOME:-$HOME/.t3}
 export MISE_AUTO_INSTALL=0
 pid=$(systemctl --user show --value -p MainPID "t3code-$(id -un).service" 2>/dev/null || :)
@@ -159,16 +157,18 @@ for path in "$base"/runtime/versions/*/t3; do
 done
 for binary in "$native" "$cached" "$HOME/.t3/bin/t3" "$HOME/.local/bin/t3" "$HOME/.local/share/mise/shims/t3"; do
     if test -x "$binary"; then
-        exec "$binary" auth session issue --base-dir "$base" --json --ttl 5m --label t3-agent37-peer-sync \
-            --scope access:read --scope access:write --scope orchestration:read --scope orchestration:operate
+        exec "$binary" "$@" --base-dir "$base"
     fi
 done
 exit 127
 `
+
+// Only pass fixed arguments or validated shell-safe identifiers to the SSH command.
+func runOwnerCLI(ctx context.Context, peer Peer, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	host := peer.Host
-	remote := []string{"sh", "-s"}
+	remote := append([]string{"sh", "-s", "--"}, args...)
 	if relay := peer.Incus; relay != nil {
 		host = relay.Host
 		remote = append([]string{"incus", "exec", relay.Instance,
@@ -176,10 +176,15 @@ exit 127
 			"--env", "HOME=/home/" + relay.User, "--env", "PATH=/run/current-system/sw/bin:/usr/local/bin:/usr/bin:/bin",
 			"--"}, remote...)
 	}
-	args := []string{"-T", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=5", host}
-	command := exec.CommandContext(ctx, "ssh", append(args, remote...)...)
-	command.Stdin = strings.NewReader(script)
-	output, err := command.Output()
+	ssh := []string{"-T", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=5", host}
+	command := exec.CommandContext(ctx, "ssh", append(ssh, remote...)...)
+	command.Stdin = strings.NewReader(ownerCLIScript)
+	return command.Output()
+}
+
+func issueOverSSH(ctx context.Context, peer Peer) (string, error) {
+	output, err := runOwnerCLI(ctx, peer, "auth", "session", "issue", "--json", "--ttl", "5m", "--label", "t3-agent37-peer-sync",
+		"--scope", "access:read", "--scope", "access:write", "--scope", "orchestration:read", "--scope", "orchestration:operate")
 	var response struct {
 		Token string `json:"token"`
 	}

@@ -49,7 +49,7 @@ type options struct {
 
 func parse(args []string, output io.Writer) (options, error) {
 	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" || args[0] == "help" {
-		fmt.Fprintln(output, "Usage: t3-agent37 <setup|create|list|ls|up|down|delete|link|connect|prepare|terminal|config> [name] [flags]\n       t3-agent37 --version")
+		fmt.Fprintln(output, "Usage: t3-agent37 <setup|create|list|ls|up|down|delete|sync|link|connect|prepare|terminal|config> [name] [flags]\n       t3-agent37 --version")
 		return options{}, flag.ErrHelp
 	}
 	if len(args) == 1 && (args[0] == "--version" || args[0] == "version") {
@@ -62,7 +62,7 @@ func parse(args []string, output io.Writer) (options, error) {
 		opts.action = "stop"
 	case "ls":
 		opts.action = "list"
-	case "create", "up", "delete", "link", "connect", "start", "stop", "prepare", "terminal", "list", "config", "setup":
+	case "create", "up", "delete", "sync", "link", "connect", "start", "stop", "prepare", "terminal", "list", "config", "setup":
 	default:
 		return opts, fmt.Errorf("unknown command %q", opts.action)
 	}
@@ -79,6 +79,11 @@ func parse(args []string, output io.Writer) (options, error) {
 		}
 		if opts.action == "setup" {
 			fmt.Fprintln(output, "Usage: t3-agent37 setup [--check | --verify | --repair-tailscale] [--no-browser]\nSet up the Agent37 template, Tailscale enrollment, and the model provider.")
+			flags.PrintDefaults()
+			return
+		}
+		if opts.action == "sync" {
+			fmt.Fprintln(output, "Usage: t3-agent37 sync [--dry-run]\nRemove stopped and deleted sandboxes from configured T3 servers.")
 			flags.PrintDefaults()
 			return
 		}
@@ -100,7 +105,7 @@ func parse(args []string, output io.Writer) (options, error) {
 		}
 		if args[0] == "down" {
 			fmt.Fprintln(output, "Omit the name to permanently delete the newest managed sandbox and its disk.")
-			fmt.Fprintln(output, "Pass a sandbox name to stop it.")
+			fmt.Fprintln(output, "Pass a sandbox name to stop it. Both forms unlink it from configured T3 servers.")
 		}
 		flags.PrintDefaults()
 	}
@@ -136,11 +141,20 @@ func parse(args []string, output io.Writer) (options, error) {
 		flags.BoolVar(&opts.deleteSandbox, "delete", false, "Permanently delete the managed sandbox and its disk")
 		flags.BoolVar(&opts.yes, "yes", false, "Confirm permanent deletion")
 	}
-	if args[0] == "down" || opts.action == "delete" {
-		flags.BoolVar(&opts.dryRun, "dry-run", false, "Show which sandbox would be deleted")
+	if opts.action == "sync" {
+		flags.BoolVar(&opts.dryRun, "dry-run", false, "Show stale T3 links without removing them")
+	}
+	if opts.action == "stop" || opts.action == "delete" {
+		flags.BoolVar(&opts.dryRun, "dry-run", false, "Show which sandbox would be stopped or deleted")
 	}
 	if err := flags.Parse(args[1:]); err != nil {
 		return opts, err
+	}
+	if opts.action == "sync" {
+		if flags.NArg() != 0 {
+			return opts, errors.New("sync does not take a sandbox name")
+		}
+		return opts, nil
 	}
 	if opts.action == "config" || opts.action == "setup" {
 		if flags.NArg() != 0 {
@@ -189,9 +203,6 @@ func parse(args []string, output io.Writer) (options, error) {
 		opts.name = flags.Arg(0)
 	default:
 		return opts, errors.New("expected a name with 1 to 43 lowercase letters, digits, or hyphens")
-	}
-	if opts.action == "stop" && opts.dryRun && !opts.latest {
-		return opts, errors.New("omit the name to preview which sandbox bare down would delete")
 	}
 	if opts.action == "delete" {
 		opts.action = "stop"
@@ -485,6 +496,12 @@ func operate(ctx context.Context, client *agent37.Client, enrollment *peers.Enro
 			_ = os.Remove(filepath.Join(state, opts.name+".pending"))
 			instance.Status = "deleted"
 		}
+		if tailnet {
+			if err := unlinkSandbox(ctx, opts.name, instance.ID, diagnostic); err != nil {
+				err = fmt.Errorf("T3 cleanup pending for %s. Run t3-agent37 sync: %w", opts.name, err)
+				return errors.Join(jsonOutput(output, summary(instance), false), err)
+			}
+		}
 		return jsonOutput(output, summary(instance), false)
 	case "terminal":
 		link, err := client.Terminal(ctx, instance.ID)
@@ -588,6 +605,9 @@ func run(ctx context.Context, args []string, output, diagnostic io.Writer) error
 		return err
 	}
 	client := agent37.New(key)
+	if opts.action == "sync" {
+		return syncSandboxLinks(ctx, client, opts.dryRun, output)
+	}
 	if opts.action == "link" {
 		return linkSandboxes(ctx, client, opts, output, diagnostic)
 	}
@@ -629,7 +649,10 @@ func run(ctx context.Context, args []string, output, diagnostic io.Writer) error
 		}
 		if opts.dryRun {
 			target := summary(instance)
-			target["action"] = "delete"
+			target["action"] = "stop"
+			if opts.deleteSandbox {
+				target["action"] = "delete"
+			}
 			return jsonOutput(output, target, true)
 		}
 		opts.name = instance.Metadata["environment"]

@@ -53,12 +53,19 @@ Use `link` to queue the same request for every managed sandbox, or
 `link <name>` for one sandbox. Confirm each private address in T3 Code
 within five minutes. `connect <name> --pair` prints a link for manual pairing.
 `down` logs out the device before deleting the newest managed sandbox.
-`down <name>` logs out the device and stops that sandbox. Inside the sandbox, use
+`down <name>` logs out the device and stops that sandbox. Both unlink it from
+configured T3 servers. Use `up <name>` to restore peer links after a stop.
+Inside the sandbox, use
 `socks5h://127.0.0.1:1055` to reach tailnet services.
+
 ## Link T3 servers
 
 To link a Tailscale-enabled sandbox on `create` and `up`, save the peers in
 `~/.config/t3-agent37/peers.json` or set `T3_AGENT37_PEERS_FILE`.
+
+`sync` compares private sandbox links on these peers with the configured
+Agent37 workspace. If a peer was offline during `down`, run `sync` when it
+comes back. `sync --dry-run` lists the links it would remove.
 
 ```json
 [

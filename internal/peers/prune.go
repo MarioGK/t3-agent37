@@ -1,0 +1,115 @@
+package peers
+
+import (
+	"context"
+	json "encoding/json/v2"
+	"errors"
+	"fmt"
+	"net/url"
+	"regexp"
+	"slices"
+	"strings"
+	"sync"
+	"time"
+)
+
+var sandboxHostname = regexp.MustCompile(`^a37-([a-z0-9][a-z0-9-]{0,42})-([a-z0-9]{10})$`)
+
+type SandboxLink struct {
+	Peer          string `json:"peer"`
+	Name          string `json:"name"`
+	SandboxID     string `json:"sandbox_id"`
+	EnvironmentID string `json:"environment_id"`
+	URL           string `json:"url"`
+	Status        string `json:"-"`
+}
+
+// Reachable checks expired links directly because T3 skips probing them.
+func (link SandboxLink) Reachable(ctx context.Context) bool {
+	if link.Status != "expired" {
+		return link.Status != "unreachable"
+	}
+	client := newHTTPClient(5 * time.Second)
+	defer client.CloseIdleConnections()
+	target := newPeerAPI(client, link.Name, link.URL, link.EnvironmentID)
+	return target.verify(ctx, 1, false) == nil
+}
+
+func decodeSandboxLink(peer Peer, entry link) (SandboxLink, bool) {
+	// Leave links with alternate routes alone. The CLI only registers the sandbox's
+	// unique Tailscale hostname and never adds alternate addresses.
+	if len(entry.URLs) != 1 || !environmentID.MatchString(entry.EnvironmentID) {
+		return SandboxLink{}, false
+	}
+	origin, err := privateOrigin(entry.URLs[0])
+	if err != nil {
+		return SandboxLink{}, false
+	}
+	address, _ := url.Parse(origin)
+	peerAddress, err := url.Parse(peer.URL)
+	if err != nil || address.Port() != "" {
+		return SandboxLink{}, false
+	}
+	host, tailnet, _ := strings.Cut(address.Hostname(), ".")
+	_, peerTailnet, _ := strings.Cut(peerAddress.Hostname(), ".")
+	matches := sandboxHostname.FindStringSubmatch(host)
+	if matches == nil || tailnet != peerTailnet {
+		return SandboxLink{}, false
+	}
+	return SandboxLink{
+		Peer: peer.Host, Name: matches[1], SandboxID: matches[2], EnvironmentID: entry.EnvironmentID,
+		URL: origin, Status: entry.Status,
+	}, true
+}
+
+// PruneSandboxLinks visits links on the configured servers. The caller selects
+// which ones to remove and can keep its lifecycle lock held through the removal.
+func PruneSandboxLinks(ctx context.Context, configured []Peer, dryRun bool,
+	visit func(context.Context, SandboxLink, func() error) (bool, error),
+) ([]SandboxLink, error) {
+	results := make([][]SandboxLink, len(configured))
+	failures := make([]error, len(configured))
+	var group sync.WaitGroup
+	for i, peer := range configured {
+		group.Go(func() {
+			results[i], failures[i] = prunePeer(ctx, peer, dryRun, visit)
+		})
+	}
+	group.Wait()
+	return slices.Concat(results...), errors.Join(failures...)
+}
+
+func prunePeer(ctx context.Context, peer Peer, dryRun bool,
+	visit func(context.Context, SandboxLink, func() error) (bool, error),
+) ([]SandboxLink, error) {
+	output, err := runOwnerCLI(ctx, peer, "environment", "list", "--json")
+	var entries []link
+	if err != nil || json.Unmarshal(output, &entries) != nil || entries == nil {
+		return nil, fmt.Errorf("could not list T3 environments on %s over SSH", peer.Host)
+	}
+	var selected []SandboxLink
+	var failures []error
+	for _, entry := range entries {
+		sandbox, ok := decodeSandboxLink(peer, entry)
+		if !ok {
+			continue
+		}
+		remove := func() error {
+			if dryRun {
+				return nil
+			}
+			if _, err := runOwnerCLI(ctx, peer, "environment", "unlink", sandbox.EnvironmentID); err != nil {
+				return fmt.Errorf("could not unlink %s from T3 on %s", sandbox.Name, peer.Host)
+			}
+			return nil
+		}
+		pruned, err := visit(ctx, sandbox, remove)
+		if pruned {
+			selected = append(selected, sandbox)
+		}
+		if err != nil {
+			failures = append(failures, err)
+		}
+	}
+	return selected, errors.Join(failures...)
+}
