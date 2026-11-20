@@ -4,7 +4,15 @@ import tarfile
 import tempfile
 import unittest
 
-from remote import select_runtime, unpack_runtime
+from remote import machine_info_with_label, select_runtime, unpack_runtime
+
+
+class MachineInfoTest(unittest.TestCase):
+    def test_sandbox_label_replaces_old_pretty_hostname(self):
+        previous = 'PRETTY_HOSTNAME="sandbox-id"\nICON_NAME=computer\n'
+        expected = 'PRETTY_HOSTNAME="ts-1"\nICON_NAME=computer\n'
+        self.assertEqual(machine_info_with_label(previous, "ts-1"), expected)
+        self.assertEqual(machine_info_with_label(expected, "ts-1"), expected)
 
 
 class SelectRuntimeTest(unittest.TestCase):

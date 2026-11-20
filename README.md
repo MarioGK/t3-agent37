@@ -38,6 +38,7 @@ registers with [configured T3 servers](docs/terrascale.md#link-t3-servers)
 without prompts. Run `up <name>` to retry pending links.
 On a workstation running T3 Code, bare `up` also opens the desktop pairing
 request for the new sandbox. Confirm its private address in T3 Code.
+The desktop displays the same sandbox name as `t3-agent37 ls`.
 Use `up --no-desktop` for headless runs.
 
 On another PC, join the same tailnet, run `t3-agent37 setup`, then run

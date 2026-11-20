@@ -272,11 +272,42 @@ def provider_ready(provider):
     ).returncode == 0
 
 
-def setup(provider, peer_links=False):
+def machine_info_with_label(contents, name):
+    lines = [line for line in contents.splitlines()
+             if not line.strip().startswith("PRETTY_HOSTNAME=")]
+    return "\n".join([f'PRETTY_HOSTNAME="{name}"', *lines]) + "\n"
+
+
+def save_environment_label(name):
+    # T3 reads PRETTY_HOSTNAME at startup before it falls back to the machine ID.
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,42}", name):
+        return False
+    path = Path("/etc/machine-info")
+    try:
+        try:
+            previous = path.read_text()
+        except FileNotFoundError:
+            previous = ""
+        desired = machine_info_with_label(previous, name)
+        if desired == previous:
+            return True
+        with tempfile.NamedTemporaryFile(mode="w", dir=ROOT) as staged:
+            staged.write(desired)
+            staged.flush()
+            command = ["/usr/bin/install", "-m", "0644", "--", staged.name, str(path)]
+            if os.geteuid() != 0:
+                command = ["sudo", "-n", *command]
+            return subprocess.run(command, capture_output=True, timeout=5).returncode == 0
+    except (OSError, UnicodeError, subprocess.TimeoutExpired):
+        return False
+
+
+def setup(provider, name, peer_links=False):
     ROOT.mkdir(parents=True, mode=0o700, exist_ok=True)
     with (ROOT / "install.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         install_runtime()
+        label_saved = save_environment_label(name)
         ready = provider_ready(provider)
         if peer_links:
             (ROOT / "peer-proxy").touch()
@@ -289,6 +320,7 @@ def setup(provider, peer_links=False):
             result = descriptor()
             if result is not None:
                 print(json.dumps({"environmentId": result["environmentId"], "version": VERSION,
+                                  "label": result.get("label", ""), "labelSaved": label_saved,
                                   "port": PORT, "providerReady": ready,
                                   "peerProxy": (ROOT / "peer-proxy-active").is_file()}))
                 return
@@ -336,7 +368,7 @@ def manage_tailnet(action, *args):
 if __name__ == "__main__":
     action = sys.argv[1]
     if action == "setup":
-        setup(sys.argv[2], "--peer-links" in sys.argv[3:])
+        setup(sys.argv[2], sys.argv[3], "--peer-links" in sys.argv[4:])
     elif action == "serve":
         serve()
     elif action == "boot":

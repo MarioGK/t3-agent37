@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	_ "embed"
@@ -38,10 +39,13 @@ for filename, body in zip(sys.argv[1::2], sys.argv[2::2]):
 
 type setupProof struct {
 	EnvironmentID string `json:"environmentId"`
+	Label         string `json:"label"`
+	LabelSaved    bool   `json:"labelSaved"`
 	Port          int    `json:"port"`
 	ProviderReady bool   `json:"providerReady"`
 	PeerProxy     bool   `json:"peerProxy"`
 	TailnetURL    string `json:"-"`
+	RequestedName string `json:"-"`
 }
 
 func shellQuote(value string) string {
@@ -57,7 +61,8 @@ func setup(ctx context.Context, client *agent37.Client, instance agent37.Instanc
 	if instance.Metadata["tailnet"] == "tailscale" {
 		command += " tailnet.py " + base64.StdEncoding.EncodeToString(guestTailnet)
 	}
-	command += " && " + remote + " setup " + provider
+	name := cmp.Or(instance.Name, instance.Metadata["environment"])
+	command += " && " + remote + " setup " + provider + " " + shellQuote(name)
 	if len(configured) != 0 {
 		command += " --peer-links"
 	}
@@ -65,6 +70,7 @@ func setup(ctx context.Context, client *agent37.Client, instance agent37.Instanc
 	if err != nil {
 		return proof, err
 	}
+	proof.RequestedName = name
 	if proof.EnvironmentID == "" {
 		return proof, errors.New("sandbox setup did not return a T3 environment ID")
 	}
@@ -163,6 +169,13 @@ func bootstrap(ctx context.Context, client *agent37.Client, enrollment *peers.En
 		proof, err = setup(ctx, client, instance, configured)
 		if err != nil {
 			return proof, err
+		}
+	}
+	if proof.RequestedName != "" && proof.Label != proof.RequestedName {
+		if proof.LabelSaved {
+			fmt.Fprintf(diagnostic, "T3 will show %s after the sandbox restarts.\n", proof.RequestedName)
+		} else {
+			fmt.Fprintf(diagnostic, "The sandbox could not set the T3 display name to %s.\n", proof.RequestedName)
 		}
 	}
 	if instance.Metadata["tailnet"] == "tailscale" {
