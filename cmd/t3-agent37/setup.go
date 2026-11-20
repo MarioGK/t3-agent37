@@ -86,8 +86,9 @@ func editWorkstationSetup(ctx context.Context, config configFile, runtime runtim
 		groups = append(groups, credentialInput("Agent37 API key", "Create a workspace API key at "+agent37Dashboard, &apiKey))
 	}
 	groups = append(groups,
-		sandboxDefaults(values, "Enter a template with Tailscale installed. Add @revision to pin it.\nTo publish the TerraScale template, see "+templateGuide),
-		providerOptions(values),
+		huh.NewGroup(sandboxDefaultFields(values, "Enter a template with Tailscale installed. Add @revision to pin it.\nTo publish the TerraScale template, see "+templateGuide)...).
+			Title("Sandbox defaults"),
+		huh.NewGroup(providerChoice(values)).Title("Workstation setup"),
 		huh.NewGroup(huh.NewNote().Title("Private Tailscale access").
 			Description("In Trust credentials, edit your OAuth client or choose Credential → OAuth.\n"+
 				"Set Auth Keys to Write and select the tags this sandbox will use.\n"+
@@ -118,7 +119,7 @@ func editWorkstationSetup(ctx context.Context, config configFile, runtime runtim
 			Negative("Cancel").
 			Value(&save)),
 	)
-	form := huh.NewForm(groups...).WithInput(os.Stdin).WithOutput(diagnostic)
+	form := terminalForm(diagnostic, groups...)
 	err := form.RunWithContext(ctx)
 	if errors.Is(err, huh.ErrUserAborted) || (err == nil && !save) {
 		fmt.Fprintln(diagnostic, "Setup canceled.")

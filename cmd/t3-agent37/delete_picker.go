@@ -6,20 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"slices"
 	"strings"
 	"unicode"
 
 	"charm.land/huh/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/MarioGK/t3-agent37/internal/agent37"
-	"github.com/charmbracelet/x/term"
 )
-
-func terminalAvailable(output io.Writer) bool {
-	file, ok := output.(*os.File)
-	return ok && term.IsTerminal(os.Stdin.Fd()) && term.IsTerminal(file.Fd())
-}
 
 func pickSandboxToDelete(ctx context.Context, instances []agent37.Instance, preview bool, output io.Writer) (agent37.Instance, error) {
 	var candidates []agent37.Instance
@@ -45,28 +39,34 @@ func pickSandboxToDelete(ctx context.Context, instances []agent37.Instance, prev
 			}
 			return r
 		}, instance.Status)
-		choices = append(choices, huh.NewOption(fmt.Sprintf("%s  [%s]  %s", instance.Metadata["environment"], status, instance.ID), index))
+		choices = append(choices, huh.NewOption(fmt.Sprintf("%s  ·  %s  ·  %s", instance.Metadata["environment"], cmp.Or(status, "unknown"), instance.ID), index))
 	}
 	var selected int
 	picker := huh.NewSelect[int]().
-		Title("Select a sandbox").
+		Title("Sandbox · status · ID").
 		Options(choices...).
 		Value(&selected).
-		Height(12)
-	groups := []*huh.Group{huh.NewGroup(picker)}
+		Height(min(10, len(choices)+1))
+	title := "Delete a sandbox"
+	if preview {
+		title = "Preview sandbox deletion"
+	}
+	groups := []*huh.Group{huh.NewGroup(picker).Title(title).Description("Press / to filter by name, status, or ID.")}
 	confirmed := false
 	if !preview {
 		confirmation := huh.NewConfirm().
 			TitleFunc(func() string {
 				target := candidates[selected]
-				return fmt.Sprintf("Permanently delete %s (%s) and its disk?", target.Metadata["environment"], target.ID)
+				return fmt.Sprintf("Delete %s (%s)?", target.Metadata["environment"], target.ID)
 			}, &selected).
-			Affirmative("Delete").
+			Description("The sandbox and its disk will be permanently deleted.").
+			WithButtonAlignment(lipgloss.Left).
+			Affirmative("Delete sandbox").
 			Negative("Cancel").
 			Value(&confirmed)
-		groups = append(groups, huh.NewGroup(confirmation))
+		groups = append(groups, huh.NewGroup(confirmation.WithTheme(terminalTheme(true))).Title("Confirm deletion"))
 	}
-	err := huh.NewForm(groups...).WithInput(os.Stdin).WithOutput(output).RunWithContext(ctx)
+	err := terminalForm(output, groups...).RunWithContext(ctx)
 	if errors.Is(err, huh.ErrUserAborted) || (err == nil && !preview && !confirmed) {
 		fmt.Fprintln(output, "Deletion canceled.")
 		return agent37.Instance{}, nil

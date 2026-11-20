@@ -54,8 +54,8 @@ pairing request in T3 Code. Use `link <name>` for one sandbox or
 `down` permanently deletes the newest managed sandbox and its disk.
 `down --dry-run` shows which sandbox it would delete.
 `down <name>` stops a specific sandbox and keeps its disk.
-`delete` opens a terminal picker. Use the arrow keys to select a sandbox and
-confirm before deleting its disk. For scripts, use `delete <name>`. Add
+`delete` (or `del`) opens a terminal picker. Press `/` to filter the list, then
+select a sandbox and confirm deletion. For scripts, use `delete <name>`. Add
 `--dry-run` to preview.
 `down` and `delete` unlink the sandbox from configured T3 servers.
 `sync` clears stale links to stopped or deleted sandboxes. Use `sync --dry-run`

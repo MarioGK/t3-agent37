@@ -30,6 +30,7 @@ var commands = []cliCommand{
 	{name: "down", action: "stop", summary: "Delete the newest sandbox or stop one by name", sandbox: true},
 	{name: "stop", summary: "Stop a sandbox and keep its disk", sandbox: true},
 	{name: "delete", summary: "Permanently delete a sandbox", sandbox: true},
+	{name: "del", action: "delete", summary: "Permanently delete a sandbox", sandbox: true},
 	{name: "list", summary: "List managed sandboxes"},
 	{name: "ls", action: "list", summary: "List managed sandboxes"},
 	{name: "sync", summary: "Remove stale T3 links"},

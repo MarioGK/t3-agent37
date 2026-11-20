@@ -100,6 +100,19 @@ func TestBareDeleteUsesPickerInATerminal(t *testing.T) {
 	}
 }
 
+func TestDelAlias(t *testing.T) {
+	for _, tail := range [][]string{nil, {"--dry-run"}, {"ts-1"}, {"ts-1", "--dry-run"}} {
+		want, err := parse(append([]string{"delete"}, tail...), io.Discard)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := parse(append([]string{"del"}, tail...), io.Discard)
+		if err != nil || got != want {
+			t.Fatalf("del %v = %+v, %v, want %+v", tail, got, err, want)
+		}
+	}
+}
+
 func TestLatestManagedRefusesAmbiguousCreationTime(t *testing.T) {
 	instance := agent37.Instance{
 		ID: "aaaaaaaaaa", Created: 100, Status: "stopped",

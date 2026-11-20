@@ -28,6 +28,7 @@ func TestCompleteCommandsAndFlags(t *testing.T) {
 		{args: []string{"up", "ts-1", "--"}, present: "--help", absent: "--provider"},
 		{args: []string{"up", "--provider", ""}, present: "cliproxy"},
 		{args: []string{"connect", "ts-1", "--"}, present: "--pair"},
+		{args: []string{"del", "--"}, present: "--dry-run"},
 		{args: []string{"sync", "--"}, present: "--dry-run", absent: "--no-desktop"},
 		{args: []string{"completion", ""}, present: "fish"},
 	} {
@@ -66,6 +67,7 @@ func TestCompleteSandboxNamesAndTemplateRevisions(t *testing.T) {
 	})
 	for _, tc := range []struct{ args, want []string }{
 		{args: []string{"delete", "agent-"}, want: []string{"agent-1", "agent-2"}},
+		{args: []string{"del", "agent-"}, want: []string{"agent-1", "agent-2"}},
 		{args: []string{"create", "agent-"}, want: []string{"agent-3"}},
 		{args: []string{"up", "--no-desktop", ""}},
 		{args: []string{"down", "agent-1", ""}},

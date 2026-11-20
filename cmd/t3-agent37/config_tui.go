@@ -5,10 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 
 	"charm.land/huh/v2"
+	"charm.land/lipgloss/v2"
 )
 
 func editConfig(ctx context.Context, output io.Writer) error {
@@ -21,17 +21,17 @@ func editConfig(ctx context.Context, output io.Writer) error {
 	}
 	values := &file.values
 	var save bool
-	form := huh.NewForm(
-		sandboxDefaults(values, "Use a template with Tailscale installed. Add @revision to pin it."),
-		providerOptions(values),
-		huh.NewGroup(
-			huh.NewConfirm().
-				Title("Save sandbox defaults?").
-				Affirmative("Save").
-				Negative("Cancel").
-				Value(&save),
-		),
-	).WithInput(os.Stdin).WithOutput(output)
+	fields := sandboxDefaultFields(values, "Tailscale ready. @revision pins it.")
+	fields = append(fields,
+		providerChoice(values).Inline(true),
+		huh.NewConfirm().
+			Title("Save these defaults?").
+			WithButtonAlignment(lipgloss.Left).
+			Affirmative("Save").
+			Negative("Cancel").
+			Value(&save),
+	)
+	form := terminalForm(output, huh.NewGroup(fields...).Title("Sandbox defaults"))
 	err = form.RunWithContext(ctx)
 	if errors.Is(err, huh.ErrUserAborted) || (err == nil && !save) {
 		fmt.Fprintln(output, "Config changes canceled.")
@@ -49,32 +49,30 @@ func editConfig(ctx context.Context, output io.Writer) error {
 	return nil
 }
 
-func sandboxDefaults(values *workstationConfig, templateHint string) *huh.Group {
-	return huh.NewGroup(
+func sandboxDefaultFields(values *workstationConfig, templateHint string) []huh.Field {
+	return []huh.Field{
 		huh.NewInput().
 			Title("Name prefix").
-			Description("Used for numbered names such as agent-1.").
+			Description("Used for numbered sandbox names.").
 			Value(&values.NamePrefix).
 			Validate(validateNamePrefix),
 		huh.NewInput().
 			Title("Agent37 template").
 			Description(templateHint).
-			Placeholder("terrascale-agent37@3").
+			Placeholder("terrascale-agent37").
 			Value(&values.Template),
-	)
+	}
 }
 
-func providerOptions(values *workstationConfig) *huh.Group {
-	return huh.NewGroup(
-		huh.NewSelect[string]().
-			Title("Model provider").
-			Options(
-				huh.NewOption("Automatic", ""),
-				huh.NewOption("Agent37 OpenCode", "opencode"),
-				huh.NewOption("CLIProxy", "cliproxy"),
-				huh.NewOption("Codex", "codex"),
-				huh.NewOption("Claude Code", "claude"),
-			).
-			Value(&values.Provider),
-	)
+func providerChoice(values *workstationConfig) *huh.Select[string] {
+	return huh.NewSelect[string]().
+		Title("Model provider").
+		Options(
+			huh.NewOption("Automatic", ""),
+			huh.NewOption("Agent37 OpenCode", "opencode"),
+			huh.NewOption("CLIProxy", "cliproxy"),
+			huh.NewOption("Codex", "codex"),
+			huh.NewOption("Claude Code", "claude"),
+		).
+		Value(&values.Provider)
 }

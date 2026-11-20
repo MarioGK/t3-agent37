@@ -84,7 +84,7 @@ func parse(args []string, output io.Writer) (options, error) {
 			return
 		}
 		if opts.action == "delete" {
-			fmt.Fprintln(output, "Usage: t3-agent37 delete [name] [flags]")
+			fmt.Fprintf(output, "Usage: t3-agent37 %s [name] [flags]\n", args[0])
 			fmt.Fprintln(output, "Choose a sandbox to delete or pass its name.")
 		} else {
 			fmt.Fprintf(output, "Usage: t3-agent37 %s [name] [flags]\n", args[0])
@@ -496,6 +496,11 @@ func operate(ctx context.Context, client *agent37.Client, enrollment *peers.Enro
 			instance.Status = "deleted"
 		}
 		if tailnet {
+			if opts.deleteSandbox {
+				if _, err := desktopLauncher(ctx); err == nil {
+					fmt.Fprintf(diagnostic, "Saved desktop connections for %s can be removed in T3 Code → Settings → Connections.\n", opts.name)
+				}
+			}
 			if err := unlinkSandbox(ctx, opts.name, instance.ID, diagnostic); err != nil {
 				err = fmt.Errorf("T3 cleanup pending for %s. Run t3-agent37 sync: %w", opts.name, err)
 				return errors.Join(jsonOutput(output, summary(instance), false), err)
