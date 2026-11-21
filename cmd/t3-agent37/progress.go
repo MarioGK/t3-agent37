@@ -19,8 +19,9 @@ var progressFrames = []rune("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
 // launchProgress shares stderr with ordinary notices and serializes writes
 // from provisioning workers. The bar tracks actual Agent37 and Tailscale milestones.
 type launchProgress struct {
-	output io.Writer
-	total  int
+	output   io.Writer
+	total    int
+	deleting bool
 
 	mu             sync.Mutex
 	active         bool
@@ -33,7 +34,11 @@ type launchProgress struct {
 }
 
 func startLaunchProgress(output io.Writer, total int, phase string) *launchProgress {
-	p := &launchProgress{output: output, total: total, phase: phase}
+	return startSandboxProgress(output, total, phase, false)
+}
+
+func startSandboxProgress(output io.Writer, total int, phase string, deleting bool) *launchProgress {
+	p := &launchProgress{output: output, total: total, phase: phase, deleting: deleting}
 	if _, terminal := ttyOutput(output); !terminal || os.Getenv("TERM") == "dumb" {
 		return p
 	}
@@ -124,6 +129,9 @@ func (p *launchProgress) line(width int) string {
 		width = 80
 	}
 	status := fmt.Sprintf("%d/%d ready", p.ready, p.total)
+	if p.deleting {
+		status = fmt.Sprintf("%d/%d deleted", p.created, p.total)
+	}
 	if p.failed > 0 {
 		status += fmt.Sprintf(" · %d failed", p.failed)
 	}

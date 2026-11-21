@@ -15,9 +15,13 @@ import (
 )
 
 func unlinkSandbox(ctx context.Context, client *agent37.Client, name, id string, diagnostic io.Writer) error {
+	return unlinkSandboxes(ctx, client, map[string]string{id: name}, diagnostic)
+}
+
+func unlinkSandboxes(ctx context.Context, client *agent37.Client, targets map[string]string, diagnostic io.Writer) error {
 	configured, configErr := peers.Configured()
 	visit := func(_ context.Context, link peers.SandboxLink, remove func() error) (bool, error) {
-		if link.Name != name || link.SandboxID != id {
+		if targets[link.SandboxID] != link.Name {
 			return false, nil
 		}
 		err := remove()
@@ -25,10 +29,11 @@ func unlinkSandbox(ctx context.Context, client *agent37.Client, name, id string,
 	}
 	fleetRemoved, fleetErr := peers.PruneSandboxLinks(ctx, configured, false, visit)
 	instances, inventoryErr := client.List(ctx)
-	nodes, discoverErr := discoverCloudNodes(ctx, client, instances, id, false, true)
+	instances = slices.DeleteFunc(instances, func(instance agent37.Instance) bool { return targets[instance.ID] != "" })
+	nodes, discoverErr := discoverCloudNodes(ctx, client, instances, "", false, true)
 	cloudRemoved, cloudErr := peers.PruneMeshSandboxLinks(ctx, nodes, false, visit)
 	for _, link := range append(fleetRemoved, cloudRemoved...) {
-		notice(diagnostic, success, "Removed %s from T3 on %s.", name, link.Peer)
+		notice(diagnostic, success, "Removed %s from T3 on %s.", link.Name, link.Peer)
 	}
 	return errors.Join(configErr, fleetErr, inventoryErr, discoverErr, cloudErr)
 }

@@ -85,6 +85,9 @@ Use `down --dry-run` to preview the target.
 `delete` (or `del`) opens a terminal picker. Press `/` to filter the list, then
 select a sandbox and confirm deletion. For scripts, use `delete <name>`. Add
 `--dry-run` to preview.
+Use `delete --all --dry-run` to preview every managed sandbox, then
+`delete --all` to permanently delete them with a progress bar. The command
+reports each result and retries pending cleanup by sandbox ID.
 `down` and `delete` unlink the sandbox from reachable environments. If a
 peer is offline, deletion succeeds and reports pending cleanup. Use
 `delete <name>` to select a different sandbox while bare `down` is retrying.

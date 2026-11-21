@@ -342,22 +342,37 @@ func readDownTarget(ctx context.Context, client *agent37.Client, receipt downRec
 	return instance, nil
 }
 
-func completeRecordedDown(ctx context.Context, client *agent37.Client, receipt downReceipt, original []byte, path, state string, output, diagnostic io.Writer) error {
-	title := "Sandbox already deleted"
+type recordedTarget struct {
+	receipt        downReceipt
+	original       []byte
+	path           string
+	alreadyDeleted bool
+}
+
+func (target *recordedTarget) save(ctx context.Context) error {
+	if err := saveConfigJSON(ctx, target.path, target.original, target.receipt); err != nil {
+		return err
+	}
+	data, err := os.ReadFile(target.path)
+	if err == nil {
+		target.original = data
+	}
+	return err
+}
+
+func (target *recordedTarget) deleteCloud(ctx context.Context, client *agent37.Client, state string) error {
+	receipt := &target.receipt
+	target.alreadyDeleted = true
 	if receipt.Status != "deleted" {
-		instance, err := readDownTarget(ctx, client, receipt)
+		instance, err := readDownTarget(ctx, client, *receipt)
 		if err != nil {
 			return err
 		}
 		if instance.Status != "deleted" {
 			receipt.CleanupPending = receipt.CleanupPending || instance.Metadata["tailnet"] == "tailscale"
 			receipt.TailnetPending = receipt.TailnetPending || instance.Metadata["tailnet"] == "tailscale" && instance.Status != "stopped"
-			if err := saveConfigJSON(ctx, path, original, receipt); err != nil {
+			if err := target.save(ctx); err != nil {
 				return fmt.Errorf("record the deletion target: %w", err)
-			}
-			original, err = os.ReadFile(path)
-			if err != nil {
-				return err
 			}
 			// The verified live sandbox has resolved any ambiguous create.
 			if err := os.Remove(sandboxStatePath(state, receipt.Name, ".pending")); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -367,47 +382,55 @@ func completeRecordedDown(ctx context.Context, client *agent37.Client, receipt d
 			if err != nil {
 				return err
 			}
-			title = "Sandbox deleted"
-			if receipt.CleanupPending {
-				showDesktopCleanup(ctx, receipt.Name, diagnostic)
-			}
+			target.alreadyDeleted = false
 		}
 		receipt.Status = "deleted"
-		if err := recordDeletedSandbox(ctx, state, receipt); err != nil {
+		if err := recordDeletedSandbox(ctx, state, *receipt); err != nil {
 			return err
 		}
-		if err := saveConfigJSON(ctx, path, original, receipt); err != nil {
-			return err
-		}
-		original, err = os.ReadFile(path)
-		if err != nil {
-			return err
-		}
+		return target.save(ctx)
 	}
-	if err := recordDeletedSandbox(ctx, state, receipt); err != nil {
+	return recordDeletedSandbox(ctx, state, *receipt)
+}
+
+func (receipt *downReceipt) cleanTailnet(ctx context.Context, diagnostic io.Writer) {
+	if !receipt.TailnetPending {
+		return
+	}
+	if err := removeDeletedTailnetDevice(ctx, *receipt); err != nil {
+		notice(diagnostic, warning, "Tailscale cleanup pending for %s. Retry deletion to check its ephemeral device. %v", receipt.Name, err)
+		return
+	}
+	receipt.TailnetPending = false
+}
+
+func completeRecordedDown(ctx context.Context, client *agent37.Client, receipt downReceipt, original []byte, path, state string, output, diagnostic io.Writer) error {
+	target := recordedTarget{receipt: receipt, original: original, path: path}
+	if err := target.deleteCloud(ctx, client, state); err != nil {
 		return err
 	}
-	if receipt.complete() {
-		return showLifecycleResult(output, title, receipt.instance(), "")
-	}
-	if receipt.TailnetPending {
-		if err := removeDeletedTailnetDevice(ctx, receipt); err != nil {
-			notice(diagnostic, warning, "Tailscale cleanup pending for %s. Retry deletion to check its ephemeral device. %v", receipt.Name, err)
-		} else {
-			receipt.TailnetPending = false
+	title := "Sandbox already deleted"
+	if !target.alreadyDeleted {
+		title = "Sandbox deleted"
+		if target.receipt.CleanupPending {
+			showDesktopCleanup(ctx, target.receipt.Name, diagnostic)
 		}
 	}
-	if receipt.CleanupPending {
-		receipt.CleanupPending = !cleanupSandboxLinks(ctx, client, receipt.Name, receipt.ID, diagnostic)
+	if target.receipt.complete() {
+		return showLifecycleResult(output, title, target.receipt.instance(), "")
+	}
+	target.receipt.cleanTailnet(ctx, diagnostic)
+	if target.receipt.CleanupPending {
+		target.receipt.CleanupPending = !cleanupSandboxLinks(ctx, client, target.receipt.Name, target.receipt.ID, diagnostic)
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := showDeletionResult(output, title, receipt); err != nil {
+	if err := showDeletionResult(output, title, target.receipt); err != nil {
 		return err
 	}
-	receipt.ResultPending = false
-	return saveConfigJSON(ctx, path, original, receipt)
+	target.receipt.ResultPending = false
+	return target.save(ctx)
 }
 
 func removeDeletedTailnetDevice(ctx context.Context, receipt downReceipt) error {

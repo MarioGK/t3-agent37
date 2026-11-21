@@ -70,7 +70,9 @@ func printCommandHelpAtWidth(output io.Writer, command cliCommand, flags *flag.F
 	switch command.name {
 	case "up":
 		usage = "up [count|name]"
-	case "create", "down", "delete", "del", "link":
+	case "delete", "del":
+		usage = command.name + " [name|--all]"
+	case "create", "down", "link":
 		usage = command.name + " [name]"
 	}
 	switch command.name {
@@ -83,7 +85,7 @@ func printCommandHelpAtWidth(output io.Writer, command cliCommand, flags *flag.F
 	case "down":
 		description = "Delete the newest managed sandbox and its disk. Retries keep the saved target while cleanup is pending. Pass a name to stop that sandbox and keep its disk."
 	case "delete", "del":
-		description = "Permanently delete a sandbox and its disk. Omit the name to open the picker."
+		description = "Permanently delete a sandbox and its disk. Use --all for every managed sandbox, or omit the name to open the picker."
 	}
 	flagHelp := strings.TrimRight(flags.FlagUsagesWrapped(max(0, width)), "\n")
 	if flagHelp != "" {

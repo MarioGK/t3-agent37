@@ -43,6 +43,7 @@ type options struct {
 	showSize                         bool
 	yes, dryRun, pair, tailscale     bool
 	deleteSandbox                    bool
+	deleteAll                        bool
 	checkSetup                       bool
 	verifySetup                      bool
 	repairSetup                      bool
@@ -133,6 +134,12 @@ func parse(args []string, output io.Writer) (options, error) {
 		return opts, nil
 	}
 	if opts.action == "link" && flags.NArg() == 0 {
+		return opts, nil
+	}
+	if opts.deleteAll {
+		if flags.NArg() != 0 {
+			return opts, errors.New("delete --all does not take a sandbox name")
+		}
 		return opts, nil
 	}
 	if opts.action == "stop" && opts.yes != opts.deleteSandbox {
@@ -257,6 +264,9 @@ func addCommandFlags(flags *flag.FlagSet, opts *options) {
 	}
 	if opts.action == "stop" || opts.action == "delete" {
 		flags.BoolVar(&opts.dryRun, "dry-run", false, "Show which sandbox would be stopped or deleted")
+	}
+	if opts.action == "delete" {
+		flags.BoolVar(&opts.deleteAll, "all", false, "Permanently delete all managed sandboxes and their disks")
 	}
 }
 
@@ -684,6 +694,9 @@ func run(ctx context.Context, args []string, output, diagnostic io.Writer) error
 	}
 	if opts.action == "link" {
 		return linkSandboxes(ctx, client, opts, output, diagnostic)
+	}
+	if opts.deleteAll {
+		return runDeleteAll(ctx, client, opts.dryRun, output, diagnostic)
 	}
 	if opts.deleteSandbox && !opts.pickDelete {
 		return runRecordedDown(ctx, client, opts, output, diagnostic)

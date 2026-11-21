@@ -158,6 +158,9 @@ func completeSandboxNames(command *cobra.Command, args []string, prefix string) 
 	if len(args) > 0 {
 		return nil, directive
 	}
+	if flag := command.Flags().Lookup("all"); flag != nil && flag.Value.String() == "true" {
+		return nil, directive
+	}
 	var names []string
 	if command.Name() == "up" {
 		for _, count := range []string{"2", "5", "10"} {

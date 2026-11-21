@@ -48,3 +48,13 @@ func TestLaunchProgressSerializesRedirectedLogsWithoutControlCodes(t *testing.T)
 		t.Fatalf("unexpected redirected output: %q", output.String())
 	}
 }
+
+func TestDeleteProgressCountsConfirmedCloudDeletes(t *testing.T) {
+	p := startSandboxProgress(&bytes.Buffer{}, 3, "Cleaning up T3 links", true)
+	p.allocated()
+	p.allocated()
+	p.provisioned(false)
+	if line := ansi.Strip(p.line(80)); !strings.Contains(line, "2/3 deleted · 1 failed · Cleaning up T3 links") {
+		t.Fatalf("bulk deletion progress: %q", line)
+	}
+}
