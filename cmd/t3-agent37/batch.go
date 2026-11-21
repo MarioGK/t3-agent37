@@ -78,41 +78,35 @@ func runBatch(ctx context.Context, client *agent37.Client, enrollment *peers.Enr
 	if err != nil {
 		return err
 	}
-	results := make([]batchSandbox, len(reserved))
 	parallel := min(batchParallelism, len(reserved))
 	notice(diagnostic, info, "Provisioning %d Agent37 sandboxes, up to %d at a time…", len(reserved), parallel)
 	progress := startLaunchProgress(diagnostic, len(reserved), "Creating and setting up sandboxes")
 	defer progress.close()
 	diagnostic = progress
-	var workers sync.WaitGroup
-	for worker := range parallel {
-		workers.Go(func() {
-			for i := worker; i < len(reserved); i += parallel {
-				results[i] = provisionBatchSandbox(ctx, client, enrollment, opts, state, reserved[i], progress)
-				progress.provisioned(results[i].err == nil)
-				if results[i].err == nil {
-					notice(diagnostic, success, "%s is ready on Tailscale.", results[i].name)
-				}
-			}
-		})
-	}
-	workers.Wait()
-
 	var ready int
-	var failures []error
-	for i := range results {
-		item := &results[i]
+	results := provisionAndPairBatch(len(reserved), parallel, func(i int) batchSandbox {
+		item := provisionBatchSandbox(ctx, client, enrollment, opts, state, reserved[i], progress)
+		progress.provisioned(item.err == nil)
 		if item.err == nil {
-			ready++
-			if launcher != nil && ctx.Err() == nil {
-				progress.setPhase("Waiting for T3 Code · " + item.name)
-				if proof, err := pairSandbox(ctx, client, item.instance, item.proof, state, item.name, launcher, diagnostic, nil); err != nil {
-					item.err = fmt.Errorf("run t3-agent37 link %s to finish pairing: %w", item.name, err)
-				} else {
-					item.proof = proof
-				}
-			}
+			notice(diagnostic, success, "%s is ready on Tailscale.", item.name)
 		}
+		return item
+	}, func(item *batchSandbox) {
+		ready++
+		if launcher == nil || ctx.Err() != nil {
+			return
+		}
+		progress.setPhase("Waiting for T3 Code · " + item.name)
+		proof, err := pairSandbox(ctx, client, item.instance, item.proof, state, item.name, launcher, diagnostic, nil)
+		if err != nil {
+			item.err = fmt.Errorf("run t3-agent37 link %s to finish pairing: %w", item.name, err)
+		} else {
+			item.proof = proof
+		}
+		progress.setPhase("Creating and setting up sandboxes")
+	})
+	var failures []error
+	for _, item := range results {
 		if item.err != nil {
 			failures = append(failures, fmt.Errorf("%s: %w", item.name, item.err))
 		}
@@ -129,6 +123,41 @@ func runBatch(ctx context.Context, client *agent37.Client, enrollment *peers.Enr
 	}
 	progress.close()
 	return errors.Join(errors.Join(failures...), ctx.Err(), showBatchResult(output, results, opts.noDesktop, meshPending))
+}
+
+func provisionAndPairBatch(count, parallel int, provision func(int) batchSandbox, pair func(*batchSandbox)) []batchSandbox {
+	type completedSandbox struct {
+		index int
+		item  batchSandbox
+	}
+	jobs := make(chan int, count)
+	for i := range count {
+		jobs <- i
+	}
+	close(jobs)
+	// A desktop approval may block the consumer. Provisioning workers can
+	// publish their results and take the next job while the user approves.
+	completed := make(chan completedSandbox, count)
+	var workers sync.WaitGroup
+	for range parallel {
+		workers.Go(func() {
+			for i := range jobs {
+				completed <- completedSandbox{index: i, item: provision(i)}
+			}
+		})
+	}
+	go func() {
+		workers.Wait()
+		close(completed)
+	}()
+	results := make([]batchSandbox, count)
+	for result := range completed {
+		if result.item.err == nil {
+			pair(&result.item)
+		}
+		results[result.index] = result.item
+	}
+	return results
 }
 
 func provisionBatchSandbox(ctx context.Context, client *agent37.Client, enrollment *peers.Enrollment, opts options, state string, entry sandboxReservation, progress *launchProgress) (item batchSandbox) {

@@ -63,8 +63,9 @@ turn, or `up --no-desktop` for unattended provisioning.
 
 `up <count>` creates 1 to 100 new sandboxes with up to ten provisioning
 at once. The batch keeps successful sandboxes if others fail. Use `link <name>`
-to retry a pending desktop pairing. Desktop approvals are sequential and a
-single sync runs after the pairing attempts. Use `up <count> --no-desktop`
+to retry a pending desktop pairing. The CLI starts approvals as sandboxes
+become ready. T3 Code shows one approval at a time while other sandboxes keep
+provisioning. One sync runs after the pairing attempts. Use `up <count> --no-desktop`
 for headless provisioning. An existing numeric sandbox name can be started
 with `start <name>`.
 

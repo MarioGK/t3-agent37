@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/MarioGK/t3-agent37/internal/agent37"
@@ -161,4 +162,30 @@ func TestBatchStartsTenCreatesInParallelAndReportsPartialResults(t *testing.T) {
 			t.Fatalf("conclusive create outcome left a pending marker for %s: %v", name, err)
 		}
 	}
+}
+
+func TestBatchPairsReadySandboxesWhileProvisioningContinues(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		start := time.Now()
+		var order []string
+		results := provisionAndPairBatch(3, 2, func(i int) batchSandbox {
+			time.Sleep([]time.Duration{3 * time.Second, time.Second, 500 * time.Millisecond}[i])
+			return batchSandbox{name: fmt.Sprintf("ts-%d", i+1)}
+		}, func(item *batchSandbox) {
+			order = append(order, item.name)
+			if len(order) == 1 && time.Since(start) != time.Second {
+				t.Errorf("first pairing waited %v for provisioning", time.Since(start))
+			}
+			time.Sleep(2 * time.Second)
+			item.proof.DesktopConfirmed = true
+		})
+		if !slices.Equal(order, []string{"ts-2", "ts-3", "ts-1"}) || time.Since(start) != 7*time.Second {
+			t.Fatalf("pairing order %v after %v", order, time.Since(start))
+		}
+		for i, item := range results {
+			if item.name != fmt.Sprintf("ts-%d", i+1) || !item.proof.DesktopConfirmed {
+				t.Fatalf("lost input order or approval for result %d: %+v", i, item)
+			}
+		}
+	})
 }

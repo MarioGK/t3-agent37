@@ -50,7 +50,9 @@ pairing that still needs attention.
 The desktop displays the same sandbox name as `t3-agent37 ls`.
 Use `up --no-desktop` for headless runs.
 `up 10` creates ten new sandboxes in parallel using the next free names.
-Confirm each desktop pairing in order. The CLI then syncs the mesh once.
+T3 Code prompts for each sandbox as it becomes ready while the others keep
+provisioning. The CLI checks for confirmation with a 100 ms delay, waits
+longer if Agent37 rate-limits the checks, and syncs the mesh once at the end.
 `up 10 --dry-run` previews the batch. `up 10 --no-desktop` runs it headless.
 Use `up <name>` to start an existing sandbox.
 The terminal progress bar tracks sandbox readiness, T3 Code confirmation,

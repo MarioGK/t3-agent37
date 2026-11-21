@@ -11,6 +11,8 @@ import (
 	"testing"
 	"testing/synctest"
 	"time"
+
+	"github.com/MarioGK/t3-agent37/internal/agent37"
 )
 
 func TestDesktopPairingURLPreservesPrivateOriginAndFragment(t *testing.T) {
@@ -32,16 +34,29 @@ func TestWaitForDesktopRequiresConfirmation(t *testing.T) {
 			return "first", nil
 		}
 		var lastHealthy time.Time
+		var lastFailure time.Time
 		err := waitForDesktop(t.Context(), open, func(context.Context, string, string) (desktopPairingStatus, error) {
 			attempts++
+			if attempts == 1 {
+				lastFailure = time.Now()
+				return desktopPairingStatus{}, &agent37.Error{Status: http.StatusTooManyRequests}
+			}
 			if attempts <= 4 {
+				want := 100 * time.Millisecond
+				if attempts == 2 {
+					want = time.Second
+				}
+				if time.Since(lastFailure) != want {
+					t.Errorf("failed-probe delay was %v, want %v", time.Since(lastFailure), want)
+				}
+				lastFailure = time.Now()
 				return desktopPairingStatus{}, errors.New("temporary probe failure")
 			}
 			if attempts == 5 {
 				lastHealthy = time.Now()
 				return desktopPairingStatus{}, nil
 			}
-			if time.Since(lastHealthy) != 500*time.Millisecond {
+			if time.Since(lastHealthy) != 100*time.Millisecond {
 				t.Errorf("steady polling interval was %v", time.Since(lastHealthy))
 			}
 			return desktopPairingStatus{Confirmed: true}, nil

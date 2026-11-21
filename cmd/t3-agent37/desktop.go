@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -22,7 +23,7 @@ import (
 const desktopConfirmationKey = "desktop_confirmation"
 
 const (
-	desktopPollInterval   = 500 * time.Millisecond
+	desktopPollInterval   = 100 * time.Millisecond
 	desktopConnectGrace   = 10 * time.Second
 	maxDesktopProbeOutage = 30 * time.Second
 )
@@ -136,8 +137,8 @@ func waitForDesktop(ctx context.Context, open func(context.Context) (string, err
 	}
 	var previous string
 	var redeemedAt, outageSince time.Time
-	delay := desktopPollInterval
 	for ctx.Err() == nil {
+		delay := desktopPollInterval
 		state, err := check(ctx, label, previous)
 		if ctx.Err() != nil {
 			break
@@ -150,14 +151,15 @@ func waitForDesktop(ctx context.Context, open func(context.Context) (string, err
 			if time.Since(outageSince) >= maxDesktopProbeOutage {
 				return fmt.Errorf("could not check T3 desktop pairing after retrying: %w", err)
 			}
-			delay = min(delay*2, 4*time.Second)
+			if apiError, ok := errors.AsType[*agent37.Error](err); ok && apiError.Status == http.StatusTooManyRequests {
+				delay = time.Second
+			}
 		case state.Changed:
 			return errors.New("T3 environment changed during desktop pairing")
 		case state.Confirmed:
 			return nil
 		default:
 			outageSince = time.Time{}
-			delay = desktopPollInterval
 			if state.Redeemed && redeemedAt.IsZero() {
 				redeemedAt = time.Now()
 			}
