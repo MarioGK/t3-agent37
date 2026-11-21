@@ -41,6 +41,13 @@ func unlinkSandboxes(ctx context.Context, client *agent37.Client, targets map[st
 
 func syncSandboxLinks(ctx context.Context, client *agent37.Client, dryRun bool, output, diagnostic io.Writer) error {
 	configured, configErr := peers.Configured()
+	return errors.Join(configErr, syncSandboxLinksWithDiscovery(ctx, client, configured, dryRun, output, diagnostic,
+		func(ctx context.Context, instances []agent37.Instance) ([]peers.MeshNode, error) {
+			return discoverCloudNodes(ctx, client, instances, "", true, true)
+		}))
+}
+
+func syncSandboxLinksWithDiscovery(ctx context.Context, client *agent37.Client, configured []peers.Peer, dryRun bool, output, diagnostic io.Writer, discover func(context.Context, []agent37.Instance) ([]peers.MeshNode, error)) error {
 	state, err := statePath()
 	if err != nil {
 		return err
@@ -81,7 +88,7 @@ func syncSandboxLinks(ctx context.Context, client *agent37.Client, dryRun bool, 
 	if !dryRun {
 		var instances []agent37.Instance
 		instances, inventoryErr = client.List(ctx)
-		nodes, discoveryErr = discoverCloudNodes(ctx, client, instances, "", true, true)
+		nodes, discoveryErr = discover(ctx, instances)
 		cloudRemoved, cloudErr = peers.PruneMeshSandboxLinks(ctx, nodes, false, visit)
 	}
 	cleanup.Wait()
@@ -93,7 +100,7 @@ func syncSandboxLinks(ctx context.Context, client *agent37.Client, dryRun bool, 
 		meshErr = err
 	}
 	removed := append(fleetRemoved, cloudRemoved...)
-	syncErr := errors.Join(configErr, inventoryErr, discoveryErr, fleetErr, cloudErr, meshErr, ctx.Err())
+	syncErr := errors.Join(inventoryErr, discoveryErr, fleetErr, cloudErr, meshErr, ctx.Err())
 	if _, terminal := ttyOutput(output); terminal {
 		return errors.Join(printSyncResult(output, removed, dryRun, syncErr != nil), syncErr)
 	}

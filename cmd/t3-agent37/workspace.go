@@ -203,7 +203,7 @@ func (playbook *workspacePlaybook) clone(ctx context.Context, client *agent37.Cl
 	started := time.Now()
 	progress, _ := diagnostic.(*launchProgress)
 	if progress != nil && progress.total == 1 {
-		progress.setPhase("Cloning workspace repositories")
+		progress.setPhase("Updating workspace checkouts")
 	}
 	baseCommand := "python3 -B -c " + shellQuote(guestWorkspace) + " " + shellQuote(playbook.Path)
 	if playbook.RootRepo != "" {
@@ -221,7 +221,7 @@ func (playbook *workspacePlaybook) clone(ctx context.Context, client *agent37.Cl
 			return err
 		}
 	}
-	notice(diagnostic, info, "%s Cloning %d workspace repositories", name, len(playbook.Repositories))
+	notice(diagnostic, info, "%s Checking %d workspace repositories for updates", name, len(playbook.Repositories))
 	var clones errgroup.Group
 	clones.SetLimit(workspaceCloneParallelism)
 	for _, repo := range playbook.Repositories {

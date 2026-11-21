@@ -53,10 +53,12 @@ Use `up --no-desktop` for headless runs.
 Larger batches use up to 16 workers by default. Set `--parallel` to choose
 between 1 and 32, for example `up 24 --parallel 24`.
 T3 Code prompts for each sandbox as it becomes ready while the others keep
-provisioning. The CLI checks for confirmation with a 100 ms delay, waits
-longer if Agent37 rate-limits the checks, and syncs the mesh once at the end.
+provisioning. Once you approve a prompt, the CLI can open the next one while
+it verifies the previous connection. It checks with a 100 ms delay, waits
+longer if Agent37 rate-limits the checks, and links the mesh once at the end.
 It prepares the pairing code while HTTPS becomes ready and opens it after
 the sandbox and its projects pass verification.
+
 `up 10 --dry-run` previews the batch. `up 10 --no-desktop` runs it headless.
 Use `up <name>` to start an existing sandbox.
 The terminal progress bar starts with the launch checks and tracks sandbox
@@ -98,9 +100,10 @@ to its path.
 
 An optional `root_repository` checks out a repository at `path` itself.
 The CLI clones up to four child repositories at a time while the sandbox joins
-Tailscale. It verifies their T3 projects before requesting desktop pairing.
-When an existing workspace starts, the CLI fast-forwards its tracked GitHub
-branches before checking the projects. It preserves local branches, pinned
+Tailscale. Git downloads the checked-out files and fetches historical blobs
+on demand. The CLI verifies the T3 projects before requesting desktop pairing.
+Each startup fetches and fast-forwards the tracked GitHub branches for the
+workspace root and its repositories before checking the T3 projects. It preserves local branches, pinned
 tags, and conflicting files.
 Use `up --workspace=false` to skip the playbook for a launch. Set
 `T3_AGENT37_TIMINGS=1` to print the duration of each stage.

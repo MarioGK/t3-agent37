@@ -62,7 +62,8 @@ func runBatch(ctx context.Context, client *agent37.Client, verifyEnrollment func
 			return fmt.Errorf("desktop confirmation is unavailable. Use --no-desktop for headless provisioning: %w", err)
 		}
 	}
-	if _, err := peers.Configured(); err != nil {
+	configured, err := peers.Configured()
+	if err != nil {
 		return err
 	}
 	if opts.provider == "cliproxy" {
@@ -85,8 +86,8 @@ func runBatch(ctx context.Context, client *agent37.Client, verifyEnrollment func
 	parallel := min(opts.parallelism, len(reserved))
 	progress.preflightDone("Creating and setting up sandboxes")
 	notice(progress, info, "Provisioning %d Agent37 sandboxes, up to %d at a time…", len(reserved), parallel)
-	var ready int
-	results := provisionAndPairBatch(len(reserved), parallel, func(i int) batchSandbox {
+	gate := make(desktopPromptGate, 1)
+	results := provisionAndPairBatch(len(reserved), parallel, parallel, func(i int) batchSandbox {
 		item := provisionBatchSandbox(ctx, client, enrollment, opts, state, reserved[i], progress)
 		progress.provisioned(item.err == nil)
 		if item.err == nil {
@@ -94,41 +95,54 @@ func runBatch(ctx context.Context, client *agent37.Client, verifyEnrollment func
 		}
 		return item
 	}, func(item *batchSandbox) {
-		ready++
 		if launcher == nil || ctx.Err() != nil {
 			return
 		}
-		progress.setPhase("Waiting for T3 Code · " + item.name)
-		proof, err := pairSandbox(ctx, client, item.instance, item.proof, state, item.name, launcher, progress, nil)
+		progress.setPhase("Pairing T3 Code as sandboxes become ready")
+		proof, err := pairSandboxWithPromptGate(ctx, client, item.instance, item.proof, state, item.name, launcher, progress, gate, nil)
 		progress.pairedDesktop(err == nil)
 		if err != nil {
 			item.err = fmt.Errorf("run t3-agent37 link %s to finish pairing: %w", item.name, err)
 		} else {
 			item.proof = proof
 		}
-		progress.setPhase("Creating and setting up sandboxes")
 	})
 	var failures []error
+	meshErr := finishBatchMesh(ctx, client, configured, results, progress)
 	for _, item := range results {
 		if item.err != nil {
 			failures = append(failures, fmt.Errorf("%s: %w", item.name, item.err))
 		}
 	}
-	meshPending := ready > 0
-	if ready > 0 && ctx.Err() == nil {
-		started := time.Now()
-		progress.setPhase("Syncing T3 environments")
-		notice(progress, info, "Syncing T3 environments…")
-		if err := syncSandboxLinks(ctx, client, false, io.Discard, progress); err != nil {
-			notice(progress, warning, "T3 mesh has pending links. Run t3-agent37 sync. %v", err)
-		} else {
-			meshPending = false
-			launchTiming(progress, "batch", "Peer sync", started)
-		}
-		progress.meshFinished(!meshPending)
-	}
 	progress.close()
-	return errors.Join(errors.Join(failures...), ctx.Err(), showBatchResult(output, results, opts.noDesktop, meshPending))
+	return errors.Join(errors.Join(failures...), meshErr, ctx.Err(), showBatchResult(output, results, opts.noDesktop, meshErr != nil))
+}
+
+func finishBatchMesh(ctx context.Context, client *agent37.Client, configured []peers.Peer, results []batchSandbox, progress *launchProgress) error {
+	ready := false
+	for _, item := range results {
+		ready = ready || item.proof.TailnetURL != ""
+	}
+	if !ready {
+		return nil
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	started := time.Now()
+	progress.setPhase("Syncing T3 environments")
+	notice(progress, info, "Syncing T3 environments…")
+	if err := syncSandboxLinksWithDiscovery(ctx, client, configured, false, io.Discard, progress,
+		func(ctx context.Context, existing []agent37.Instance) ([]peers.MeshNode, error) {
+			return batchMeshNodes(ctx, client, existing, results)
+		}); err != nil {
+		notice(progress, warning, "T3 mesh has pending links. Run t3-agent37 sync. %v", err)
+		progress.meshFinished(false)
+		return fmt.Errorf("T3 mesh is incomplete: %w", err)
+	}
+	progress.meshFinished(true)
+	launchTiming(progress, "batch", "Peer sync", started)
+	return nil
 }
 
 func batchPreflight(ctx context.Context, client *agent37.Client, verifyEnrollment func(context.Context) (*peers.Enrollment, error)) ([]agent37.Instance, *peers.Enrollment, error) {
@@ -149,7 +163,7 @@ func batchPreflight(ctx context.Context, client *agent37.Client, verifyEnrollmen
 	return instances, enrollment, err
 }
 
-func provisionAndPairBatch(count, parallel int, provision func(int) batchSandbox, pair func(*batchSandbox)) []batchSandbox {
+func provisionAndPairBatch(count, parallel, pairingWorkers int, provision func(int) batchSandbox, pair func(*batchSandbox)) []batchSandbox {
 	type completedSandbox struct {
 		index int
 		item  batchSandbox
@@ -175,12 +189,18 @@ func provisionAndPairBatch(count, parallel int, provision func(int) batchSandbox
 		close(completed)
 	}()
 	results := make([]batchSandbox, count)
-	for result := range completed {
-		if result.item.err == nil {
-			pair(&result.item)
-		}
-		results[result.index] = result.item
+	var pairing sync.WaitGroup
+	for range pairingWorkers {
+		pairing.Go(func() {
+			for result := range completed {
+				if result.item.err == nil {
+					pair(&result.item)
+				}
+				results[result.index] = result.item
+			}
+		})
 	}
+	pairing.Wait()
 	return results
 }
 

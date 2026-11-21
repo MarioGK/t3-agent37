@@ -61,9 +61,13 @@ def refresh_checkout(checkout, env, workspace_root):
     ref = merge_ref.stdout.strip()
     if merge_ref.returncode != 0 or not ref.startswith("refs/heads/"):
         return "pull_conflict"
+    # Update the exact tracking ref even if origin has a narrowed fetch refspec.
+    # This also avoids sharing FETCH_HEAD with another Git operation.
+    tracking_ref = "refs/remotes/origin/" + ref.removeprefix("refs/heads/")
     fetched = subprocess.run(["timeout", "--kill-after=5s", "120s", *git, "fetch", "--quiet",
-                              "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head",
-                              "origin", ref], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
+                              "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head", "--refmap=",
+                              "origin", f"+{ref}:{tracking_ref}"],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
     if fetched.returncode in {124, 137}:
         return "timeout"
     if fetched.returncode != 0:
@@ -72,7 +76,7 @@ def refresh_checkout(checkout, env, workspace_root):
                              capture_output=True, text=True, timeout=5, env=env)
     if current.stdout.strip() != branch_name:
         return "pull_conflict"
-    upstream = subprocess.run([*git, "rev-parse", "--verify", "@{upstream}^{commit}"],
+    upstream = subprocess.run([*git, "rev-parse", "--verify", tracking_ref + "^{commit}"],
                               capture_output=True, text=True, timeout=5, env=env)
     if upstream.returncode != 0:
         return "pull_conflict"
@@ -113,7 +117,7 @@ def clone_repository(home, workspace_path, repo, directory, ref):
 
     with tempfile.TemporaryDirectory(prefix=".t3-agent37-clone-", dir=parent) as stage:
         checkout = Path(stage) / target.name
-        command = ["timeout", "--kill-after=5s", "210s", "git", "clone", "--quiet"]
+        command = ["timeout", "--kill-after=5s", "210s", "git", "clone", "--quiet", "--filter=blob:none"]
         if ref:
             command.extend(["--branch", ref])
         command.extend(["--", f"https://github.com/{repo}.git", str(checkout)])

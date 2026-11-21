@@ -178,7 +178,7 @@ func TestBatchPairsReadySandboxesWhileProvisioningContinues(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		start := time.Now()
 		var order []string
-		results := provisionAndPairBatch(3, 2, func(i int) batchSandbox {
+		results := provisionAndPairBatch(3, 2, 1, func(i int) batchSandbox {
 			time.Sleep([]time.Duration{3 * time.Second, time.Second, 500 * time.Millisecond}[i])
 			return batchSandbox{name: fmt.Sprintf("ts-%d", i+1)}
 		}, func(item *batchSandbox) {
@@ -195,6 +195,26 @@ func TestBatchPairsReadySandboxesWhileProvisioningContinues(t *testing.T) {
 		for i, item := range results {
 			if item.name != fmt.Sprintf("ts-%d", i+1) || !item.proof.DesktopConfirmed {
 				t.Fatalf("lost input order or approval for result %d: %+v", i, item)
+			}
+		}
+	})
+}
+
+func TestBatchPairingWorkersOverlapVerifiedConnections(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		start := time.Now()
+		results := provisionAndPairBatch(4, 4, 4, func(i int) batchSandbox {
+			return batchSandbox{name: fmt.Sprintf("ts-%d", i+1)}
+		}, func(item *batchSandbox) {
+			time.Sleep(2 * time.Second)
+			item.proof.DesktopConfirmed = true
+		})
+		if elapsed := time.Since(start); elapsed != 2*time.Second {
+			t.Fatalf("four connection checks took %v", elapsed)
+		}
+		for i, item := range results {
+			if !item.proof.DesktopConfirmed || item.name != fmt.Sprintf("ts-%d", i+1) {
+				t.Fatalf("batch result %d lost its verified connection: %+v", i, item)
 			}
 		}
 	})
@@ -236,7 +256,7 @@ func BenchmarkUpPipeline(b *testing.B) {
 							b.Fatal(err)
 						}
 					}
-					batch := provisionAndPairBatch(count, min(count, workers), func(int) batchSandbox {
+					batch := provisionAndPairBatch(count, min(count, workers), 1, func(int) batchSandbox {
 						time.Sleep(18 * time.Millisecond)
 						github := func() { time.Sleep(24 * time.Millisecond) }
 						tailnet := func() error {

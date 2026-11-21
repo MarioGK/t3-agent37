@@ -41,6 +41,38 @@ type desktopPairing struct {
 	issuedAt   time.Time
 }
 
+// A single-slot gate keeps only one pairing prompt outstanding while workers
+// independently verify connections for grants the desktop has already redeemed.
+type desktopPromptGate chan struct{}
+
+func (gate desktopPromptGate) acquire(ctx context.Context) (func(), error) {
+	if gate == nil {
+		return nil, ctx.Err()
+	}
+	select {
+	case gate <- struct{}{}:
+		if err := ctx.Err(); err != nil {
+			<-gate
+			return nil, err
+		}
+		return func() { <-gate }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (gate desktopPromptGate) tryAcquire() (func(), bool) {
+	if gate == nil {
+		return nil, true
+	}
+	select {
+	case gate <- struct{}{}:
+		return func() { <-gate }, true
+	default:
+		return nil, false
+	}
+}
+
 func issueDesktopPairing(ctx context.Context, client *agent37.Client, id, origin string, ttl time.Duration) (desktopPairing, error) {
 	pairing := desktopPairing{issuedAt: time.Now()}
 	var nonce [16]byte
@@ -89,9 +121,11 @@ func desktopPairingURL(pairing string) string {
 }
 
 func handOffPairing(ctx context.Context, client *agent37.Client, instance agent37.Instance, name string, proof setupProof, launcher []string, diagnostic io.Writer) error {
+	return handOffPairingWithPromptGate(ctx, client, instance, name, proof, launcher, diagnostic, nil)
+}
+
+func handOffPairingWithPromptGate(ctx context.Context, client *agent37.Client, instance agent37.Instance, name string, proof setupProof, launcher []string, diagnostic io.Writer, gate desktopPromptGate) error {
 	started := time.Now()
-	confirmation, cancel := context.WithTimeout(ctx, desktopPairingTimeout)
-	defer cancel()
 	prepared := proof.preparedPairing
 	open := func(ctx context.Context) (string, error) {
 		pairing := prepared
@@ -118,9 +152,9 @@ func handOffPairing(ctx context.Context, client *agent37.Client, instance agent3
 		defer stop()
 		return client.ExecJSON[desktopPairingStatus](attempt, instance.ID, command)
 	}
-	err := waitForDesktop(confirmation, open, check, func() {
+	err := waitForDesktop(ctx, open, check, func() {
 		notice(diagnostic, warning, "T3 Code accepted the pairing for %s but did not connect. Opening a fresh request…", name)
-	})
+	}, gate)
 	if err == nil {
 		notice(diagnostic, success, "T3 Code confirmed %s.", name)
 		launchTiming(diagnostic, name, "Desktop pairing and approval", started)
@@ -152,7 +186,21 @@ func openDesktopPairing(ctx context.Context, launcher []string, pairing string) 
 	return errors.New("could not open the pairing request in T3 Code after retrying")
 }
 
-func waitForDesktop(ctx context.Context, open func(context.Context) (string, error), check func(context.Context, string, string) (desktopPairingStatus, error), onRetry func()) error {
+func waitForDesktop(ctx context.Context, open func(context.Context) (string, error), check func(context.Context, string, string) (desktopPairingStatus, error), onRetry func(), gate desktopPromptGate) error {
+	release, err := gate.acquire(ctx)
+	if err != nil {
+		return err
+	}
+	releasePrompt := func() {
+		if release != nil {
+			release()
+			release = nil
+		}
+	}
+	defer releasePrompt()
+	// A queued worker gets the full approval budget once its prompt can open.
+	ctx, cancel := context.WithTimeout(ctx, desktopPairingTimeout)
+	defer cancel()
 	label, err := open(ctx)
 	if err != nil {
 		return err
@@ -184,10 +232,18 @@ func waitForDesktop(ctx context.Context, open func(context.Context) (string, err
 			outageSince = time.Time{}
 			if state.Redeemed && redeemedAt.IsZero() {
 				redeemedAt = time.Now()
+				releasePrompt()
 			}
 			if !redeemedAt.IsZero() && time.Since(redeemedAt) >= desktopConnectGrace {
 				if previous != "" {
 					return errors.New("T3 Code accepted the pairing but did not connect after retrying")
+				}
+				var acquired bool
+				release, acquired = gate.tryAcquire()
+				if !acquired {
+					// The original connection can still finish while another
+					// sandbox's prompt is open.
+					break
 				}
 				onRetry()
 				previous = label
@@ -291,7 +347,11 @@ func desktopTargets(instances []agent37.Instance, name string) ([]agent37.Instan
 	return targets, nil
 }
 
-func pairSandbox(ctx context.Context, client *agent37.Client, target agent37.Instance, proof setupProof, state, name string, launcher []string, diagnostic io.Writer, onConfirmed func(agent37.Instance, setupProof)) (_ setupProof, err error) {
+func pairSandbox(ctx context.Context, client *agent37.Client, target agent37.Instance, proof setupProof, state, name string, launcher []string, diagnostic io.Writer, onConfirmed func(agent37.Instance, setupProof)) (setupProof, error) {
+	return pairSandboxWithPromptGate(ctx, client, target, proof, state, name, launcher, diagnostic, nil, onConfirmed)
+}
+
+func pairSandboxWithPromptGate(ctx context.Context, client *agent37.Client, target agent37.Instance, proof setupProof, state, name string, launcher []string, diagnostic io.Writer, gate desktopPromptGate, onConfirmed func(agent37.Instance, setupProof)) (_ setupProof, err error) {
 	if !namePattern.MatchString(name) || agent37.ValidateID(target.ID) != nil {
 		return proof, errors.New("Agent37 returned an invalid sandbox identity")
 	}
@@ -326,7 +386,7 @@ func pairSandbox(ctx context.Context, client *agent37.Client, target agent37.Ins
 			return proof, err
 		}
 	}
-	if err := handOffPairing(ctx, client, instance, name, proof, launcher, diagnostic); err != nil {
+	if err := handOffPairingWithPromptGate(ctx, client, instance, name, proof, launcher, diagnostic, gate); err != nil {
 		return proof, err
 	}
 	proof.DesktopConfirmed = true

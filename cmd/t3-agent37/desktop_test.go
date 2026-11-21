@@ -60,7 +60,7 @@ func TestWaitForDesktopRequiresConfirmation(t *testing.T) {
 				t.Errorf("steady polling interval was %v", time.Since(lastHealthy))
 			}
 			return desktopPairingStatus{Confirmed: true}, nil
-		}, func() { t.Error("probe errors should not reopen the approval prompt") })
+		}, func() { t.Error("probe errors should not reopen the approval prompt") }, nil)
 		if err != nil || attempts != 6 || opened != 1 {
 			t.Fatalf("waiting for desktop: opened=%d, attempts=%d, err=%v", opened, attempts, err)
 		}
@@ -92,7 +92,7 @@ func TestWaitForDesktopRetriesAStalledConnectionOnce(t *testing.T) {
 					t.Error("retried before the desktop had time to connect")
 				}
 				retries++
-			})
+			}, nil)
 			if opened != 2 || retries != 1 || (err == nil) != recovers {
 				t.Fatalf("opened=%d, retries=%d, err=%v", opened, retries, err)
 			}
@@ -108,11 +108,145 @@ func TestWaitForDesktopDoesNotRepeatAnUnansweredPrompt(t *testing.T) {
 			func(context.Context, string, string) (desktopPairingStatus, error) {
 				return desktopPairingStatus{}, nil
 			},
-			func() { t.Error("reopened an unanswered request") })
+			func() { t.Error("reopened an unanswered request") }, nil)
 		if err == nil || !strings.Contains(err.Error(), "confirmation timed out") {
 			t.Fatalf("unanswered confirmation: %v", err)
 		}
 	})
+}
+
+func TestDesktopPromptGateSeparatesApprovalFromConnection(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		gate := make(desktopPromptGate, 1)
+		firstOpened, secondOpened := make(chan struct{}), make(chan struct{})
+		redeemFirst, connectFirst := make(chan struct{}), make(chan struct{})
+		connectSecond := make(chan struct{})
+		firstResult, secondResult := make(chan error, 1), make(chan error, 1)
+		go func() {
+			firstResult <- waitForDesktop(t.Context(), func(context.Context) (string, error) {
+				close(firstOpened)
+				return "first", nil
+			}, func(context.Context, string, string) (desktopPairingStatus, error) {
+				select {
+				case <-connectFirst:
+					return desktopPairingStatus{Confirmed: true}, nil
+				case <-redeemFirst:
+					return desktopPairingStatus{Redeemed: true}, nil
+				default:
+					return desktopPairingStatus{}, nil
+				}
+			}, func() { t.Error("unexpected retry") }, gate)
+		}()
+		<-firstOpened
+		go func() {
+			secondResult <- waitForDesktop(t.Context(), func(ctx context.Context) (string, error) {
+				deadline, ok := ctx.Deadline()
+				if !ok || time.Until(deadline) != desktopPairingTimeout {
+					t.Error("queued approval did not get its full deadline")
+				}
+				close(secondOpened)
+				return "second", nil
+			}, func(context.Context, string, string) (desktopPairingStatus, error) {
+				select {
+				case <-connectSecond:
+					return desktopPairingStatus{Confirmed: true}, nil
+				default:
+					return desktopPairingStatus{}, nil
+				}
+			}, func() { t.Error("unexpected retry") }, gate)
+		}()
+		time.Sleep(4 * desktopPollInterval)
+		select {
+		case <-secondOpened:
+			t.Error("second prompt opened before desktop redeemed the first")
+		default:
+		}
+		close(redeemFirst)
+		<-secondOpened
+		time.Sleep(desktopConnectGrace + 2*desktopPollInterval)
+		select {
+		case <-firstResult:
+			t.Error("redemption completed the first pairing without connection verification")
+			return
+		default:
+		}
+		close(connectFirst)
+		if err := <-firstResult; err != nil {
+			t.Fatal(err)
+		}
+		close(connectSecond)
+		if err := <-secondResult; err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func TestDesktopRetryWaitsForPromptSlotAndCancellationReleasesIt(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		gate := make(desktopPromptGate, 1)
+		firstOpened, firstRetried, secondOpened := make(chan struct{}), make(chan struct{}), make(chan struct{})
+		firstResult, secondResult := make(chan error, 1), make(chan error, 1)
+		go func() {
+			opened := false
+			firstResult <- waitForDesktop(t.Context(), func(context.Context) (string, error) {
+				if !opened {
+					opened = true
+					close(firstOpened)
+					return "first", nil
+				}
+				close(firstRetried)
+				return "retry", nil
+			}, func(_ context.Context, label, previous string) (desktopPairingStatus, error) {
+				if label == "first" {
+					return desktopPairingStatus{Redeemed: true}, nil
+				}
+				if previous != "first" {
+					t.Error("retry stopped checking the original grant")
+				}
+				return desktopPairingStatus{Confirmed: true}, nil
+			}, func() {}, gate)
+		}()
+		<-firstOpened
+		secondCtx, cancelSecond := context.WithCancel(t.Context())
+		defer cancelSecond()
+		go func() {
+			secondResult <- waitForDesktop(secondCtx, func(context.Context) (string, error) {
+				close(secondOpened)
+				return "second", nil
+			}, func(context.Context, string, string) (desktopPairingStatus, error) {
+				return desktopPairingStatus{}, nil
+			}, func() { t.Error("retried an unanswered prompt") }, gate)
+		}()
+		<-secondOpened
+		time.Sleep(desktopConnectGrace + 2*desktopPollInterval)
+		select {
+		case <-firstRetried:
+			t.Error("retry opened while another prompt was outstanding")
+		default:
+		}
+		cancelSecond()
+		if err := <-secondResult; !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected cancellation, got %v", err)
+		}
+		<-firstRetried
+		if err := <-firstResult; err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func TestDesktopPromptGateReleasesOnLaunchFailure(t *testing.T) {
+	gate := make(desktopPromptGate, 1)
+	openFailure := errors.New("could not open link")
+	err := waitForDesktop(t.Context(), func(context.Context) (string, error) { return "", openFailure },
+		func(context.Context, string, string) (desktopPairingStatus, error) {
+			t.Fatal("checked connection after launcher failed")
+			return desktopPairingStatus{}, nil
+		},
+		func() { t.Error("retried a failed launcher") }, gate)
+	if !errors.Is(err, openFailure) || len(gate) != 0 {
+		t.Fatalf("launch failure did not release prompt slot: %v", err)
+	}
 }
 
 func TestLinkDryRunListsAllManagedSandboxesOrOneByName(t *testing.T) {

@@ -103,6 +103,28 @@ class WorkspaceTest(unittest.TestCase):
         self.assertEqual(self.git("-C", str(checkout), "rev-parse", "HEAD"),
                          self.git("-C", str(self.source), "rev-parse", "HEAD"))
 
+    def test_refresh_updates_root_and_child_when_their_upstream_advances(self):
+        self.publish("example-workspace")
+        self.publish("example-app")
+        args = (self.home, self.workspace_path, "example-org/example-workspace", "", "")
+        self.assertEqual(workspace.clone_repository(*args), "cloned")
+        self.assertEqual(self.clone("example-app"), "cloned")
+
+        # A checkout can have a narrowed origin refspec after a user changes it.
+        child = self.root / "example-app"
+        self.git("-C", str(child), "config", "remote.origin.fetch",
+                 "+refs/heads/another-branch:refs/remotes/origin/another-branch")
+        self.advance("example-workspace", "new-root-file")
+        self.advance("example-app", "new-child-file")
+
+        self.assertEqual(workspace.clone_repository(*args), "existing")
+        self.assertEqual(self.clone("example-app"), "existing")
+        self.assertEqual((self.root / "new-root-file").read_text(), "updated upstream")
+        self.assertEqual((child / "new-child-file").read_text(), "updated upstream")
+        for checkout in (self.root, child):
+            self.assertEqual(self.git("-C", str(checkout), "rev-parse", "HEAD"),
+                             self.git("-C", str(checkout), "rev-parse", "refs/remotes/origin/main"))
+
     def test_refresh_refuses_to_overwrite_local_edits(self):
         self.publish("example-app")
         self.assertEqual(self.clone("example-app"), "cloned")
