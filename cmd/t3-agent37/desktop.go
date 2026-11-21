@@ -72,6 +72,7 @@ func desktopPairingURL(pairing string) string {
 }
 
 func handOffPairing(ctx context.Context, client *agent37.Client, instance agent37.Instance, name string, proof setupProof, launcher []string, diagnostic io.Writer) error {
+	started := time.Now()
 	confirmation, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 	open := func(ctx context.Context) (string, error) {
@@ -102,6 +103,7 @@ func handOffPairing(ctx context.Context, client *agent37.Client, instance agent3
 	})
 	if err == nil {
 		notice(diagnostic, success, "T3 Code confirmed %s.", name)
+		launchTiming(diagnostic, name, "Desktop pairing and approval", started)
 	}
 	return err
 }
@@ -299,7 +301,7 @@ func pairSandbox(ctx context.Context, client *agent37.Client, target agent37.Ins
 		return proof, errors.New("wait for the sandbox to become ready before retrying link")
 	}
 	if proof.TailnetURL == "" || instance.Status != "running" {
-		instance, proof, err = startSandbox(ctx, client, instance, name, true, false, diagnostic)
+		instance, proof, err = startSandbox(ctx, client, instance, name, sandboxBootstrap{peerLinks: true}, diagnostic)
 		if err != nil {
 			return proof, err
 		}

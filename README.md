@@ -80,6 +80,26 @@ defaults. Use `up --github=false` to skip it, or set
 `T3_AGENT37_GITHUB_TOKEN` to use a scoped GitHub token. Run
 `up <name> --github` to retry access on an existing sandbox after a GitHub warning.
 
+To clone repositories and register them in T3 Code on launch, put
+`workspace.json` beside `config.json` or set `T3_AGENT37_WORKSPACE_FILE`
+to its path.
+
+```json
+{
+  "path": "~/Projects/Example",
+  "repositories": [
+    {"repo": "example/web"},
+    {"repo": "example/api", "ref": "main", "directory": "backend"}
+  ]
+}
+```
+
+An optional `root_repository` checks out a repository at `path` itself.
+The CLI clones up to four child repositories at a time while the sandbox joins
+Tailscale. It verifies their T3 projects before requesting desktop pairing.
+Use `up --workspace=false` to skip the playbook for a launch. Set
+`T3_AGENT37_TIMINGS=1` to print the duration of each stage.
+
 On another PC, join the same tailnet, run `t3-agent37 setup`, then run
 `t3-agent37 link`. It wakes existing sandboxes as needed and opens each
 pairing request in T3 Code. Use `link <name>` for one sandbox or

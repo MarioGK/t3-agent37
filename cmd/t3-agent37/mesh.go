@@ -17,7 +17,11 @@ import (
 // These read-only commands also work with the guest programs installed by older CLIs.
 const inspectGuestPeer = `import json, sys
 from pathlib import Path
-sys.path.insert(0, str(Path.home() / ".local/share/t3-agent37"))
+root = Path.home() / ".local/share/t3-agent37"
+if len(sys.argv) > 1 and not (root / sys.argv[1]).is_file():
+    print(json.dumps({"workspacePending": True}))
+    sys.exit(0)
+sys.path.insert(0, str(root))
 import remote, tailnet
 status = tailnet.status() or {}
 peer = tailnet.identity(status)
@@ -49,6 +53,7 @@ type sandboxPeer struct {
 	PeerProxy        bool   `json:"peerProxy"`
 	DesktopConfirmed bool   `json:"desktopConfirmed"`
 	Offline          bool   `json:"offline"`
+	WorkspacePending bool   `json:"workspacePending,omitzero"`
 }
 
 func meshNode(client *agent37.Client, id, name string, proof sandboxPeer) (peers.MeshNode, error) {
@@ -94,10 +99,13 @@ func discoverSandboxPeer(ctx context.Context, client *agent37.Client, instance a
 		}
 	}
 	command := "python3 -B -c " + shellQuote(inspectGuestPeer)
+	if requiresWorkspaceSetup(instance) {
+		command += " " + shellQuote(workspaceReadyFile)
+	}
 	for {
 		running, err := client.ExecJSON[sandboxPeer](probe, instance.ID, command)
 		ready := running.EnvironmentID != "" && !running.Offline
-		if err == nil && (ready || forCleanup && running.URL != "") {
+		if err == nil && (running.WorkspacePending || ready || forCleanup && running.URL != "") {
 			return running, nil
 		}
 		if !woke {
@@ -148,6 +156,9 @@ func discoverCloudNodes(ctx context.Context, client *agent37.Client, instances [
 			}
 			proof, err := discoverSandboxPeer(ctx, client, instance, allowWake, forCleanup)
 			if err == nil {
+				if proof.WorkspacePending {
+					return
+				}
 				pendingConfirmation := requiresDesktopConfirmation(instance) && !proof.DesktopConfirmed
 				if pendingConfirmation && !forCleanup {
 					return
@@ -178,6 +189,7 @@ func discoverCloudNodes(ctx context.Context, client *agent37.Client, instances [
 }
 
 func linkStartedSandbox(ctx context.Context, client *agent37.Client, instance agent37.Instance, name string, configured []peers.Peer, proof setupProof, diagnostic io.Writer) bool {
+	started := time.Now()
 	if requiresDesktopConfirmation(instance) && !proof.DesktopConfirmed {
 		notice(diagnostic, warning, "T3 linking awaits desktop confirmation. Run t3-agent37 link %s.", name)
 		return false
@@ -203,6 +215,7 @@ func linkStartedSandbox(ctx context.Context, client *agent37.Client, instance ag
 		return false
 	}
 	reportMesh(count, diagnostic)
+	launchTiming(diagnostic, name, "Peer linking", started)
 	return true
 }
 

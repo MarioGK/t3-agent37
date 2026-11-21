@@ -40,6 +40,9 @@ type options struct {
 	batchSize, parallelism           int
 	size                             sandboxSize
 	cpu, ram                         *int
+	workspace                        *bool
+	playbook                         *workspacePlaybook
+	up                               bool
 	showSize                         bool
 	yes, dryRun, pair, tailscale     bool
 	legacyDelete                     bool
@@ -58,6 +61,9 @@ type options struct {
 }
 
 func resolveOptions(opts options, flags *flag.FlagSet, args []string) (options, error) {
+	if !flags.Changed("workspace") {
+		opts.workspace = nil
+	}
 	if !flags.Changed("cpu") {
 		opts.cpu = nil
 	}
@@ -104,7 +110,7 @@ func resolveOptions(opts options, flags *flag.FlagSet, args []string) (options, 
 			opts.yes = !opts.dryRun
 		} else {
 			if !onlyStartFlags(flags) {
-				return opts, errors.New("up accepts --github and --no-desktop when you pass a sandbox name")
+				return opts, errors.New("up accepts --github, --no-desktop, and --workspace when you pass a sandbox name")
 			}
 			opts.githubAccess = flags.Changed("github") && opts.githubAccess
 			opts.action = "start"
@@ -181,7 +187,7 @@ func resolveOptions(opts options, flags *flag.FlagSet, args []string) (options, 
 
 func onlyStartFlags(flags *flag.FlagSet) bool {
 	allowed := 0
-	for _, name := range []string{"github", "no-desktop"} {
+	for _, name := range []string{"github", "no-desktop", "workspace"} {
 		if flags.Changed(name) {
 			allowed++
 		}
@@ -192,6 +198,7 @@ func onlyStartFlags(flags *flag.FlagSet) bool {
 func addCommandFlags(flags *flag.FlagSet, opts *options) {
 	if opts.action == "up" {
 		flags.IntVar(&opts.parallelism, "parallel", batchParallelism, fmt.Sprintf("Concurrent sandbox launches for up <count> (1–%d)", maxBatchParallelism))
+		opts.workspace = addWorkspaceFlag(flags)
 	}
 	if opts.action == "config" || opts.action == "create" || opts.action == "up" {
 		opts.cpu = flags.Int("cpu", 0, "vCPUs for each new sandbox (2 or 4)")
@@ -279,6 +286,12 @@ func createPayload(opts options, extraEnv map[string]string) map[string]any {
 	metadata := map[string]string{"managed_by": owner, "environment": opts.name, "provider": opts.provider}
 	if opts.generatedName && !opts.noDesktop {
 		metadata[desktopConfirmationKey] = "required"
+	}
+	if opts.up && opts.workspace != nil && !*opts.workspace {
+		metadata[workspaceDisabledKey] = "true"
+	}
+	if opts.playbook != nil {
+		metadata[workspaceSetupKey] = "required"
 	}
 	env := map[string]string{"AGENT37_MANAGED_PLUGIN_COMPOSIO_ENABLED": "false"}
 	maps.Copy(env, extraEnv)
@@ -436,6 +449,7 @@ func getOrCreate(ctx context.Context, client *agent37.Client, opts options, stat
 		}
 	}
 	keepMarker = true // The operation may have reached Agent37 even if the reply is lost.
+	started := time.Now()
 	notice(diagnostic, info, "Creating %s on Agent37…", opts.name)
 	instance, err := client.Create(ctx, createPayload(opts, extra))
 	if err != nil {
@@ -454,6 +468,7 @@ func getOrCreate(ctx context.Context, client *agent37.Client, opts options, stat
 		return instance, err
 	}
 	keepMarker = false
+	launchTiming(diagnostic, opts.name, "Agent37 creation", started)
 	return instance, nil
 }
 
@@ -500,12 +515,18 @@ func operate(ctx context.Context, client *agent37.Client, enrollment *peers.Enro
 	}
 	switch opts.action {
 	case "start":
+		if err := opts.loadWorkspacePlaybook(instance.Metadata); err != nil {
+			return err
+		}
 		configured, err = peers.Configured()
 		if err != nil {
 			return err
 		}
 		progress.preflightDone("Starting " + opts.name + " and restoring T3 Code")
-		instance, proof, err := startSandbox(ctx, client, instance, opts.name, true, opts.githubAccess, diagnostic)
+		instance, proof, err := startSandbox(ctx, client, instance, opts.name, sandboxBootstrap{
+			peerLinks: true, githubAccess: opts.githubAccess, playbook: opts.playbook,
+			skipWorkspace: opts.workspace != nil && !*opts.workspace,
+		}, diagnostic)
 		if err != nil {
 			return err
 		}
@@ -556,6 +577,9 @@ func operate(ctx context.Context, client *agent37.Client, enrollment *peers.Enro
 		progress.setPhase("Setting up T3 Code and Tailscale")
 		proof, err = prepareCreated(ctx, client, enrollment, instance, opts, diagnostic)
 		if err != nil {
+			if opts.playbook != nil {
+				return fmt.Errorf("sandbox exists. Run t3-agent37 up %s to retry setup: %w", opts.name, err)
+			}
 			return err
 		}
 		progress.provisioned(true)
@@ -578,7 +602,7 @@ func operate(ctx context.Context, client *agent37.Client, enrollment *peers.Enro
 		if instance.Status == "stopped" {
 			return errors.New("the sandbox is stopped. Run t3-agent37 up first")
 		}
-		proof, err = bootstrap(ctx, client, nil, instance, opts.name, false, false, false, diagnostic)
+		proof, err = bootstrap(ctx, client, nil, instance, opts.name, sandboxBootstrap{}, diagnostic)
 		if err != nil {
 			return err
 		}
@@ -638,6 +662,11 @@ func runCommand(ctx context.Context, opts options, output, diagnostic io.Writer)
 		}
 		return setupWorkstation(ctx, opts, output, diagnostic)
 	}
+	if opts.action == "create" {
+		if err := opts.loadWorkspacePlaybook(nil); err != nil {
+			return err
+		}
+	}
 	var state string
 	if opts.generatedName {
 		state, err = statePath()
@@ -656,12 +685,13 @@ func runCommand(ctx context.Context, opts options, output, diagnostic io.Writer)
 			}
 		}
 		if _, terminal := ttyOutput(output); terminal {
-			return printDetails(output, "Preview · create sandbox",
-				detail{"Sandbox", opts.name}, detail{"Template", opts.template}, detail{"Provider", providerLabel(opts.provider)},
-				detail{"Resources", opts.size.String()},
-				detail{"Auto-sleep", fmt.Sprintf("%d minutes", sandboxIdle/time.Minute)}, detail{"Network", "Private Tailscale"})
+			fields := []detail{
+				{"Sandbox", opts.name}, {"Template", opts.template}, {"Provider", providerLabel(opts.provider)},
+				{"Resources", opts.size.String()}, {"Auto-sleep", fmt.Sprintf("%d minutes", sandboxIdle/time.Minute)}, {"Network", "Private Tailscale"},
+			}
+			return printDetails(output, "Preview · create sandbox", append(fields, opts.playbook.previewDetails()...)...)
 		}
-		return jsonOutput(output, createPayload(opts, nil), true)
+		return jsonOutput(output, previewCreatePayload(opts), true)
 	}
 	if opts.pickDelete && !terminalAvailable(diagnostic) {
 		return errors.New("interactive deletion requires a terminal. Use down <name> to select a sandbox")
@@ -671,6 +701,7 @@ func runCommand(ctx context.Context, opts options, output, diagnostic io.Writer)
 		progress = startLaunchProgress(diagnostic, opts)
 		defer progress.close()
 		diagnostic = progress
+		defer launchTiming(diagnostic, cmp.Or(opts.name, "up"), "Command elapsed", time.Now())
 	}
 	var enrollment *peers.Enrollment
 	if opts.action == "create" && opts.batchSize == 0 {
@@ -761,6 +792,12 @@ func runCommand(ctx context.Context, opts options, output, diagnostic io.Writer)
 			continue
 		}
 		return cmp.Or(err, unlockErr)
+	}
+}
+
+func launchTiming(output io.Writer, name, stage string, started time.Time) {
+	if os.Getenv("T3_AGENT37_TIMINGS") == "1" {
+		notice(output, info, "%s · %s · %.3fs", name, stage, time.Since(started).Seconds())
 	}
 }
 

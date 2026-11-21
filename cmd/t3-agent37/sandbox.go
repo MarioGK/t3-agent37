@@ -62,24 +62,36 @@ func shellQuote(value string) string {
 }
 
 func setup(ctx context.Context, client *agent37.Client, instance agent37.Instance, peerLinks bool) (setupProof, error) {
+	install, configure, name, err := setupCommands(instance, peerLinks)
+	if err != nil {
+		return setupProof{}, err
+	}
+	return configureGuestT3(ctx, client, instance.ID, name, install+" && "+configure)
+}
+
+func setupCommands(instance agent37.Instance, peerLinks bool) (install, configure, name string, err error) {
 	provider := displayProvider(instance)
 	if _, allowed := providers[provider]; !allowed {
-		return setupProof{}, errors.New("sandbox metadata names an unsupported T3 provider")
+		return "", "", "", errors.New("sandbox metadata names an unsupported T3 provider")
 	}
-	command := "python3 -c " + shellQuote(installGuest) + " remote.py " + base64.StdEncoding.EncodeToString(guestRemote)
+	install = "python3 -c " + shellQuote(installGuest) + " remote.py " + base64.StdEncoding.EncodeToString(guestRemote)
 	if provider == "cliproxy" {
-		command += " codex_proxy.py " + base64.StdEncoding.EncodeToString(guestCodexProxy) +
+		install += " codex_proxy.py " + base64.StdEncoding.EncodeToString(guestCodexProxy) +
 			" claude_proxy.py " + base64.StdEncoding.EncodeToString(guestClaudeProxy)
 	}
 	if instance.Metadata["tailnet"] == "tailscale" {
-		command += " tailnet.py " + base64.StdEncoding.EncodeToString(guestTailnet)
+		install += " tailnet.py " + base64.StdEncoding.EncodeToString(guestTailnet)
 	}
-	name := cmp.Or(instance.Name, instance.Metadata["environment"])
-	command += " && " + remote + " setup " + provider + " " + shellQuote(name)
+	name = cmp.Or(instance.Name, instance.Metadata["environment"])
+	configure = remote + " setup " + provider + " " + shellQuote(name)
 	if peerLinks {
-		command += " --peer-links"
+		configure += " --peer-links"
 	}
-	proof, err := client.ExecJSON[setupProof](ctx, instance.ID, command)
+	return install, configure, name, nil
+}
+
+func configureGuestT3(ctx context.Context, client *agent37.Client, id, name, command string) (setupProof, error) {
+	proof, err := client.ExecJSON[setupProof](ctx, id, command)
 	if err != nil {
 		return proof, err
 	}
@@ -87,7 +99,7 @@ func setup(ctx context.Context, client *agent37.Client, instance agent37.Instanc
 	if proof.EnvironmentID == "" {
 		return proof, errors.New("sandbox setup did not return a T3 environment ID")
 	}
-	_, _, err = client.WaitForT3(ctx, instance.ID, proof.EnvironmentID, proof.Port)
+	_, _, err = client.WaitForT3(ctx, id, proof.EnvironmentID, proof.Port)
 	return proof, err
 }
 
@@ -138,7 +150,7 @@ func joinTailnetOnce(ctx context.Context, client *agent37.Client, enrollment *pe
 	}
 	filename := "tailscale-enrollment-" + hex.EncodeToString(nonce[:])
 	return enrollment.UseKey(ctx, func(key string) error {
-		err := client.UploadEnrollmentKey(ctx, id, filename, key)
+		err := uploadGuestFile(ctx, func() error { return client.UploadEnrollmentKey(ctx, id, filename, key) })
 		if err == nil {
 			var joined tailIdentity
 			joined, err = client.ExecJSON[tailIdentity](ctx, id, command+" "+filename)
@@ -155,20 +167,66 @@ func joinTailnetOnce(ctx context.Context, client *agent37.Client, enrollment *pe
 	})
 }
 
-func bootstrap(ctx context.Context, client *agent37.Client, enrollment *peers.Enrollment, instance agent37.Instance, name string, peerLinks, mayRestart, githubAccess bool, diagnostic io.Writer) (setupProof, error) {
-	proof, err := setup(ctx, client, instance, peerLinks)
+type sandboxBootstrap struct {
+	peerLinks, mayRestart, githubAccess, skipWorkspace bool
+	playbook                                           *workspacePlaybook
+}
+
+func bootstrap(ctx context.Context, client *agent37.Client, enrollment *peers.Enrollment, instance agent37.Instance, name string, settings sandboxBootstrap, diagnostic io.Writer) (setupProof, error) {
+	if settings.playbook == nil && !settings.skipWorkspace {
+		if err := requireWorkspaceReady(ctx, client, instance, name, false); err != nil {
+			return setupProof{}, err
+		}
+	}
+	stageStart := time.Now()
+	var proof setupProof
+	var err error
+	type publication struct {
+		url string
+		err error
+	}
+	var earlyPublication chan publication
+	if settings.playbook != nil && !settings.mayRestart && instance.Metadata["tailnet"] == "tailscale" {
+		install, configure, requestedName, err := setupCommands(instance, settings.peerLinks)
+		if err != nil {
+			return proof, err
+		}
+		if _, err := client.Exec(ctx, instance.ID, install); err != nil {
+			return proof, err
+		}
+		published := make(chan publication, 1)
+		earlyPublication = published
+		prepare, cancel := context.WithCancel(ctx)
+		defer func() {
+			cancel()
+			if earlyPublication != nil {
+				<-earlyPublication
+			}
+		}()
+		go func() {
+			url, err := publishTailnet(prepare, client, enrollment, instance.ID, name, diagnostic)
+			published <- publication{url, err}
+		}()
+		proof, err = configureGuestT3(ctx, client, instance.ID, requestedName, configure)
+		if err != nil {
+			return proof, err
+		}
+	} else {
+		proof, err = setup(ctx, client, instance, settings.peerLinks)
+	}
 	if err != nil {
 		return proof, err
 	}
-	if peerLinks && !proof.PeerProxy && mayRestart {
+	if settings.peerLinks && !proof.PeerProxy && settings.mayRestart {
 		if _, err := client.Lifecycle(ctx, instance.ID, "restart"); err != nil {
 			return proof, err
 		}
-		proof, err = setup(ctx, client, instance, peerLinks)
+		proof, err = setup(ctx, client, instance, settings.peerLinks)
 		if err != nil {
 			return proof, err
 		}
 	}
+	launchTiming(diagnostic, name, "Guest T3 startup", stageStart)
 	if proof.RequestedName != "" && proof.Label != proof.RequestedName {
 		if proof.LabelSaved {
 			notice(diagnostic, info, "T3 will show %s after the sandbox restarts.", proof.RequestedName)
@@ -176,32 +234,78 @@ func bootstrap(ctx context.Context, client *agent37.Client, enrollment *peers.En
 			notice(diagnostic, warning, "The sandbox could not set the T3 display name to %s.", proof.RequestedName)
 		}
 	}
-	// Both steps may upload files, so they start after the protected gateway
-	// is ready. Tailscale uses its own userspace daemon and leaves GitHub DNS
-	// and routes alone. Wait for both steps before handing off desktop pairing.
-	var github func()
-	if githubAccess {
-		github = func() {
-			if err := configureGitHubAccess(ctx, client, instance.ID, name, diagnostic); err != nil && ctx.Err() == nil {
-				notice(diagnostic, warning, "%v", err)
+	// The GitHub handoff waits for protected gateway health. Tailscale uses its
+	// own userspace daemon and leaves GitHub DNS and routes alone.
+	var workspaceErr error
+	var prepareWorkspace func()
+	if settings.githubAccess || settings.playbook != nil || settings.skipWorkspace {
+		prepareWorkspace = func() {
+			if err := ctx.Err(); err != nil {
+				workspaceErr = err
+				return
+			}
+			if settings.githubAccess {
+				if err := configureGitHubAccess(ctx, client, instance.ID, name, diagnostic); err != nil && ctx.Err() == nil {
+					notice(diagnostic, warning, "%v", err)
+				}
+			}
+			if settings.playbook != nil {
+				workspaceErr = settings.playbook.clone(ctx, client, instance.ID, name, diagnostic)
+				if workspaceErr != nil {
+					return
+				}
+				workspaceErr = settings.playbook.register(ctx, client, instance.ID, name, diagnostic)
+				if workspaceErr != nil {
+					return
+				}
+			}
+			if settings.playbook != nil || settings.skipWorkspace {
+				workspaceErr = requireWorkspaceReady(ctx, client, instance, name, true)
 			}
 		}
 	}
-	err = finishSandboxSetup(ctx, github, func() error {
+	err = finishSandboxSetup(ctx, prepareWorkspace, func() error {
 		if instance.Metadata["tailnet"] != "tailscale" {
 			return nil
 		}
-		if err := joinTailnet(ctx, client, enrollment, instance.ID, name); err != nil {
-			return err
+		var url string
+		if earlyPublication != nil {
+			result := <-earlyPublication
+			earlyPublication = nil
+			if result.err != nil {
+				return result.err
+			}
+			url = result.url
+		} else {
+			var err error
+			url, err = publishTailnet(ctx, client, enrollment, instance.ID, name, diagnostic)
+			if err != nil {
+				return err
+			}
 		}
-		private, err := client.ExecJSON[struct{ URL string }](ctx, instance.ID, remote+" tailnet-serve-peer")
-		if err != nil {
-			return err
+		verifyStarted := time.Now()
+		var err error
+		proof.TailnetURL, err = peers.VerifyTailnet(ctx, name, proof.EnvironmentID, url)
+		if err == nil {
+			launchTiming(diagnostic, name, "Tailscale HTTPS verification", verifyStarted)
 		}
-		proof.TailnetURL, err = peers.VerifyTailnet(ctx, name, proof.EnvironmentID, private.URL)
 		return err
 	})
-	return proof, err
+	return proof, errors.Join(err, workspaceErr)
+}
+
+func publishTailnet(ctx context.Context, client *agent37.Client, enrollment *peers.Enrollment, id, name string, diagnostic io.Writer) (string, error) {
+	started := time.Now()
+	if err := joinTailnet(ctx, client, enrollment, id, name); err != nil {
+		return "", err
+	}
+	launchTiming(diagnostic, name, "Tailscale enrollment", started)
+	started = time.Now()
+	private, err := client.ExecJSON[struct{ URL string }](ctx, id, remote+" tailnet-serve-peer")
+	if err == nil {
+		launchTiming(diagnostic, name, "Tailscale Serve", started)
+	}
+	return private.URL, err
 }
 
 func finishSandboxSetup(ctx context.Context, github func(), tailnet func() error) error {
@@ -330,7 +434,7 @@ func agent37RetryAfterCheckpoint(err error) bool {
 	return ok && apiError.Status == http.StatusConflict && apiError.Code == "try_again"
 }
 
-func startSandbox(ctx context.Context, client *agent37.Client, instance agent37.Instance, name string, peerLinks, githubAccess bool, diagnostic io.Writer) (agent37.Instance, setupProof, error) {
+func startSandbox(ctx context.Context, client *agent37.Client, instance agent37.Instance, name string, settings sandboxBootstrap, diagnostic io.Writer) (agent37.Instance, setupProof, error) {
 	wasStopped := instance.Status == "stopped"
 	var enrollment *peers.Enrollment
 	if wasStopped && instance.Metadata["tailnet"] == "tailscale" {
@@ -348,7 +452,8 @@ func startSandbox(ctx context.Context, client *agent37.Client, instance agent37.
 		}
 	}
 	if instance.Metadata["tailnet"] == "tailscale" {
-		proof, err := bootstrap(ctx, client, enrollment, instance, name, peerLinks, wasStopped, githubAccess, diagnostic)
+		settings.mayRestart = wasStopped
+		proof, err := bootstrap(ctx, client, enrollment, instance, name, settings, diagnostic)
 		if err != nil {
 			return instance, proof, err
 		}
@@ -376,7 +481,9 @@ func prepareCreated(ctx context.Context, client *agent37.Client, enrollment *pee
 			return setupProof{}, err
 		}
 	}
-	proof, err := bootstrap(ctx, client, enrollment, instance, opts.name, true, wasStopped, opts.githubAccess, diagnostic)
+	proof, err := bootstrap(ctx, client, enrollment, instance, opts.name, sandboxBootstrap{
+		peerLinks: true, mayRestart: wasStopped, githubAccess: opts.githubAccess, playbook: opts.playbook,
+	}, diagnostic)
 	if err == nil && !proof.ProviderReady {
 		notice(diagnostic, warning, "%s needs sign-in. Run t3-agent37 terminal %s.", providerLabel(provider), opts.name)
 	}
@@ -410,7 +517,7 @@ func prepare(ctx context.Context, client *agent37.Client, instance agent37.Insta
 	start := instance.Status == "stopped" || instance.Status == "sleeping"
 	if start {
 		var err error
-		instance, _, err = startSandbox(ctx, client, instance, name, false, false, diagnostic)
+		instance, _, err = startSandbox(ctx, client, instance, name, sandboxBootstrap{}, diagnostic)
 		if err != nil {
 			return err
 		}

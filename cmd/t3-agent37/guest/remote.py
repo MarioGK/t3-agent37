@@ -15,9 +15,10 @@ import sys
 import tarfile
 import tempfile
 import time
+import uuid
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
-from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener, urlopen
 
 # Images without a verified T3 installation use this download.
 FALLBACK_VERSION = "0.1.11-nightly.20261118.4903"
@@ -358,6 +359,71 @@ def setup(provider, name, peer_links=False):
                           "desktopConfirmed": desktop_confirmed(result["environmentId"])}))
 
 
+def register_projects(checkouts):
+    home = Path.home().resolve()
+    expected = {}
+    for path, repo in checkouts.items():
+        root = (home / path.removeprefix("~/")).resolve(strict=True)
+        if not path.startswith("~/") or not root.is_relative_to(home) or root == home or not root.is_dir():
+            raise RuntimeError("Invalid T3 project path")
+        expected[str(root)] = "github.com/" + repo.lower()
+
+    class NoRedirect(HTTPRedirectHandler):
+        def redirect_request(self, *args, **kwargs):
+            return None
+
+    opener = build_opener(ProxyHandler({}), NoRedirect())
+    base_args = ["--base-dir", str(DATA)]
+    issued = json.loads(subprocess.run(
+        [str(T3), "auth", "session", "issue", *base_args, "--scope", "orchestration:read", "--scope", "orchestration:operate",
+         "--ttl", "5m", "--label", "t3-agent37-project-registration", "--json"],
+        capture_output=True, check=True, timeout=15, text=True,
+    ).stdout)
+    url = f"http://127.0.0.1:{PORT}/api/projects"
+    authorization = {"Authorization": f"Bearer {issued['token']}"}
+
+    def active_projects():
+        request = Request(url, headers=authorization)
+        with opener.open(request, timeout=5) as response:
+            projects = json.load(response)["projects"]
+        return {project["workspaceRoot"]: (project.get("repositoryIdentity") or {}).get("canonicalKey")
+                for project in projects if not project.get("deletedAt") and not project.get("archivedAt")}
+
+    try:
+        active = active_projects()
+        missing = sorted(expected.keys() - active.keys())
+        for project in missing:
+            try:
+                command = {"type": "project.create", "commandId": str(uuid.uuid4()),
+                           "projectId": str(uuid.uuid4()), "title": Path(project).name,
+                           "workspaceRoot": project}
+                request = Request(url + "/mutate", data=json.dumps(command).encode(),
+                                  headers={**authorization, "Content-Type": "application/json"})
+                with opener.open(request, timeout=5):
+                    pass
+            except HTTPError as error:
+                if error.code in {400, 404, 409, 422}:
+                    # Use the native CLI for older servers and archived projects.
+                    result = subprocess.run([str(T3), "project", "add", *base_args, "--", project],
+                                            capture_output=True, timeout=20)
+                    if result.returncode == 0 or project in active_projects():
+                        continue
+                raise RuntimeError(f"T3 could not register the project at {project}") from None
+        deadline = time.monotonic() + 10
+        while True:
+            active = active_projects()
+            if expected.items() <= active.items():
+                return
+            if time.monotonic() >= deadline:
+                raise RuntimeError("T3 did not report the expected repository identities")
+            time.sleep(0.2)
+    finally:
+        subprocess.run(
+            [str(T3), "auth", "session", "revoke", *base_args, issued["sessionId"]],
+            capture_output=True, timeout=10,
+        )
+
+
 def pair(address, label="t3-agent37"):
     result = subprocess.run([
         str(T3), "auth", "pairing", "create", "--base-dir", str(DATA),
@@ -437,6 +503,8 @@ if __name__ == "__main__":
     action = sys.argv[1]
     if action == "setup":
         setup(sys.argv[2], sys.argv[3], "--peer-links" in sys.argv[4:])
+    elif action == "register-projects":
+        register_projects(json.loads(sys.argv[2]))
     elif action == "serve":
         serve()
     elif action == "boot":

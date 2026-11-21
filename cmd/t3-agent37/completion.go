@@ -76,7 +76,7 @@ func newCLI(args []string, output, diagnostic io.Writer, execute func(context.Co
 	})
 	completing := len(args) > 0 && slices.Contains([]string{"__complete", "__completeNoDesc"}, args[0])
 	for _, spec := range commands {
-		opts := options{action: cmp.Or(spec.action, spec.name)}
+		opts := options{action: cmp.Or(spec.action, spec.name), up: spec.name == "up"}
 		command := &cobra.Command{
 			Use: commandUsage(spec), Short: spec.summary, Long: commandDescription(spec), GroupID: spec.group,
 			ValidArgsFunction: cobra.NoFileCompletions,
@@ -96,6 +96,7 @@ func newCLI(args []string, output, diagnostic io.Writer, execute func(context.Co
 		if completing && spec.name == "up" && len(args) > 3 && args[1] == "up" && namePattern.MatchString(args[2]) && !batchCountArgument(args[2]) {
 			addCommandFlags(command.Flags(), &options{action: "start"})
 			command.Flags().Bool("no-desktop", false, "Skip the T3 Code desktop pairing request")
+			addWorkspaceFlag(command.Flags())
 			continue
 		}
 		addCommandFlags(command.Flags(), &opts)

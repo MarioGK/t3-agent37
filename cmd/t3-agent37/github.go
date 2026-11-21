@@ -85,8 +85,12 @@ func inheritGitHub(ctx context.Context, client *agent37.Client, id string) (gith
 }
 
 func uploadGitHubHandoff(ctx context.Context, client *agent37.Client, id, stage string, payload []byte) error {
+	return uploadGuestFile(ctx, func() error { return client.UploadGitHubHandoff(ctx, id, stage, payload) })
+}
+
+func uploadGuestFile(ctx context.Context, upload func() error) error {
 	for delay := time.Second; ; delay *= 2 {
-		err := client.UploadGitHubHandoff(ctx, id, stage, payload)
+		err := upload()
 		apiError, ok := errors.AsType[*agent37.Error](err)
 		if !ok || apiError.Status != http.StatusBadGateway || apiError.Code != "container_unreachable" || delay > 8*time.Second {
 			return err

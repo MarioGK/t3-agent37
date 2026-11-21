@@ -30,18 +30,18 @@ func previewBatch(ctx context.Context, opts options, state string, output io.Wri
 		return err
 	}
 	if _, terminal := ttyOutput(output); terminal {
-		return printDetails(output, fmt.Sprintf("Preview · create %d sandboxes", len(names)),
-			detail{"Sandboxes", strings.Join(names, ", ")}, detail{"Template", opts.template},
-			detail{"Provider", providerLabel(opts.provider)},
-			detail{"Concurrent", fmt.Sprint(min(opts.parallelism, len(names)))},
-			detail{"Per sandbox", fmt.Sprintf("%s · %d min auto-sleep", opts.size, sandboxIdle/time.Minute)},
-			detail{"Batch RAM", fmt.Sprintf("%d GB", len(names)*opts.size.RAM)},
-			detail{"Network", "Private Tailscale"})
+		fields := []detail{
+			{"Sandboxes", strings.Join(names, ", ")}, {"Template", opts.template}, {"Provider", providerLabel(opts.provider)},
+			{"Concurrent", fmt.Sprint(min(opts.parallelism, len(names)))},
+			{"Per sandbox", fmt.Sprintf("%s · %d min auto-sleep", opts.size, sandboxIdle/time.Minute)},
+			{"Batch RAM", fmt.Sprintf("%d GB", len(names)*opts.size.RAM)}, {"Network", "Private Tailscale"},
+		}
+		return printDetails(output, fmt.Sprintf("Preview · create %d sandboxes", len(names)), append(fields, opts.playbook.previewDetails()...)...)
 	}
 	plans := make([]map[string]any, 0, len(names))
 	for _, name := range names {
 		opts.name = name
-		plans = append(plans, createPayload(opts, nil))
+		plans = append(plans, previewCreatePayload(opts))
 	}
 	return jsonOutput(output, plans, true)
 }
@@ -116,12 +116,14 @@ func runBatch(ctx context.Context, client *agent37.Client, verifyEnrollment func
 	}
 	meshPending := ready > 0
 	if ready > 0 && ctx.Err() == nil {
+		started := time.Now()
 		progress.setPhase("Syncing T3 environments")
 		notice(progress, info, "Syncing T3 environments…")
 		if err := syncSandboxLinks(ctx, client, false, io.Discard, progress); err != nil {
 			notice(progress, warning, "T3 mesh has pending links. Run t3-agent37 sync. %v", err)
 		} else {
 			meshPending = false
+			launchTiming(progress, "batch", "Peer sync", started)
 		}
 		progress.meshFinished(!meshPending)
 	}
