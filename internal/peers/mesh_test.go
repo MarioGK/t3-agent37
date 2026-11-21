@@ -64,6 +64,58 @@ func TestMeshReconcilesTenNodesAndRetriesTemporaryReachability(t *testing.T) {
 	}
 }
 
+func TestSyncMeshReadsOnceAndReplacesAStaleAddress(t *testing.T) {
+	mesh := newMeshFixture(t, "alpha", "beta", "gamma")
+	mesh.links["alpha"]["beta"] = link{
+		EnvironmentID: "beta", Status: "reachable", Access: "read-only",
+		URLs: []string{"https://a37-gone-aaaaaaaaaa.test.ts.net"},
+	}
+	mesh.links["alpha"]["gamma"] = link{EnvironmentID: "gamma", Status: "reachable", Access: "read-only"}
+	mesh.nodes[0].ListLinksJSON = func(context.Context) ([]byte, error) {
+		t.Error("healthy peer should reuse the verified RPC list")
+		return nil, nil
+	}
+	count, removed, err := syncMesh(t.Context(), mesh.client, mesh.nodes,
+		func(_ context.Context, entry SandboxLink, remove func() error) (bool, error) {
+			if entry.SandboxID != "aaaaaaaaaa" || entry.EnvironmentID != "beta" {
+				t.Errorf("unexpected stale link: %+v", entry)
+				return false, nil
+			}
+			err := remove()
+			return err == nil, err
+		})
+	if err != nil || count != 6 || len(removed) != 1 || mesh.lists != 3 || mesh.issues != 3 {
+		t.Fatalf("sync: %d links, %d inventories, %d sessions, removed %v, error %v", count, mesh.lists, mesh.issues, removed, err)
+	}
+	if len(mesh.unlinked) != 1 || mesh.unlinked[0] != "beta" || mesh.links["alpha"]["beta"].Access != accessRequired ||
+		mesh.links["alpha"]["gamma"].Access != "read-only" || mesh.grants != 5 {
+		t.Fatalf("sync failed to replace the stale address or preserve existing access: %+v", mesh.links["alpha"])
+	}
+}
+
+func TestSyncMeshFallsBackToOwnerCLIWhenHttpsCannotBeVerified(t *testing.T) {
+	mesh := newMeshFixture(t, "alpha", "beta", "offline")
+	mesh.nodes[2].EnvironmentID = "expected-other-id"
+	mesh.nodes[2].ListLinksJSON = func(context.Context) ([]byte, error) {
+		return []byte(`[{"environmentId":"gone","urls":["https://a37-gone-aaaaaaaaaa.test.ts.net"]}]`), nil
+	}
+	mesh.nodes[2].Unlink = func(_ context.Context, id string) error {
+		if id != "gone" {
+			return fmt.Errorf("unexpected stale target %q", id)
+		}
+		return nil
+	}
+	count, removed, err := syncMesh(t.Context(), mesh.client, mesh.nodes,
+		func(_ context.Context, _ SandboxLink, remove func() error) (bool, error) {
+			err := remove()
+			return err == nil, err
+		})
+	if err == nil || !strings.Contains(err.Error(), "identity changed for offline") || count != 2 ||
+		len(removed) != 1 || removed[0].Peer != "offline" || mesh.issues != 2 || mesh.lists != 2 {
+		t.Fatalf("fallback: %d links, %d lists, %d sessions, removed %v, error %v", count, mesh.lists, mesh.issues, removed, err)
+	}
+}
+
 func TestCloudPruneDryRunUsesReadOnlyInventory(t *testing.T) {
 	mesh := newMeshFixture(t, "alpha")
 	node := mesh.nodes[0]
@@ -216,7 +268,9 @@ func (mesh *meshFixture) serve(t *testing.T, name string, w http.ResponseWriter,
 			mesh.links[name][target] = linked
 			_ = ws.WriteJSON(reply(request.ID, linked))
 		case "peerLinks.unlink":
-			mesh.unlinked = append(mesh.unlinked, request.Payload["environmentId"])
+			id := request.Payload["environmentId"]
+			delete(mesh.links[name], id)
+			mesh.unlinked = append(mesh.unlinked, id)
 			_ = ws.WriteJSON(reply(request.ID, map[string]bool{"removed": true}))
 		default:
 			t.Errorf("unexpected RPC %s", request.Tag)

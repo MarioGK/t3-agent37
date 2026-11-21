@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"sync"
 	"time"
 
 	"github.com/MarioGK/t3-agent37/internal/agent37"
@@ -59,7 +58,11 @@ func syncSandboxLinksWithDiscovery(ctx context.Context, client *agent37.Client, 
 	}
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
+	active := make(map[string]string)
 	visit := func(ctx context.Context, link peers.SandboxLink, remove func() error) (pruned bool, err error) {
+		if active[link.SandboxID] == link.Name {
+			return false, nil
+		}
 		if !dryRun {
 			lock := sandboxLock(state, link.Name)
 			locked, err := lock.TryLockContext(ctx, 100*time.Millisecond)
@@ -80,27 +83,28 @@ func syncSandboxLinksWithDiscovery(ctx context.Context, client *agent37.Client, 
 		err = remove()
 		return err == nil, err
 	}
-	var nodes []peers.MeshNode
-	var inventoryErr, discoveryErr, fleetErr, cloudErr error
-	var fleetRemoved, cloudRemoved []peers.SandboxLink
-	var cleanup sync.WaitGroup
-	cleanup.Go(func() { fleetRemoved, fleetErr = peers.PruneSandboxLinks(ctx, configured, dryRun, visit) })
-	if !dryRun {
-		var instances []agent37.Instance
-		instances, inventoryErr = client.List(ctx)
-		nodes, discoveryErr = discover(ctx, instances)
-		cloudRemoved, cloudErr = peers.PruneMeshSandboxLinks(ctx, nodes, false, visit)
-	}
-	cleanup.Wait()
-	var meshErr error
-	if !dryRun {
-		ready := slices.DeleteFunc(nodes, func(node peers.MeshNode) bool { return node.CleanupOnly })
-		count, err := peers.ReconcileMesh(ctx, configured, ready)
+	var removed []peers.SandboxLink
+	var syncErr error
+	if dryRun {
+		removed, syncErr = peers.PruneSandboxLinks(ctx, configured, true, visit)
+	} else {
+		instances, inventoryErr := client.List(ctx)
+		if inventoryErr == nil {
+			// The fresh inventory is enough to keep active links. A stale
+			// candidate still needs a locked, exact Agent37 lookup.
+			for _, instance := range instances {
+				if isManaged(instance) && instance.Metadata["tailnet"] == "tailscale" &&
+					(instance.Status == "running" || instance.Status == "sleeping") {
+					active[instance.ID] = instance.Metadata["environment"]
+				}
+			}
+		}
+		nodes, discoveryErr := discover(ctx, instances)
+		count, pruned, meshErr := peers.SyncMesh(ctx, configured, nodes, visit)
 		reportMesh(count, diagnostic)
-		meshErr = err
+		removed = pruned
+		syncErr = errors.Join(inventoryErr, discoveryErr, meshErr, ctx.Err())
 	}
-	removed := append(fleetRemoved, cloudRemoved...)
-	syncErr := errors.Join(inventoryErr, discoveryErr, fleetErr, cloudErr, meshErr, ctx.Err())
 	if _, terminal := ttyOutput(output); terminal {
 		return errors.Join(printSyncResult(output, removed, dryRun, syncErr != nil), syncErr)
 	}

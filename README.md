@@ -56,6 +56,8 @@ T3 Code prompts for each sandbox as it becomes ready while the others keep
 provisioning. Once you approve a prompt, the CLI can open the next one while
 it verifies the previous connection. It checks with a 100 ms delay, waits
 longer if Agent37 rate-limits the checks, and links the mesh once at the end.
+The mesh pass uses one verified link list per reachable environment to
+clean up stale links and add missing ones.
 It prepares the pairing code while HTTPS becomes ready and opens it after
 the sandbox and its projects pass verification.
 

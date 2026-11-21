@@ -32,17 +32,38 @@ type MeshNode struct {
 // ReconcileMesh verifies every available directed link between configured T3
 // peers and managed sandboxes. The returned count includes existing links.
 func ReconcileMesh(ctx context.Context, configured []Peer, sandboxes []MeshNode) (int, error) {
+	client := newHTTPClient(35 * time.Second)
+	defer client.CloseIdleConnections()
+	return reconcileMesh(ctx, client, meshNodes(configured, sandboxes))
+}
+
+// SyncMesh prunes confirmed stale links and reconciles the mesh with one
+// verified link inventory per available environment. The owner CLI remains
+// available for cleanup on nodes whose T3 HTTPS endpoint cannot be used.
+func SyncMesh(ctx context.Context, configured []Peer, sandboxes []MeshNode,
+	visit func(context.Context, SandboxLink, func() error) (bool, error),
+) (int, []SandboxLink, error) {
+	client := newHTTPClient(35 * time.Second)
+	defer client.CloseIdleConnections()
+	return syncMesh(ctx, client, meshNodes(configured, sandboxes), visit)
+}
+
+func meshNodes(configured []Peer, sandboxes []MeshNode) []MeshNode {
 	nodes := make([]MeshNode, 0, len(configured)+len(sandboxes))
 	for _, peer := range configured {
 		nodes = append(nodes, MeshNode{
 			Name: peer.Host, URL: peer.URL, EnvironmentID: peer.EnvironmentID,
 			IssueToken: func(ctx context.Context) (string, error) { return issueOverSSH(ctx, peer) },
+			ListLinksJSON: func(ctx context.Context) ([]byte, error) {
+				return runOwnerCLI(ctx, peer, "environment", "list", "--json")
+			},
+			Unlink: func(ctx context.Context, id string) error {
+				_, err := runOwnerCLI(ctx, peer, "environment", "unlink", id)
+				return err
+			},
 		})
 	}
-	nodes = append(nodes, sandboxes...)
-	client := newHTTPClient(35 * time.Second)
-	defer client.CloseIdleConnections()
-	return reconcileMesh(ctx, client, nodes)
+	return append(nodes, sandboxes...)
 }
 
 type meshEndpoint struct {
@@ -50,53 +71,131 @@ type meshEndpoint struct {
 	token string
 }
 
+type meshInventory struct {
+	endpoint meshEndpoint
+	entries  []link
+	removed  []SandboxLink
+	readable bool
+	err      error
+}
+
 func reconcileMesh(ctx context.Context, client *http.Client, candidates []MeshNode) (int, error) {
-	nodes, validation := normalizeMeshNodes(candidates, false)
-	if len(nodes) < 2 {
-		return 0, validation
-	}
+	count, _, err := syncMesh(ctx, client, candidates, nil)
+	return count, err
+}
+
+func syncMesh(ctx context.Context, client *http.Client, candidates []MeshNode,
+	visit func(context.Context, SandboxLink, func() error) (bool, error),
+) (int, []SandboxLink, error) {
+	nodes, validation := normalizeMeshNodes(candidates, visit != nil)
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 
-	endpoints := make([]meshEndpoint, len(nodes))
-	availability := make([]error, len(nodes))
+	ready := 0
+	for _, node := range nodes {
+		if !node.CleanupOnly && environmentID.MatchString(node.EnvironmentID) {
+			ready++
+		}
+	}
+	states := make([]meshInventory, len(nodes))
 	forMeshNode(ctx, len(nodes), meshWorkers, func(i int) {
-		node := nodes[i]
-		api := newPeerAPI(client, node.Name, node.URL, node.EnvironmentID)
-		if err := api.verify(ctx, 2, true); err != nil {
-			availability[i] = err
-			return
-		}
-		token, err := node.issue(ctx)
-		if err != nil {
-			availability[i] = err
-			return
-		}
-		endpoints[i] = meshEndpoint{api: api, token: token}
+		states[i] = readMeshInventory(ctx, client, nodes[i], ready >= 2, visit)
 	})
-	available := slices.DeleteFunc(endpoints, func(node meshEndpoint) bool { return node.token == "" })
-	validated := errors.Join(validation, errors.Join(availability...))
-	if len(available) < 2 {
-		return 0, errors.Join(validated, ctx.Err())
+
+	available := make([]meshEndpoint, 0, len(states))
+	var removed []SandboxLink
+	var failures []error
+	type identity struct{ id, origin string }
+	pruned := make(map[identity]bool)
+	for _, state := range states {
+		for _, entry := range state.removed {
+			pruned[identity{entry.EnvironmentID, entry.URL}] = true
+		}
+		removed = append(removed, state.removed...)
+		if state.err != nil {
+			failures = append(failures, state.err)
+		}
+	}
+	for _, state := range states {
+		api := state.endpoint.api
+		if state.endpoint.token != "" && !pruned[identity{api.environmentID, api.origin}] {
+			available = append(available, state.endpoint)
+		}
 	}
 
-	counts := make([]int, len(available))
-	failures := make([]error, len(available))
-	forMeshNode(ctx, len(available), meshWorkers, func(i int) {
-		counts[i], failures[i] = reconcileSource(ctx, available[i], available)
-	})
+	counts := make([]int, len(states))
+	linkFailures := make([]error, len(states))
+	if len(available) >= 2 {
+		forMeshNode(ctx, len(states), meshWorkers, func(i int) {
+			state := states[i]
+			api := state.endpoint.api
+			if state.endpoint.token == "" || pruned[identity{api.environmentID, api.origin}] {
+				return
+			}
+			if visit == nil {
+				state.entries, linkFailures[i] = listPeerLinks(ctx, api, state.endpoint.token)
+				if linkFailures[i] != nil {
+					return
+				}
+			} else if !state.readable {
+				return
+			}
+			counts[i], linkFailures[i] = reconcileListedSource(ctx, state.endpoint, available, state.entries)
+		})
+	}
 	var count int
 	for _, n := range counts {
 		count += n
 	}
-	return count, errors.Join(validated, errors.Join(failures...), ctx.Err())
+	return count, removed, errors.Join(validation, errors.Join(failures...), errors.Join(linkFailures...), ctx.Err())
 }
 
-func reconcileSource(ctx context.Context, source meshEndpoint, targets []meshEndpoint) (int, error) {
-	entries, err := listPeerLinks(ctx, source.api, source.token)
-	if err != nil {
-		return 0, err
+func readMeshInventory(ctx context.Context, client *http.Client, node MeshNode, reconcile bool,
+	visit func(context.Context, SandboxLink, func() error) (bool, error),
+) (state meshInventory) {
+	if !node.CleanupOnly && !environmentID.MatchString(node.EnvironmentID) {
+		state.err = fmt.Errorf("invalid private T3 environment %q", node.Name)
+	} else if reconcile && !node.CleanupOnly {
+		api := newPeerAPI(client, node.Name, node.URL, node.EnvironmentID)
+		if state.err = api.verify(ctx, 2, true); state.err == nil {
+			var token string
+			if token, state.err = node.issue(ctx); state.err == nil {
+				state.endpoint = meshEndpoint{api: api, token: token}
+				if visit != nil {
+					state.entries, state.err = listPeerLinks(ctx, api, token)
+					state.readable = state.err == nil
+				}
+			}
+		}
 	}
+	if visit == nil {
+		return state
+	}
+	var pruneErr error
+	if state.readable {
+		state.removed, pruneErr = pruneEntries(ctx, Peer{Host: node.Name, URL: node.URL}, state.entries, false, visit,
+			func(link SandboxLink) error {
+				err := unlinkRPC(ctx, state.endpoint, link.EnvironmentID)
+				if err != nil && node.Unlink != nil {
+					return node.Unlink(ctx, link.EnvironmentID)
+				}
+				return err
+			})
+		if len(state.removed) != 0 {
+			state.entries = slices.DeleteFunc(state.entries, func(entry link) bool {
+				return slices.ContainsFunc(state.removed, func(removed SandboxLink) bool {
+					return removed.EnvironmentID == entry.EnvironmentID
+				})
+			})
+		}
+	} else {
+		state.removed, pruneErr = pruneMeshNode(ctx, client, node, false, visit)
+	}
+	state.err = errors.Join(state.err, pruneErr)
+	return state
+}
+
+func reconcileListedSource(ctx context.Context, source meshEndpoint, targets []meshEndpoint, entries []link) (int, error) {
 	previous := make(map[string]link, len(entries))
 	for _, entry := range entries {
 		previous[entry.EnvironmentID] = entry
@@ -273,9 +372,13 @@ func pruneMeshNode(ctx context.Context, client *http.Client, node MeshNode, dryR
 				return err
 			}
 		}
-		var result struct {
-			Removed bool `json:"removed"`
-		}
-		return api.rpc(ctx, token, "peerLinks.unlink", map[string]string{"environmentId": sandbox.EnvironmentID}, &result)
+		return unlinkRPC(ctx, meshEndpoint{api: api, token: token}, sandbox.EnvironmentID)
 	})
+}
+
+func unlinkRPC(ctx context.Context, source meshEndpoint, id string) error {
+	var result struct {
+		Removed bool `json:"removed"`
+	}
+	return source.api.rpc(ctx, source.token, "peerLinks.unlink", map[string]string{"environmentId": id}, &result)
 }
