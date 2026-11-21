@@ -50,6 +50,8 @@ pairing that still needs attention.
 The desktop displays the same sandbox name as `t3-agent37 ls`.
 Use `up --no-desktop` for headless runs.
 `up 10` creates ten new sandboxes in parallel using the next free names.
+Larger batches use up to 16 workers by default. Set `--parallel` to choose
+between 1 and 32, for example `up 24 --parallel 24`.
 T3 Code prompts for each sandbox as it becomes ready while the others keep
 provisioning. The CLI checks for confirmation with a 100 ms delay, waits
 longer if Agent37 rate-limits the checks, and syncs the mesh once at the end.

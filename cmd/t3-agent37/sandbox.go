@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/MarioGK/t3-agent37/internal/agent37"
@@ -168,17 +169,6 @@ func bootstrap(ctx context.Context, client *agent37.Client, enrollment *peers.En
 			return proof, err
 		}
 	}
-	if githubAccess {
-		// Agent37's private file endpoint can lag exec during provisioning.
-		// Wait for protected gateway health before sending the handoff, then
-		// publish the Tailscale endpoint and make it available to T3 peers.
-		if err := configureGitHubAccess(ctx, client, instance.ID, name, diagnostic); err != nil {
-			if ctx.Err() != nil {
-				return proof, ctx.Err()
-			}
-			notice(diagnostic, warning, "%v", err)
-		}
-	}
 	if proof.RequestedName != "" && proof.Label != proof.RequestedName {
 		if proof.LabelSaved {
 			notice(diagnostic, info, "T3 will show %s after the sandbox restarts.", proof.RequestedName)
@@ -186,20 +176,43 @@ func bootstrap(ctx context.Context, client *agent37.Client, enrollment *peers.En
 			notice(diagnostic, warning, "The sandbox could not set the T3 display name to %s.", proof.RequestedName)
 		}
 	}
-	if instance.Metadata["tailnet"] == "tailscale" {
+	// Both steps may upload files, so they start after the protected gateway
+	// is ready. Tailscale uses its own userspace daemon and leaves GitHub DNS
+	// and routes alone. Wait for both steps before handing off desktop pairing.
+	var github func()
+	if githubAccess {
+		github = func() {
+			if err := configureGitHubAccess(ctx, client, instance.ID, name, diagnostic); err != nil && ctx.Err() == nil {
+				notice(diagnostic, warning, "%v", err)
+			}
+		}
+	}
+	err = finishSandboxSetup(ctx, github, func() error {
+		if instance.Metadata["tailnet"] != "tailscale" {
+			return nil
+		}
 		if err := joinTailnet(ctx, client, enrollment, instance.ID, name); err != nil {
-			return proof, err
+			return err
 		}
 		private, err := client.ExecJSON[struct{ URL string }](ctx, instance.ID, remote+" tailnet-serve-peer")
 		if err != nil {
-			return proof, err
+			return err
 		}
 		proof.TailnetURL, err = peers.VerifyTailnet(ctx, name, proof.EnvironmentID, private.URL)
-		if err != nil {
-			return proof, err
-		}
+		return err
+	})
+	return proof, err
+}
+
+func finishSandboxSetup(ctx context.Context, github func(), tailnet func() error) error {
+	if github == nil {
+		return tailnet()
 	}
-	return proof, nil
+	var handoff sync.WaitGroup
+	handoff.Go(github)
+	err := tailnet()
+	handoff.Wait()
+	return cmp.Or(ctx.Err(), err)
 }
 
 func wake(ctx context.Context, client *agent37.Client, instance agent37.Instance) (agent37.Instance, error) {

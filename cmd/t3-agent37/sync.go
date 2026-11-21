@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/MarioGK/t3-agent37/internal/agent37"
@@ -51,13 +52,6 @@ func syncSandboxLinks(ctx context.Context, client *agent37.Client, dryRun bool, 
 	}
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	var nodes []peers.MeshNode
-	var inventoryErr, discoveryErr error
-	if !dryRun {
-		var instances []agent37.Instance
-		instances, inventoryErr = client.List(ctx)
-		nodes, discoveryErr = discoverCloudNodes(ctx, client, instances, "", true, true)
-	}
 	visit := func(ctx context.Context, link peers.SandboxLink, remove func() error) (pruned bool, err error) {
 		if !dryRun {
 			lock := sandboxLock(state, link.Name)
@@ -79,8 +73,18 @@ func syncSandboxLinks(ctx context.Context, client *agent37.Client, dryRun bool, 
 		err = remove()
 		return err == nil, err
 	}
-	fleetRemoved, fleetErr := peers.PruneSandboxLinks(ctx, configured, dryRun, visit)
-	cloudRemoved, cloudErr := peers.PruneMeshSandboxLinks(ctx, nodes, dryRun, visit)
+	var nodes []peers.MeshNode
+	var inventoryErr, discoveryErr, fleetErr, cloudErr error
+	var fleetRemoved, cloudRemoved []peers.SandboxLink
+	var cleanup sync.WaitGroup
+	cleanup.Go(func() { fleetRemoved, fleetErr = peers.PruneSandboxLinks(ctx, configured, dryRun, visit) })
+	if !dryRun {
+		var instances []agent37.Instance
+		instances, inventoryErr = client.List(ctx)
+		nodes, discoveryErr = discoverCloudNodes(ctx, client, instances, "", true, true)
+		cloudRemoved, cloudErr = peers.PruneMeshSandboxLinks(ctx, nodes, false, visit)
+	}
+	cleanup.Wait()
 	var meshErr error
 	if !dryRun {
 		ready := slices.DeleteFunc(nodes, func(node peers.MeshNode) bool { return node.CleanupOnly })

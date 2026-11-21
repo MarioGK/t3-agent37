@@ -340,17 +340,22 @@ def setup(provider, name, peer_links=False):
         result = descriptor()
         if result is None:
             boot()
-        for _ in range(60):
-            result = descriptor()
-            if result is not None:
-                print(json.dumps({"environmentId": result["environmentId"], "version": VERSION,
-                                  "label": result.get("label", ""), "labelSaved": label_saved,
-                                  "port": PORT, "providerReady": ready,
-                                  "peerProxy": (ROOT / "peer-proxy-active").is_file(),
-                                  "desktopConfirmed": desktop_confirmed(result["environmentId"])}))
-                return
-            time.sleep(1)
-        raise RuntimeError("T3 did not start. See ~/.local/share/t3-agent37/server.log")
+            deadline = time.monotonic() + 60
+            delay = 0.2
+            while result is None:
+                result = descriptor()
+                if result is not None:
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RuntimeError("T3 did not start. See ~/.local/share/t3-agent37/server.log")
+                time.sleep(min(delay, remaining))
+                delay = min(delay * 2, 1)
+        print(json.dumps({"environmentId": result["environmentId"], "version": VERSION,
+                          "label": result.get("label", ""), "labelSaved": label_saved,
+                          "port": PORT, "providerReady": ready,
+                          "peerProxy": (ROOT / "peer-proxy-active").is_file(),
+                          "desktopConfirmed": desktop_confirmed(result["environmentId"])}))
 
 
 def pair(address, label="t3-agent37"):

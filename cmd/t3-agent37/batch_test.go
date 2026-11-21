@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/MarioGK/t3-agent37/internal/agent37"
+	"github.com/MarioGK/t3-agent37/internal/peers"
 )
 
 func TestUpCountAndNamedStart(t *testing.T) {
@@ -28,7 +29,8 @@ func TestUpCountAndNamedStart(t *testing.T) {
 			t.Fatalf("up %s was not parsed as a batch: %+v, %v", count, opts, err)
 		}
 	}
-	for _, args := range [][]string{{"up", "0"}, {"up", "101"}, {"up", "--", "-2"}, {"up", "10", "extra"}} {
+	for _, args := range [][]string{{"up", "0"}, {"up", "101"}, {"up", "--", "-2"}, {"up", "10", "extra"},
+		{"up", "4", "--parallel=0"}, {"up", "4", "--parallel=33"}, {"up", "--parallel=4"}} {
 		if _, err := parse(args, io.Discard); err == nil {
 			t.Fatalf("accepted invalid batch: %v", args)
 		}
@@ -38,6 +40,10 @@ func TestUpCountAndNamedStart(t *testing.T) {
 		if err != nil || opts.action != "start" || opts.batchSize != 0 || opts.name != args[1] {
 			t.Fatalf("named start changed: %v, %+v, %v", args, opts, err)
 		}
+	}
+	opts, err := parse([]string{"up", "24", "--parallel=20", "--template=fixture@1"}, io.Discard)
+	if err != nil || opts.parallelism != 20 || opts.batchSize != 24 {
+		t.Fatalf("batch concurrency: %+v, %v", opts, err)
 	}
 }
 
@@ -142,9 +148,9 @@ func TestBatchStartsTenCreatesInParallelAndReportsPartialResults(t *testing.T) {
 	defer cancel()
 	state := t.TempDir()
 	var output bytes.Buffer
-	opts := options{action: "create", batchSize: 10, size: sandboxSize{4, 16}, generatedName: true, namePrefix: "terra", provider: "codex", template: "fixture@1", tailscale: true, noDesktop: true}
+	opts := options{action: "create", batchSize: 10, parallelism: 10, size: sandboxSize{4, 16}, generatedName: true, namePrefix: "terra", provider: "codex", template: "fixture@1", tailscale: true, noDesktop: true}
 	progress := startLaunchProgress(io.Discard, opts)
-	err := runBatch(ctx, agent37.New("fixture"), nil, opts, state, &output, progress)
+	err := runBatch(ctx, agent37.New("fixture"), func(context.Context) (*peers.Enrollment, error) { return nil, nil }, opts, state, &output, progress)
 	if err == nil || creates.Load() != 10 || !strings.Contains(err.Error(), "160 GB") || ctx.Err() != nil {
 		t.Fatalf("batch status: %d create requests, command error %v, context error %v", creates.Load(), err, ctx.Err())
 	}
@@ -192,4 +198,64 @@ func TestBatchPairsReadySandboxesWhileProvisioningContinues(t *testing.T) {
 			}
 		}
 	})
+}
+
+// BenchmarkUpPipeline uses fixed service delays to compare the previous serial
+// preflight and handoff with the launch pipeline. It never contacts an API.
+func BenchmarkUpPipeline(b *testing.B) {
+	previousTransport := http.DefaultTransport
+	b.Cleanup(func() { http.DefaultTransport = previousTransport })
+	http.DefaultTransport = downTestTransport(func(r *http.Request) (*http.Response, error) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/instances" {
+			return nil, fmt.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		time.Sleep(8 * time.Millisecond)
+		return downResponse(http.StatusOK, `{"data":[]}`), nil
+	})
+	verifyEnrollment := func(context.Context) (*peers.Enrollment, error) {
+		time.Sleep(12 * time.Millisecond)
+		return nil, nil
+	}
+	for _, count := range []int{4, 16} {
+		for _, concurrent := range []bool{false, true} {
+			mode, workers := "previous", 10
+			if concurrent {
+				mode, workers = "parallel", batchParallelism
+			}
+			b.Run(fmt.Sprintf("sandboxes=%d/%s", count, mode), func(b *testing.B) {
+				client := agent37.New("fixture")
+				for b.Loop() {
+					ctx := b.Context()
+					if concurrent {
+						if _, _, err := batchPreflight(ctx, client, verifyEnrollment); err != nil {
+							b.Fatal(err)
+						}
+					} else {
+						_, _ = verifyEnrollment(ctx)
+						if _, err := client.List(ctx); err != nil {
+							b.Fatal(err)
+						}
+					}
+					batch := provisionAndPairBatch(count, min(count, workers), func(int) batchSandbox {
+						time.Sleep(18 * time.Millisecond)
+						github := func() { time.Sleep(24 * time.Millisecond) }
+						tailnet := func() error {
+							time.Sleep(28 * time.Millisecond)
+							return nil
+						}
+						if concurrent {
+							return batchSandbox{err: finishSandboxSetup(ctx, github, tailnet)}
+						}
+						github()
+						return batchSandbox{err: tailnet()}
+					}, func(*batchSandbox) {})
+					for _, item := range batch {
+						if item.err != nil {
+							b.Fatal(item.err)
+						}
+					}
+				}
+			})
+		}
+	}
 }

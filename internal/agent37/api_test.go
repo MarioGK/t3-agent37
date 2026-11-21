@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"testing/synctest"
+	"time"
 )
 
 type testTransport func(*http.Request) (int, string)
@@ -139,4 +141,28 @@ func TestWaitForT3ProbesAlternatePortAndChecksIdentity(t *testing.T) {
 	if _, _, err := client.WaitForT3(t.Context(), "ab12cd34ef", "other-id", 4373); err == nil {
 		t.Fatal("mismatched T3 environment accepted")
 	}
+}
+
+func TestWaitForT3ChecksSoonerAndBacksOffOnRateLimit(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		client := New("fixture-key")
+		var attempts []time.Time
+		client.http.Transport = testTransport(func(*http.Request) (int, string) {
+			attempts = append(attempts, time.Now())
+			switch len(attempts) {
+			case 1:
+				return http.StatusServiceUnavailable, `{}`
+			case 2:
+				return http.StatusTooManyRequests, `{}`
+			default:
+				return http.StatusOK, `{"environmentId":"env-id"}`
+			}
+		})
+		if _, _, err := client.WaitForT3(t.Context(), "ab12cd34ef", "env-id", 3773); err != nil {
+			t.Fatal(err)
+		}
+		if len(attempts) != 3 || attempts[1].Sub(attempts[0]) != 250*time.Millisecond || attempts[2].Sub(attempts[1]) != time.Second {
+			t.Fatalf("unexpected readiness retry times: %v", attempts)
+		}
+	})
 }

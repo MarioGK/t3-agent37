@@ -118,6 +118,11 @@ func newCLI(args []string, output, diagnostic io.Writer, execute func(context.Co
 				return nil, err
 			}
 		}
+		if opts.action == "up" {
+			if err := command.RegisterFlagCompletionFunc("parallel", cobra.FixedCompletions([]string{"4", "8", "16", "24", "32"}, cobra.ShellCompDirectiveNoFileComp)); err != nil {
+				return nil, err
+			}
+		}
 	}
 	return root, nil
 }

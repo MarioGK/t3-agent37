@@ -37,7 +37,7 @@ type options struct {
 	action, name, provider, template string
 	namePrefix                       string
 	targetID                         string
-	batchSize                        int
+	batchSize, parallelism           int
 	size                             sandboxSize
 	cpu, ram                         *int
 	showSize                         bool
@@ -95,6 +95,9 @@ func resolveOptions(opts options, flags *flag.FlagSet, args []string) (options, 
 				return opts, fmt.Errorf("up expects a sandbox count from 1 to %d", maxBatchSize)
 			}
 			opts.batchSize = count
+		}
+		if flags.Changed("parallel") && (opts.batchSize == 0 || opts.parallelism < 1 || opts.parallelism > maxBatchParallelism) {
+			return opts, fmt.Errorf("--parallel requires up <count> and a value from 1 to %d", maxBatchParallelism)
 		}
 		if len(args) == 0 || opts.batchSize > 0 {
 			opts.action = "create"
@@ -187,6 +190,9 @@ func onlyStartFlags(flags *flag.FlagSet) bool {
 }
 
 func addCommandFlags(flags *flag.FlagSet, opts *options) {
+	if opts.action == "up" {
+		flags.IntVar(&opts.parallelism, "parallel", batchParallelism, fmt.Sprintf("Concurrent sandbox launches for up <count> (1–%d)", maxBatchParallelism))
+	}
 	if opts.action == "config" || opts.action == "create" || opts.action == "up" {
 		opts.cpu = flags.Int("cpu", 0, "vCPUs for each new sandbox (2 or 4)")
 		opts.ram = flags.Int("ram", 0, "RAM in GB for each new sandbox (4, 8, 16, or 32)")
@@ -666,6 +672,14 @@ func runCommand(ctx context.Context, opts options, output, diagnostic io.Writer)
 		defer progress.close()
 		diagnostic = progress
 	}
+	key, err := agent37APIKey()
+	if err != nil {
+		return err
+	}
+	client := agent37.New(key)
+	if opts.batchSize > 0 {
+		return runBatch(ctx, client, verifyTailscaleEnrollment, opts, state, output, progress)
+	}
 	var enrollment *peers.Enrollment
 	if opts.action == "create" {
 		enrollment, err = verifyTailscaleEnrollment(ctx)
@@ -673,14 +687,6 @@ func runCommand(ctx context.Context, opts options, output, diagnostic io.Writer)
 			return err
 		}
 		progress.setPhase("Preparing sandbox launch")
-	}
-	key, err := agent37APIKey()
-	if err != nil {
-		return err
-	}
-	client := agent37.New(key)
-	if opts.batchSize > 0 {
-		return runBatch(ctx, client, enrollment, opts, state, output, progress)
 	}
 	if opts.action == "sync" {
 		return syncSandboxLinks(ctx, client, opts.dryRun, output, diagnostic)

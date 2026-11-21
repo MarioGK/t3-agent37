@@ -12,10 +12,12 @@ import (
 
 	"github.com/MarioGK/t3-agent37/internal/agent37"
 	"github.com/MarioGK/t3-agent37/internal/peers"
+	"golang.org/x/sync/errgroup"
 )
 
 const maxBatchSize = 100
-const batchParallelism = 10
+const batchParallelism = 16
+const maxBatchParallelism = 32
 
 func batchCountArgument(value string) bool {
 	value = strings.TrimPrefix(value, "-")
@@ -31,6 +33,7 @@ func previewBatch(ctx context.Context, opts options, state string, output io.Wri
 		return printDetails(output, fmt.Sprintf("Preview · create %d sandboxes", len(names)),
 			detail{"Sandboxes", strings.Join(names, ", ")}, detail{"Template", opts.template},
 			detail{"Provider", providerLabel(opts.provider)},
+			detail{"Concurrent", fmt.Sprint(min(opts.parallelism, len(names)))},
 			detail{"Per sandbox", fmt.Sprintf("%s · %d min auto-sleep", opts.size, sandboxIdle/time.Minute)},
 			detail{"Batch RAM", fmt.Sprintf("%d GB", len(names)*opts.size.RAM)},
 			detail{"Network", "Private Tailscale"})
@@ -50,7 +53,7 @@ type batchSandbox struct {
 	err      error
 }
 
-func runBatch(ctx context.Context, client *agent37.Client, enrollment *peers.Enrollment, opts options, state string, output io.Writer, progress *launchProgress) error {
+func runBatch(ctx context.Context, client *agent37.Client, verifyEnrollment func(context.Context) (*peers.Enrollment, error), opts options, state string, output io.Writer, progress *launchProgress) error {
 	var launcher []string
 	if !opts.noDesktop {
 		var err error
@@ -70,8 +73,8 @@ func runBatch(ctx context.Context, client *agent37.Client, enrollment *peers.Enr
 	if err := os.MkdirAll(state, 0o700); err != nil {
 		return err
 	}
-	progress.setPhase("Reserving sandbox names")
-	instances, err := client.List(ctx)
+	progress.setPhase("Checking OAuth and sandbox inventory")
+	instances, enrollment, err := batchPreflight(ctx, client, verifyEnrollment)
 	if err != nil {
 		return err
 	}
@@ -79,7 +82,7 @@ func runBatch(ctx context.Context, client *agent37.Client, enrollment *peers.Enr
 	if err != nil {
 		return err
 	}
-	parallel := min(batchParallelism, len(reserved))
+	parallel := min(opts.parallelism, len(reserved))
 	progress.preflightDone("Creating and setting up sandboxes")
 	notice(progress, info, "Provisioning %d Agent37 sandboxes, up to %d at a time…", len(reserved), parallel)
 	var ready int
@@ -124,6 +127,24 @@ func runBatch(ctx context.Context, client *agent37.Client, enrollment *peers.Enr
 	}
 	progress.close()
 	return errors.Join(errors.Join(failures...), ctx.Err(), showBatchResult(output, results, opts.noDesktop, meshPending))
+}
+
+func batchPreflight(ctx context.Context, client *agent37.Client, verifyEnrollment func(context.Context) (*peers.Enrollment, error)) ([]agent37.Instance, *peers.Enrollment, error) {
+	var enrollment *peers.Enrollment
+	var instances []agent37.Instance
+	checks, checked := errgroup.WithContext(ctx)
+	checks.Go(func() error {
+		var err error
+		enrollment, err = verifyEnrollment(checked)
+		return err
+	})
+	checks.Go(func() error {
+		var err error
+		instances, err = client.List(checked)
+		return err
+	})
+	err := checks.Wait()
+	return instances, enrollment, err
 }
 
 func provisionAndPairBatch(count, parallel int, provision func(int) batchSandbox, pair func(*batchSandbox)) []batchSandbox {

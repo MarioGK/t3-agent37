@@ -61,8 +61,9 @@ finish pairing with `link <name>`. Use `link` to pair each managed sandbox in
 turn, or `up --no-desktop` for unattended provisioning.
 `connect <name> --pair` prints a link for manual pairing.
 
-`up <count>` creates 1 to 100 new sandboxes with up to ten provisioning
-at once. The batch keeps successful sandboxes if others fail. Use `link <name>`
+`up <count>` creates 1 to 100 new sandboxes with up to 16 provisioning at
+once by default. Use `--parallel` to set a limit between 1 and 32. The batch
+keeps successful sandboxes if others fail. Use `link <name>`
 to retry a pending desktop pairing. The CLI starts approvals as sandboxes
 become ready. T3 Code shows one approval at a time while other sandboxes keep
 provisioning. One sync runs after the pairing attempts. Use `up <count> --no-desktop`
@@ -72,6 +73,15 @@ with `start <name>`.
 At 8 GB per sandbox, ten new sandboxes require 80 GB of running memory in
 addition to the memory in use by existing sandboxes. Agent37 enforces the
 [workspace memory limit](https://www.agent37.com/docs/agents-api/errors#sandbox-api-codes).
+
+Batch preflight checks OAuth and reads the Agent37 inventory concurrently.
+Each guest configures GitHub access while its private Tailscale endpoint comes
+up. Both steps finish before desktop pairing. To measure scheduling with fixed
+service delays and no cloud calls, run:
+
+```sh
+go test ./cmd/t3-agent37 -run '^$' -bench '^BenchmarkUpPipeline$' -benchtime=8x -count=4
+```
 
 `sleep [name]` suspends the sandbox and keeps its disk, Tailscale enrollment,
 and T3 links. Omit the name to suspend the newest managed sandbox. Run

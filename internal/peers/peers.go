@@ -288,10 +288,14 @@ func (p peerAPI) verify(ctx context.Context, attempts int, requirePeerLinks bool
 	var requestErr error
 	for attempt := range max(attempts, 1) {
 		if attempt > 0 {
+			delay := time.Second
+			if !requirePeerLinks && attempt <= 8 {
+				delay = 250 * time.Millisecond
+			}
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case <-time.After(time.Second):
+			case <-time.After(delay):
 			}
 		}
 		var row descriptor
@@ -323,7 +327,7 @@ func VerifyTailnet(ctx context.Context, name, environmentID, address string) (st
 	timeout := fmt.Errorf("%s joined Tailscale, but its private HTTPS endpoint did not become ready within one minute", name)
 	ready, cancel := context.WithTimeoutCause(ctx, time.Minute, timeout)
 	defer cancel()
-	if err := target.verify(ready, 60, false); err != nil {
+	if err := target.verify(ready, 240, false); err != nil {
 		return "", cmp.Or(context.Cause(ready), err)
 	}
 	return origin, nil

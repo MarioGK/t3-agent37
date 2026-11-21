@@ -394,7 +394,11 @@ func (c *Client) WaitForT3(ctx context.Context, id, expected string, remotePort 
 	// deadline by canceling the enclosing command context.
 	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
-	for {
+	for cycle := 0; ; cycle++ {
+		delay := 250 * time.Millisecond
+		if cycle >= 8 {
+			delay = time.Second
+		}
 		for _, port := range ports {
 			origin, err := ProtectedOrigin(id, port)
 			if err != nil {
@@ -412,7 +416,9 @@ func (c *Client) WaitForT3(ctx context.Context, id, expected string, remotePort 
 			}
 			if apiError, ok := errors.AsType[*Error](err); ok {
 				switch apiError.Status {
-				case 404, 409, 425, 429, 502, 503, 504:
+				case http.StatusTooManyRequests:
+					delay = time.Second
+				case 404, 409, 425, 502, 503, 504:
 				default:
 					return Descriptor{}, 0, fmt.Errorf("protected T3 endpoint returned HTTP %d", apiError.Status)
 				}
@@ -424,7 +430,7 @@ func (c *Client) WaitForT3(ctx context.Context, id, expected string, remotePort 
 				return Descriptor{}, 0, ctx.Err()
 			}
 			return Descriptor{}, 0, errT3Ready
-		case <-time.After(time.Second):
+		case <-time.After(delay):
 		}
 	}
 }
