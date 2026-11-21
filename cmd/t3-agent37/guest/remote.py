@@ -369,21 +369,25 @@ def desktop_confirmed(environment_id):
         return False
 
 
-def pairing_status(label, environment_id):
-    if not re.fullmatch(r"t3-agent37-desktop-[a-f0-9]{32}", label):
+def pairing_status(label, environment_id, *previous_labels):
+    labels = {label, *previous_labels}
+    if not all(re.fullmatch(r"t3-agent37-desktop-[a-f0-9]{32}", item) for item in labels):
         raise RuntimeError("Invalid desktop confirmation label")
     current = descriptor()
-    if current is None or current["environmentId"] != environment_id:
-        raise RuntimeError("T3 environment changed while confirming desktop pairing")
+    if current is None:
+        raise RuntimeError("T3 is temporarily unavailable while confirming desktop pairing")
+    if current["environmentId"] != environment_id:
+        print(json.dumps({"changed": True}))
+        return
     result = subprocess.run([
         str(T3), "auth", "session", "list", "--base-dir", str(DATA), "--json",
-    ], check=True, capture_output=True, text=True, timeout=10)
+    ], check=True, capture_output=True, text=True, timeout=5)
     # The grant label is carried to the session during token exchange. The
     # first RPC connection follows redemption by the confirmed desktop.
-    confirmed = any(session.get("subject") == "one-time-token"
-                    and (session.get("client") or {}).get("label") == label
-                    and session.get("lastConnectedAt")
-                    for session in json.loads(result.stdout))
+    sessions = [((session.get("client") or {}).get("label"), session.get("lastConnectedAt"))
+                for session in json.loads(result.stdout) if session.get("subject") == "one-time-token"]
+    redeemed = any(session_label == label for session_label, _ in sessions)
+    confirmed = any(session_label in labels and connected_at for session_label, connected_at in sessions)
     if confirmed:
         with tempfile.NamedTemporaryFile(mode="w", dir=ROOT, delete=False) as staged:
             path = Path(staged.name)
@@ -393,7 +397,7 @@ def pairing_status(label, environment_id):
                 path.replace(ROOT / "desktop-confirmed")
             finally:
                 path.unlink(missing_ok=True)
-    print(json.dumps({"confirmed": confirmed}))
+    print(json.dumps({"confirmed": confirmed, "redeemed": redeemed}))
 
 
 def manage_tailnet(action, *args):

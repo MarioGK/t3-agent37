@@ -7,7 +7,9 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -23,24 +25,79 @@ func TestDesktopPairingURLPreservesPrivateOriginAndFragment(t *testing.T) {
 }
 
 func TestWaitForDesktopRequiresConfirmation(t *testing.T) {
-	attempts := 0
-	if err := waitForDesktop(t.Context(), time.Millisecond, func(context.Context) (bool, error) {
-		attempts++
-		if attempts == 1 {
-			return false, errors.New("temporary probe failure")
+	synctest.Test(t, func(t *testing.T) {
+		opened, attempts := 0, 0
+		open := func(context.Context) (string, error) {
+			opened++
+			return "first", nil
 		}
-		return attempts == 3, nil
-	}); err != nil || attempts != 3 {
-		t.Fatalf("waiting for desktop: attempts=%d, error=%v", attempts, err)
+		var lastHealthy time.Time
+		err := waitForDesktop(t.Context(), open, func(context.Context, string, string) (desktopPairingStatus, error) {
+			attempts++
+			if attempts <= 4 {
+				return desktopPairingStatus{}, errors.New("temporary probe failure")
+			}
+			if attempts == 5 {
+				lastHealthy = time.Now()
+				return desktopPairingStatus{}, nil
+			}
+			if time.Since(lastHealthy) != 500*time.Millisecond {
+				t.Errorf("steady polling interval was %v", time.Since(lastHealthy))
+			}
+			return desktopPairingStatus{Confirmed: true}, nil
+		}, func() { t.Error("probe errors should not reopen the approval prompt") })
+		if err != nil || attempts != 6 || opened != 1 {
+			t.Fatalf("waiting for desktop: opened=%d, attempts=%d, err=%v", opened, attempts, err)
+		}
+	})
+}
+
+func TestWaitForDesktopRetriesAStalledConnectionOnce(t *testing.T) {
+	for _, recovers := range []bool{true, false} {
+		synctest.Test(t, func(t *testing.T) {
+			var opened, retries int
+			labels := []string{"first", "second"}
+			var started time.Time
+			open := func(context.Context) (string, error) {
+				if opened == len(labels) {
+					t.Fatal("opened more than one retry")
+				}
+				label := labels[opened]
+				opened++
+				started = time.Now()
+				return label, nil
+			}
+			err := waitForDesktop(t.Context(), open, func(_ context.Context, label, previous string) (desktopPairingStatus, error) {
+				if label == "second" && previous != "first" {
+					t.Error("the first request stopped being checked after retry")
+				}
+				return desktopPairingStatus{Redeemed: true, Confirmed: label == "second" && recovers}, nil
+			}, func() {
+				if time.Since(started) < desktopConnectGrace {
+					t.Error("retried before the desktop had time to connect")
+				}
+				retries++
+			})
+			if opened != 2 || retries != 1 || (err == nil) != recovers {
+				t.Fatalf("opened=%d, retries=%d, err=%v", opened, retries, err)
+			}
+		})
 	}
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-	if err := waitForDesktop(ctx, time.Hour, func(context.Context) (bool, error) {
-		cancel()
-		return false, nil
-	}); !errors.Is(err, context.Canceled) {
-		t.Fatalf("canceled desktop wait: %v", err)
-	}
+}
+
+func TestWaitForDesktopDoesNotRepeatAnUnansweredPrompt(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+		defer cancel()
+		err := waitForDesktop(ctx, func(context.Context) (string, error) { return "first", nil },
+			func(context.Context, string, string) (desktopPairingStatus, error) {
+				return desktopPairingStatus{}, nil
+			},
+			func() { t.Error("reopened an unanswered request") })
+		if err == nil || !strings.Contains(err.Error(), "confirmation timed out") {
+			t.Fatalf("unanswered confirmation: %v", err)
+		}
+	})
 }
 
 func TestLinkDryRunListsAllManagedSandboxesOrOneByName(t *testing.T) {

@@ -21,6 +21,18 @@ import (
 
 const desktopConfirmationKey = "desktop_confirmation"
 
+const (
+	desktopPollInterval   = 500 * time.Millisecond
+	desktopConnectGrace   = 10 * time.Second
+	maxDesktopProbeOutage = 30 * time.Second
+)
+
+type desktopPairingStatus struct {
+	Confirmed bool
+	Redeemed  bool
+	Changed   bool
+}
+
 func requiresDesktopConfirmation(instance agent37.Instance) bool {
 	return instance.Metadata[desktopConfirmationKey] == "required"
 }
@@ -59,31 +71,33 @@ func desktopPairingURL(pairing string) string {
 }
 
 func handOffPairing(ctx context.Context, client *agent37.Client, instance agent37.Instance, name string, proof setupProof, launcher []string, diagnostic io.Writer) error {
-	var nonce [16]byte
-	if _, err := rand.Read(nonce[:]); err != nil {
-		return err
-	}
-	label := "t3-agent37-desktop-" + hex.EncodeToString(nonce[:])
 	confirmation, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
-	pairing, err := pairLink(confirmation, client, instance.ID, proof.TailnetURL, label)
-	if err != nil {
-		return err
+	open := func(ctx context.Context) (string, error) {
+		var nonce [16]byte
+		_, _ = rand.Read(nonce[:])
+		label := "t3-agent37-desktop-" + hex.EncodeToString(nonce[:])
+		pairing, err := pairLink(ctx, client, instance.ID, proof.TailnetURL, label)
+		if err != nil {
+			return "", err
+		}
+		if err := openDesktopPairing(ctx, launcher, pairing); err != nil {
+			return "", err
+		}
+		notice(diagnostic, info, "Confirm %s in T3 Code. Waiting before linking environments…", name)
+		return label, nil
 	}
-	args := append(slices.Clone(launcher[1:]), desktopPairingURL(pairing))
-	openCtx, stopOpening := context.WithTimeout(confirmation, 8*time.Second)
-	defer stopOpening()
-	// Do not forward launcher errors or output that could contain the one-time link.
-	if err := exec.CommandContext(openCtx, launcher[0], args...).Run(); err != nil {
-		return errors.New("could not open the pairing request in T3 Code")
-	}
-	notice(diagnostic, info, "Confirm %s in T3 Code. Waiting before linking environments…", name)
-	command := remote + " pair-status " + shellQuote(label) + " " + shellQuote(proof.EnvironmentID)
-	err = waitForDesktop(confirmation, 2*time.Second, func(checkCtx context.Context) (bool, error) {
-		attempt, stop := context.WithTimeout(checkCtx, 15*time.Second)
+	check := func(ctx context.Context, label, previous string) (desktopPairingStatus, error) {
+		command := remote + " pair-status " + shellQuote(label) + " " + shellQuote(proof.EnvironmentID)
+		if previous != "" {
+			command += " " + shellQuote(previous)
+		}
+		attempt, stop := context.WithTimeout(ctx, 8*time.Second)
 		defer stop()
-		state, err := client.ExecJSON[struct{ Confirmed bool }](attempt, instance.ID, command)
-		return state.Confirmed, err
+		return client.ExecJSON[desktopPairingStatus](attempt, instance.ID, command)
+	}
+	err := waitForDesktop(confirmation, open, check, func() {
+		notice(diagnostic, warning, "T3 Code accepted the pairing for %s but did not connect. Opening a fresh request…", name)
 	})
 	if err == nil {
 		notice(diagnostic, success, "T3 Code confirmed %s.", name)
@@ -91,24 +105,79 @@ func handOffPairing(ctx context.Context, client *agent37.Client, instance agent3
 	return err
 }
 
-func waitForDesktop(ctx context.Context, interval time.Duration, check func(context.Context) (bool, error)) error {
-	var failures int
-	for ctx.Err() == nil {
-		confirmed, err := check(ctx)
+func openDesktopPairing(ctx context.Context, launcher []string, pairing string) error {
+	args := append(slices.Clone(launcher[1:]), desktopPairingURL(pairing))
+	for attempt := range 2 {
+		openCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+		// The error and output could contain the one-time link.
+		err := exec.CommandContext(openCtx, launcher[0], args...).Run()
+		cancel()
 		if err == nil {
-			if confirmed {
-				return nil
+			return nil
+		}
+		if attempt == 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(desktopPollInterval):
 			}
-			failures = 0
-		} else if ctx.Err() == nil {
-			failures++
-			if failures == 3 {
-				return errors.New("could not verify desktop confirmation on the sandbox")
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return errors.New("could not open the pairing request in T3 Code after retrying")
+}
+
+func waitForDesktop(ctx context.Context, open func(context.Context) (string, error), check func(context.Context, string, string) (desktopPairingStatus, error), onRetry func()) error {
+	label, err := open(ctx)
+	if err != nil {
+		return err
+	}
+	var previous string
+	var redeemedAt, outageSince time.Time
+	delay := desktopPollInterval
+	for ctx.Err() == nil {
+		state, err := check(ctx, label, previous)
+		if ctx.Err() != nil {
+			break
+		}
+		switch {
+		case err != nil:
+			if outageSince.IsZero() {
+				outageSince = time.Now()
+			}
+			if time.Since(outageSince) >= maxDesktopProbeOutage {
+				return fmt.Errorf("could not check T3 desktop pairing after retrying: %w", err)
+			}
+			delay = min(delay*2, 4*time.Second)
+		case state.Changed:
+			return errors.New("T3 environment changed during desktop pairing")
+		case state.Confirmed:
+			return nil
+		default:
+			outageSince = time.Time{}
+			delay = desktopPollInterval
+			if state.Redeemed && redeemedAt.IsZero() {
+				redeemedAt = time.Now()
+			}
+			if !redeemedAt.IsZero() && time.Since(redeemedAt) >= desktopConnectGrace {
+				if previous != "" {
+					return errors.New("T3 Code accepted the pairing but did not connect after retrying")
+				}
+				onRetry()
+				previous = label
+				label, err = open(ctx)
+				if err != nil {
+					return err
+				}
+				redeemedAt = time.Time{}
+				continue
 			}
 		}
 		select {
 		case <-ctx.Done():
-		case <-time.After(interval):
+		case <-time.After(delay):
 		}
 	}
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {

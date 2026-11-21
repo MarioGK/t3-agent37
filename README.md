@@ -44,7 +44,9 @@ links the managed sandboxes and [configured T3 servers](docs/terrascale.md#link-
 to each other over Tailscale. Run `sync` to retry pending links.
 Bare `up` opens the desktop pairing request and waits for the new sandbox to
 connect before linking it to other environments. Confirm its private address
-in T3 Code within five minutes. Run `link <name>` to retry a pending pairing.
+in T3 Code within five minutes. If T3 accepts the pairing but fails to connect,
+the CLI opens one fresh confirmation request. Run `link <name>` to retry a
+pairing that still needs attention.
 The desktop displays the same sandbox name as `t3-agent37 ls`.
 Use `up --no-desktop` for headless runs.
 `up 10` creates ten new sandboxes in parallel using the next free names.

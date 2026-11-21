@@ -16,18 +16,28 @@ from remote import desktop_confirmed, pairing_status, provider_ready
 class DesktopPairingTest(unittest.TestCase):
     def test_only_matching_connected_pairing_session_confirms(self):
         label = "t3-agent37-desktop-" + "a" * 32
+        previous = "t3-agent37-desktop-" + "b" * 32
         session = {"subject": "one-time-token", "client": {"label": label}, "lastConnectedAt": "2026-11-20T18:00:00Z"}
+        earlier = dict(session, client={"label": previous})
         with tempfile.TemporaryDirectory() as directory, patch("remote.ROOT", Path(directory)), \
                 patch("remote.descriptor", return_value={"environmentId": "sandbox-id"}):
-            for records, expected in (
-                    ([], False), ([dict(session, client={"label": "other"})], False),
-                    ([dict(session, lastConnectedAt=None)], False), ([session], True)):
+            for records, redeemed, confirmed in (
+                    ([], False, False), ([dict(session, client={"label": "other"})], False, False),
+                    ([dict(session, lastConnectedAt=None)], True, False),
+                    ([earlier], False, True), ([session], True, True)):
                 with patch("remote.subprocess.run", return_value=SimpleNamespace(stdout=json.dumps(records))), \
                         redirect_stdout(io.StringIO()) as output:
-                    pairing_status(label, "sandbox-id")
-                self.assertEqual(json.loads(output.getvalue()), {"confirmed": expected})
-                self.assertEqual(desktop_confirmed("sandbox-id"), expected)
+                    pairing_status(label, "sandbox-id", previous)
+                self.assertEqual(json.loads(output.getvalue()), {"confirmed": confirmed, "redeemed": redeemed})
+                self.assertEqual(desktop_confirmed("sandbox-id"), confirmed)
                 self.assertFalse(desktop_confirmed("other-environment"))
+
+    def test_changed_identity_stops_before_checking_sessions(self):
+        with patch("remote.descriptor", return_value={"environmentId": "other"}), \
+                patch("remote.subprocess.run") as command, redirect_stdout(io.StringIO()) as output:
+            pairing_status("t3-agent37-desktop-" + "a" * 32, "sandbox-id")
+        self.assertEqual(json.loads(output.getvalue()), {"changed": True})
+        command.assert_not_called()
 
 
 class ProvidersTest(unittest.TestCase):

@@ -141,6 +141,30 @@ func TestNativeT3Smoke(t *testing.T) {
 	if err = nativeSmokeJSON(ctx, client, http.MethodPost, origin+"/oauth/token", form, "", &token); err != nil || token.Access == "" {
 		t.Fatalf("exchange T3 pairing credential: %v", err)
 	}
+	checkPairingSession := func(connected bool) {
+		t.Helper()
+		command := exec.CommandContext(ctx, binary, "auth", "session", "list", "--base-dir", base, "--json")
+		command.Env = env
+		listing, err := command.Output()
+		if err != nil {
+			t.Fatal("could not inspect the authenticated client session")
+		}
+		type sessionEntry struct {
+			Subject         string                 `json:"subject"`
+			LastConnectedAt string                 `json:"lastConnectedAt"`
+			Client          struct{ Label string } `json:"client"`
+		}
+		var sessions []sessionEntry
+		if err := json.Unmarshal(listing, &sessions); err != nil {
+			t.Fatal("T3 returned an invalid session list")
+		}
+		if !slices.ContainsFunc(sessions, func(session sessionEntry) bool {
+			return session.Subject == "one-time-token" && session.Client.Label == "smoke" && (session.LastConnectedAt != "") == connected
+		}) {
+			t.Fatalf("expected a redeemed pairing session with connected=%t", connected)
+		}
+	}
+	checkPairingSession(false)
 	var auth struct {
 		Ticket string `json:"ticket"`
 	}
@@ -176,26 +200,7 @@ func TestNativeT3Smoke(t *testing.T) {
 	if err = conn.ReadJSON(&pong); err != nil || pong.Tag != "Pong" {
 		t.Fatalf("read native T3 Pong: %v", err)
 	}
-	sessionList := exec.CommandContext(ctx, binary, "auth", "session", "list", "--base-dir", base, "--json")
-	sessionList.Env = env
-	listing, err := sessionList.Output()
-	if err != nil {
-		t.Fatal("could not inspect the authenticated client session")
-	}
-	type sessionEntry struct {
-		Subject         string                 `json:"subject"`
-		LastConnectedAt string                 `json:"lastConnectedAt"`
-		Client          struct{ Label string } `json:"client"`
-	}
-	var sessions []sessionEntry
-	if err := json.Unmarshal(listing, &sessions); err != nil {
-		t.Fatal("T3 returned an invalid session list")
-	}
-	if !slices.ContainsFunc(sessions, func(session sessionEntry) bool {
-		return session.Subject == "one-time-token" && session.Client.Label == "smoke" && session.LastConnectedAt != ""
-	}) {
-		t.Fatalf("the connected client did not retain the pairing label: %+v", sessions)
-	}
+	checkPairingSession(true)
 	if err := conn.Close(); err != nil {
 		t.Fatal(err)
 	}
