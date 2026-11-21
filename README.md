@@ -55,6 +55,8 @@ between 1 and 32, for example `up 24 --parallel 24`.
 T3 Code prompts for each sandbox as it becomes ready while the others keep
 provisioning. The CLI checks for confirmation with a 100 ms delay, waits
 longer if Agent37 rate-limits the checks, and syncs the mesh once at the end.
+It prepares the pairing code while HTTPS becomes ready and opens it after
+the sandbox and its projects pass verification.
 `up 10 --dry-run` previews the batch. `up 10 --no-desktop` runs it headless.
 Use `up <name>` to start an existing sandbox.
 The terminal progress bar starts with the launch checks and tracks sandbox

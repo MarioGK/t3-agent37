@@ -424,10 +424,10 @@ def register_projects(checkouts):
         )
 
 
-def pair(address, label="t3-agent37"):
+def pair(address, label="t3-agent37", ttl="5m"):
     result = subprocess.run([
         str(T3), "auth", "pairing", "create", "--base-dir", str(DATA),
-        "--ttl", "5m", "--label", label, "--base-url", address,
+        "--ttl", ttl, "--label", label, "--base-url", address,
         "--json",
     ], check=True, capture_output=True, text=True)
     print(result.stdout.strip())

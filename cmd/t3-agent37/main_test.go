@@ -196,7 +196,7 @@ func TestProvisioningRequiresTailnetBeforeCreatingState(t *testing.T) {
 	if _, err := os.Stat(os.Getenv("XDG_STATE_HOME")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("up reserved state before it found the credential: %v", err)
 	}
-	if _, err := pairLink(t.Context(), nil, "aaaaaaaaaa", "http://127.0.0.1:43738", "t3-agent37"); err == nil {
+	if _, err := pairLink(t.Context(), nil, "aaaaaaaaaa", "http://127.0.0.1:43738", "t3-agent37", desktopPairingTimeout); err == nil {
 		t.Fatal("pairing accepted a loopback origin")
 	}
 }

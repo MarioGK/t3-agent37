@@ -56,7 +56,7 @@ func PruneSandboxLinks(ctx context.Context, configured []Peer, dryRun bool,
 ) ([]SandboxLink, error) {
 	results := make([][]SandboxLink, len(configured))
 	failures := make([]error, len(configured))
-	forMeshNode(ctx, len(configured), func(i int) {
+	forMeshNode(ctx, len(configured), meshWorkers, func(i int) {
 		results[i], failures[i] = prunePeer(ctx, configured[i], dryRun, visit)
 	})
 	return slices.Concat(results...), errors.Join(errors.Join(failures...), ctx.Err())

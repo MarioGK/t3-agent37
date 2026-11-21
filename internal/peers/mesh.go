@@ -13,6 +13,8 @@ import (
 	"time"
 )
 
+const meshWorkers = 6
+
 // MeshNode describes a managed sandbox with its verified private T3 address
 // and a way to issue a short-lived owner session for this environment.
 type MeshNode struct {
@@ -58,7 +60,7 @@ func reconcileMesh(ctx context.Context, client *http.Client, candidates []MeshNo
 
 	endpoints := make([]meshEndpoint, len(nodes))
 	availability := make([]error, len(nodes))
-	forMeshNode(ctx, len(nodes), func(i int) {
+	forMeshNode(ctx, len(nodes), meshWorkers, func(i int) {
 		node := nodes[i]
 		api := newPeerAPI(client, node.Name, node.URL, node.EnvironmentID)
 		if err := api.verify(ctx, 2, true); err != nil {
@@ -80,7 +82,7 @@ func reconcileMesh(ctx context.Context, client *http.Client, candidates []MeshNo
 
 	counts := make([]int, len(available))
 	failures := make([]error, len(available))
-	forMeshNode(ctx, len(available), func(i int) {
+	forMeshNode(ctx, len(available), meshWorkers, func(i int) {
 		counts[i], failures[i] = reconcileSource(ctx, available[i], available)
 	})
 	var count int
@@ -99,19 +101,22 @@ func reconcileSource(ctx context.Context, source meshEndpoint, targets []meshEnd
 	for _, entry := range entries {
 		previous[entry.EnvironmentID] = entry
 	}
-	var count int
-	var failures []error
-	for _, target := range targets {
-		if ctx.Err() != nil {
-			break
-		}
+	completed := make([]bool, len(targets))
+	failures := make([]error, len(targets))
+	forMeshNode(ctx, len(targets), 2, func(i int) {
+		target := targets[i]
 		if source.api.environmentID == target.api.environmentID {
-			continue
+			return
 		}
-		err := ensureMeshLink(ctx, source, target, previous[target.api.environmentID])
-		if err != nil {
-			failures = append(failures, fmt.Errorf("%s to %s: %w", source.api.name, target.api.name, err))
+		if err := ensureMeshLink(ctx, source, target, previous[target.api.environmentID]); err != nil {
+			failures[i] = fmt.Errorf("%s to %s: %w", source.api.name, target.api.name, err)
 		} else {
+			completed[i] = true
+		}
+	})
+	var count int
+	for _, success := range completed {
+		if success {
 			count++
 		}
 	}
@@ -193,8 +198,8 @@ func (node MeshNode) issue(ctx context.Context) (string, error) {
 	return "", fmt.Errorf("could not authorize T3 peer administration on %s", node.Name)
 }
 
-func forMeshNode(ctx context.Context, count int, run func(int)) {
-	workers := min(count, 6)
+func forMeshNode(ctx context.Context, count, limit int, run func(int)) {
+	workers := min(count, limit)
 	var group sync.WaitGroup
 	for worker := range workers {
 		group.Go(func() {
@@ -221,7 +226,7 @@ func PruneMeshSandboxLinks(ctx context.Context, sandboxes []MeshNode, dryRun boo
 	defer client.CloseIdleConnections()
 	results := make([][]SandboxLink, len(nodes))
 	failures := make([]error, len(nodes))
-	forMeshNode(ctx, len(nodes), func(i int) {
+	forMeshNode(ctx, len(nodes), meshWorkers, func(i int) {
 		results[i], failures[i] = pruneMeshNode(ctx, client, nodes[i], dryRun, visit)
 	})
 	return slices.Concat(results...), errors.Join(validation, errors.Join(failures...), ctx.Err())

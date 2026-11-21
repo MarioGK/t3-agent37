@@ -26,12 +26,29 @@ const (
 	desktopPollInterval   = 100 * time.Millisecond
 	desktopConnectGrace   = 10 * time.Second
 	maxDesktopProbeOutage = 30 * time.Second
+	desktopPairingTimeout = 5 * time.Minute
+	earlyPairingMaxAge    = time.Minute
 )
 
 type desktopPairingStatus struct {
 	Confirmed bool
 	Redeemed  bool
 	Changed   bool
+}
+
+type desktopPairing struct {
+	url, label string
+	issuedAt   time.Time
+}
+
+func issueDesktopPairing(ctx context.Context, client *agent37.Client, id, origin string, ttl time.Duration) (desktopPairing, error) {
+	pairing := desktopPairing{issuedAt: time.Now()}
+	var nonce [16]byte
+	_, _ = rand.Read(nonce[:])
+	pairing.label = "t3-agent37-desktop-" + hex.EncodeToString(nonce[:])
+	var err error
+	pairing.url, err = pairLink(ctx, client, id, origin, pairing.label, ttl)
+	return pairing, err
 }
 
 func requiresDesktopConfirmation(instance agent37.Instance) bool {
@@ -73,21 +90,24 @@ func desktopPairingURL(pairing string) string {
 
 func handOffPairing(ctx context.Context, client *agent37.Client, instance agent37.Instance, name string, proof setupProof, launcher []string, diagnostic io.Writer) error {
 	started := time.Now()
-	confirmation, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	confirmation, cancel := context.WithTimeout(ctx, desktopPairingTimeout)
 	defer cancel()
+	prepared := proof.preparedPairing
 	open := func(ctx context.Context) (string, error) {
-		var nonce [16]byte
-		_, _ = rand.Read(nonce[:])
-		label := "t3-agent37-desktop-" + hex.EncodeToString(nonce[:])
-		pairing, err := pairLink(ctx, client, instance.ID, proof.TailnetURL, label)
-		if err != nil {
-			return "", err
+		pairing := prepared
+		prepared = desktopPairing{}
+		if pairing.url == "" || time.Since(pairing.issuedAt) >= earlyPairingMaxAge {
+			var err error
+			pairing, err = issueDesktopPairing(ctx, client, instance.ID, proof.TailnetURL, desktopPairingTimeout)
+			if err != nil {
+				return "", err
+			}
 		}
-		if err := openDesktopPairing(ctx, launcher, pairing); err != nil {
+		if err := openDesktopPairing(ctx, launcher, pairing.url); err != nil {
 			return "", err
 		}
 		notice(diagnostic, info, "Confirm %s in T3 Code. Waiting before linking environments…", name)
-		return label, nil
+		return pairing.label, nil
 	}
 	check := func(ctx context.Context, label, previous string) (desktopPairingStatus, error) {
 		command := remote + " pair-status " + shellQuote(label) + " " + shellQuote(proof.EnvironmentID)

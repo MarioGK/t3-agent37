@@ -625,7 +625,7 @@ func operate(ctx context.Context, client *agent37.Client, enrollment *peers.Enro
 		return outputErr
 	}
 	if opts.pair {
-		pairing, err := pairLink(ctx, client, instance.ID, proof.TailnetURL, "t3-agent37")
+		pairing, err := pairLink(ctx, client, instance.ID, proof.TailnetURL, "t3-agent37", desktopPairingTimeout)
 		if err != nil {
 			return err
 		}

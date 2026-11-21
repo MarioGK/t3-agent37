@@ -55,6 +55,7 @@ type setupProof struct {
 	DesktopConfirmed bool   `json:"desktopConfirmed"`
 	TailnetURL       string `json:"-"`
 	RequestedName    string `json:"-"`
+	preparedPairing  desktopPairing
 }
 
 func shellQuote(value string) string {
@@ -169,6 +170,7 @@ func joinTailnetOnce(ctx context.Context, client *agent37.Client, enrollment *pe
 
 type sandboxBootstrap struct {
 	peerLinks, mayRestart, githubAccess, skipWorkspace bool
+	prepareDesktop                                     bool
 	playbook                                           *workspacePlaybook
 }
 
@@ -284,12 +286,26 @@ func bootstrap(ctx context.Context, client *agent37.Client, enrollment *peers.En
 			}
 		}
 		verifyStarted := time.Now()
-		var err error
-		proof.TailnetURL, err = peers.VerifyTailnet(ctx, name, proof.EnvironmentID, url)
-		if err == nil {
-			launchTiming(diagnostic, name, "Tailscale HTTPS verification", verifyStarted)
+		var preparePairing func()
+		if settings.prepareDesktop {
+			// Hold the one-time URL in memory until HTTPS and the workspace are ready.
+			preparePairing = func() {
+				preparation, cancel := context.WithTimeout(ctx, 8*time.Second)
+				defer cancel()
+				pairing, err := issueDesktopPairing(preparation, client, instance.ID, url, desktopPairingTimeout+earlyPairingMaxAge)
+				if err == nil {
+					proof.preparedPairing = pairing
+				}
+			}
 		}
-		return err
+		return finishSandboxSetup(ctx, preparePairing, func() error {
+			var err error
+			proof.TailnetURL, err = peers.VerifyTailnet(ctx, name, proof.EnvironmentID, url)
+			if err == nil {
+				launchTiming(diagnostic, name, "Tailscale HTTPS verification", verifyStarted)
+			}
+			return err
+		})
 	})
 	return proof, errors.Join(err, workspaceErr)
 }
@@ -308,14 +324,14 @@ func publishTailnet(ctx context.Context, client *agent37.Client, enrollment *pee
 	return private.URL, err
 }
 
-func finishSandboxSetup(ctx context.Context, github func(), tailnet func() error) error {
-	if github == nil {
-		return tailnet()
+func finishSandboxSetup(ctx context.Context, background func(), foreground func() error) error {
+	if background == nil {
+		return foreground()
 	}
-	var handoff sync.WaitGroup
-	handoff.Go(github)
-	err := tailnet()
-	handoff.Wait()
+	var group sync.WaitGroup
+	group.Go(background)
+	err := foreground()
+	group.Wait()
 	return cmp.Or(ctx.Err(), err)
 }
 
@@ -482,7 +498,8 @@ func prepareCreated(ctx context.Context, client *agent37.Client, enrollment *pee
 		}
 	}
 	proof, err := bootstrap(ctx, client, enrollment, instance, opts.name, sandboxBootstrap{
-		peerLinks: true, mayRestart: wasStopped, githubAccess: opts.githubAccess, playbook: opts.playbook,
+		peerLinks: true, mayRestart: wasStopped, githubAccess: opts.githubAccess,
+		prepareDesktop: opts.up && !opts.noDesktop, playbook: opts.playbook,
 	}, diagnostic)
 	if err == nil && !proof.ProviderReady {
 		notice(diagnostic, warning, "%s needs sign-in. Run t3-agent37 terminal %s.", providerLabel(provider), opts.name)
@@ -541,7 +558,7 @@ func prepare(ctx context.Context, client *agent37.Client, instance agent37.Insta
 	return nil
 }
 
-func pairLink(ctx context.Context, client *agent37.Client, id, origin, label string) (string, error) {
+func pairLink(ctx context.Context, client *agent37.Client, id, origin, label string, ttl time.Duration) (string, error) {
 	base, err := url.Parse(origin)
 	if err != nil {
 		return "", err
@@ -549,7 +566,8 @@ func pairLink(ctx context.Context, client *agent37.Client, id, origin, label str
 	if base.Scheme != "https" || !strings.HasSuffix(base.Hostname(), ".ts.net") {
 		return "", errors.New("T3 pairing requires a private Tailscale HTTPS address")
 	}
-	reply, err := client.ExecJSON[struct{ PairURL string }](ctx, id, remote+" pair "+shellQuote(origin)+" "+shellQuote(label))
+	command := remote + " pair " + shellQuote(origin) + " " + shellQuote(label) + fmt.Sprintf(" %ds", int(ttl/time.Second))
+	reply, err := client.ExecJSON[struct{ PairURL string }](ctx, id, command)
 	if err != nil {
 		return "", err
 	}
