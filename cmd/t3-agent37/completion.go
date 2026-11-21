@@ -17,112 +17,130 @@ import (
 )
 
 type cliCommand struct {
-	name, action, summary string
-	sandbox               bool
+	name, action, summary, group string
+	sandbox                      bool
 }
 
 var commands = []cliCommand{
-	{name: "setup", summary: "Set up Agent37, Tailscale, and the model provider"},
-	{name: "config", summary: "Edit sandbox defaults"},
-	{name: "create", summary: "Create a sandbox", sandbox: true},
-	{name: "up", summary: "Create sandboxes or start one by name", sandbox: true},
-	{name: "start", summary: "Start an existing sandbox", sandbox: true},
-	{name: "down", summary: "Permanently delete sandboxes and their disks", sandbox: true},
-	{name: "sleep", summary: "Suspend a sandbox and keep its disk and T3 links", sandbox: true},
-	{name: "stop", summary: "Stop a sandbox and keep its disk", sandbox: true},
-	{name: "list", summary: "List managed sandboxes"},
-	{name: "ls", action: "list", summary: "List managed sandboxes"},
-	{name: "sync", summary: "Link T3 environments and remove stale links"},
-	{name: "link", summary: "Pair existing sandboxes with T3 Code", sandbox: true},
-	{name: "connect", summary: "Show a sandbox's T3 Code address", sandbox: true},
-	{name: "prepare", summary: "Refresh a sandbox's model catalog", sandbox: true},
-	{name: "terminal", summary: "Show the Agent37 terminal link", sandbox: true},
+	{name: "setup", group: "workstation", summary: "Set up Agent37, Tailscale, and the model provider"},
+	{name: "config", group: "workstation", summary: "Edit sandbox defaults"},
+	{name: "create", group: "sandbox", summary: "Create a sandbox", sandbox: true},
+	{name: "up", group: "sandbox", summary: "Create sandboxes or start one by name", sandbox: true},
+	{name: "start", group: "sandbox", summary: "Start an existing sandbox", sandbox: true},
+	{name: "down", group: "sandbox", summary: "Permanently delete sandboxes and their disks", sandbox: true},
+	{name: "sleep", group: "sandbox", summary: "Suspend a sandbox and keep its disk and T3 links", sandbox: true},
+	{name: "stop", group: "sandbox", summary: "Stop a sandbox and keep its disk", sandbox: true},
+	{name: "list", group: "sandbox", summary: "List managed sandboxes"},
+	{name: "ls", group: "sandbox", action: "list", summary: "List managed sandboxes"},
+	{name: "sync", group: "t3", summary: "Link T3 environments and remove stale links"},
+	{name: "link", group: "t3", summary: "Pair existing sandboxes with T3 Code", sandbox: true},
+	{name: "connect", group: "t3", summary: "Show a sandbox's T3 Code address", sandbox: true},
+	{name: "prepare", group: "t3", summary: "Refresh a sandbox's model catalog", sandbox: true},
+	{name: "terminal", group: "t3", summary: "Show the Agent37 terminal link", sandbox: true},
 }
 
 //go:embed completion.bash
 var bashCompletion string
 
-func findCommand(name string) (cliCommand, bool) {
-	for _, command := range commands {
-		if command.name == name {
-			return command, true
-		}
-	}
-	return cliCommand{}, false
-}
-
-func runCompletion(ctx context.Context, args []string, output, diagnostic io.Writer) error {
-	// Operational commands keep their parser. Cobra uses the same flags to
-	// generate scripts and answer completion requests without running commands.
+func newCLI(args []string, output, diagnostic io.Writer, execute func(context.Context, options) error) (*cobra.Command, error) {
 	root := &cobra.Command{
-		Use: owner, SilenceErrors: true, SilenceUsage: true,
+		Use: owner, Short: "Run T3 Code in private Agent37 sandboxes.", Version: version,
+		SilenceErrors: true, SilenceUsage: true, Args: cobra.NoArgs,
 		ValidArgsFunction: cobra.NoFileCompletions,
+		RunE:              func(cmd *cobra.Command, _ []string) error { return cmd.Help() },
+		CompletionOptions: cobra.CompletionOptions{DisableDefaultCmd: true},
 	}
 	root.SetOut(output)
 	root.SetErr(diagnostic)
-	root.SetArgs(args)
-	root.Flags().Bool("version", false, "Print the CLI version")
+	root.SetArgs(append([]string{}, args...))
+	root.SetVersionTemplate("{{.Version}}\n")
+	root.SetHelpCommandGroupID("reference")
+	root.AddGroup(
+		&cobra.Group{ID: "sandbox", Title: "Sandbox lifecycle"},
+		&cobra.Group{ID: "t3", Title: "T3 Code and access"},
+		&cobra.Group{ID: "workstation", Title: "Workstation"},
+		&cobra.Group{ID: "reference", Title: "Help and version"},
+	)
+	root.SetHelpFunc(func(cmd *cobra.Command, _ []string) {
+		width, _ := ttyOutput(cmd.OutOrStdout())
+		if cmd == root {
+			printMainHelp(cmd, width)
+			return
+		}
+		printCommandHelpAtWidth(cmd, width)
+	})
 	root.AddCommand(completionCommand(root))
 	root.AddCommand(&cobra.Command{
-		Use: "version", Short: "Print the CLI version",
-		Run: func(*cobra.Command, []string) {}, ValidArgsFunction: cobra.NoFileCompletions,
+		Use: "version", Short: "Print the CLI version", GroupID: "reference", Args: cobra.NoArgs,
+		Run: func(cmd *cobra.Command, _ []string) { cmd.Println(version) }, ValidArgsFunction: cobra.NoFileCompletions,
 	})
+	completing := len(args) > 0 && slices.Contains([]string{"__complete", "__completeNoDesc"}, args[0])
 	for _, spec := range commands {
+		opts := options{action: cmp.Or(spec.action, spec.name)}
 		command := &cobra.Command{
-			Use: spec.name, Short: spec.summary,
-			Run: func(*cobra.Command, []string) {}, ValidArgsFunction: cobra.NoFileCompletions,
+			Use: commandUsage(spec), Short: spec.summary, Long: commandDescription(spec), GroupID: spec.group,
+			ValidArgsFunction: cobra.NoFileCompletions,
+			RunE: func(cmd *cobra.Command, positionals []string) error {
+				resolved, err := resolveOptions(opts, cmd.Flags(), positionals)
+				if err != nil {
+					return err
+				}
+				return execute(cmd.Context(), resolved)
+			},
 		}
 		if spec.sandbox {
-			command.Use += " [name]"
 			command.ValidArgsFunction = completeSandboxNames
 		}
-		if spec.name == "up" {
-			command.Use = "up [count|name]"
-		}
 		root.AddCommand(command)
-		// A name selects the start form of up, which has no provisioning flags.
-		if spec.name == "up" && len(args) > 3 && args[1] == "up" && namePattern.MatchString(args[2]) && !batchCountArgument(args[2]) {
+		// For shell completion only, offer the flags supported by named up.
+		if completing && spec.name == "up" && len(args) > 3 && args[1] == "up" && namePattern.MatchString(args[2]) && !batchCountArgument(args[2]) {
 			addCommandFlags(command.Flags(), &options{action: "start"})
 			command.Flags().Bool("no-desktop", false, "Skip the T3 Code desktop pairing request")
 			continue
 		}
-		opts := options{action: cmp.Or(spec.action, spec.name)}
 		addCommandFlags(command.Flags(), &opts)
-		switch opts.action {
-		case "setup":
-			command.MarkFlagsMutuallyExclusive("check", "verify", "repair-tailscale")
-			command.MarkFlagsMutuallyExclusive("dry-run", "check")
-			command.MarkFlagsMutuallyExclusive("dry-run", "verify")
-		case "create":
-			command.MarkFlagsMutuallyExclusive("yes", "dry-run")
-		case "down":
-			command.MarkFlagsMutuallyExclusive("all", "pick")
-		case "config":
-			command.MarkFlagsMutuallyExclusive("show-size", "cpu")
-			command.MarkFlagsMutuallyExclusive("show-size", "ram")
+		if completing {
+			markCompletionGroups(command, opts.action)
 		}
 		if opts.cpu != nil {
 			for name, values := range map[string][]string{"cpu": {"2", "4"}, "ram": {"4", "8", "16", "32"}} {
 				if err := command.RegisterFlagCompletionFunc(name, cobra.FixedCompletions(values, cobra.ShellCompDirectiveNoFileComp)); err != nil {
-					return err
+					return nil, err
 				}
 			}
 		}
 		if opts.action == "create" || opts.action == "up" {
 			if err := command.RegisterFlagCompletionFunc("provider", cobra.FixedCompletions(
 				slices.Sorted(maps.Keys(providers)), cobra.ShellCompDirectiveNoFileComp)); err != nil {
-				return err
+				return nil, err
 			}
 			if err := command.RegisterFlagCompletionFunc("template", completeTemplates); err != nil {
-				return err
+				return nil, err
 			}
 		}
 	}
-	return root.ExecuteContext(ctx)
+	return root, nil
+}
+
+func markCompletionGroups(command *cobra.Command, action string) {
+	switch action {
+	case "setup":
+		command.MarkFlagsMutuallyExclusive("check", "verify", "repair-tailscale")
+		command.MarkFlagsMutuallyExclusive("dry-run", "check")
+		command.MarkFlagsMutuallyExclusive("dry-run", "verify")
+	case "create":
+		command.MarkFlagsMutuallyExclusive("yes", "dry-run")
+	case "down":
+		command.MarkFlagsMutuallyExclusive("all", "pick")
+	case "config":
+		command.MarkFlagsMutuallyExclusive("show-size", "cpu")
+		command.MarkFlagsMutuallyExclusive("show-size", "ram")
+	}
 }
 
 func completionCommand(root *cobra.Command) *cobra.Command {
-	command := &cobra.Command{Use: "completion", Short: "Generate shell completion scripts"}
+	command := &cobra.Command{Use: "completion", Short: "Generate shell completions", GroupID: "workstation",
+		RunE: func(cmd *cobra.Command, _ []string) error { return cmd.Help() }, Args: cobra.NoArgs}
 	command.SetHelpFunc(func(cmd *cobra.Command, _ []string) {
 		if cmd == command {
 			_ = printDetails(cmd.OutOrStdout(), "Shell completions", detail{"Usage", "t3-agent37 completion <shell>"},

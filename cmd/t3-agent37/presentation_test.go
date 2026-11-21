@@ -2,11 +2,12 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"io"
 	"strings"
 	"testing"
 
 	"charm.land/lipgloss/v2"
-	flag "github.com/spf13/pflag"
 )
 
 func TestTerminalTextStripsTerminalCommands(t *testing.T) {
@@ -36,12 +37,17 @@ func TestDetailsFitNarrowTerminalAndKeepLinkIntact(t *testing.T) {
 func TestHelpFitsTerminalAndKeepsGroupAlignment(t *testing.T) {
 	t.Setenv("TTY_FORCE", "")
 	t.Setenv("CLICOLOR_FORCE", "")
-	command, _ := findCommand("up")
-	flags := flag.NewFlagSet("up", flag.ContinueOnError)
-	addCommandFlags(flags, &options{action: "up"})
 	for _, width := range []int{12, 24, 41, 56, 80} {
 		var output bytes.Buffer
-		printMainHelp(&output, width)
+		root, err := newCLI(nil, &output, io.Discard, func(context.Context, options) error { return nil })
+		if err != nil {
+			t.Fatal(err)
+		}
+		up, _, err := root.Find([]string{"up"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		printMainHelp(root, width)
 		if got := lipgloss.Width(output.String()); got > width {
 			t.Errorf("main help width %d at %d columns: %q", got, width, output.String())
 		}
@@ -49,7 +55,7 @@ func TestHelpFitsTerminalAndKeepsGroupAlignment(t *testing.T) {
 			t.Errorf("commands in the same section should use the same layout: %q", output.String())
 		}
 		output.Reset()
-		printCommandHelpAtWidth(&output, command, flags, width)
+		printCommandHelpAtWidth(up, width)
 		if got := lipgloss.Width(output.String()); got > width {
 			t.Errorf("command help width %d at %d columns: %q", got, width, output.String())
 		}

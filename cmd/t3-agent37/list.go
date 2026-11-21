@@ -66,8 +66,8 @@ func renderSandboxList(managed []agent37.Instance, width int, heading string) st
 	var compact strings.Builder
 	compact.WriteString(title)
 	for _, row := range rows {
-		block := cliStrong.Render(row[0]) + "  " + row[1] + "\n" +
-			cliMuted.Render("Provider  ") + row[2] + "\n" +
+		block := cliBlue.Render(row[0]) + "  " + row[1] + "\n" +
+			cliMuted.Render("Provider  ") + cliPurple.Render(row[2]) + "\n" +
 			cliMuted.Render("Template  ") + row[3] + "\n" +
 			cliMuted.Render("ID        ") + row[4]
 		compact.WriteString("\n\n" + wrapTerminal(block, width))
@@ -105,7 +105,9 @@ func renderSandboxTable(headers []string, rows [][]string) string {
 			case row == table.HeaderRow:
 				style = cliAccent
 			case col == 0:
-				style = cliStrong
+				style = cliBlue
+			case col == 2:
+				style = cliPurple
 			case col == 4:
 				style = cliMuted
 			}
@@ -121,7 +123,9 @@ func listStatus(status string) string {
 	switch status {
 	case "running":
 		symbol, color = "●", "2"
-	case "sleeping", "provisioning", "starting", "stopping":
+	case "sleeping":
+		symbol, color = "◐", "13"
+	case "provisioning", "starting", "stopping":
 		symbol, color = "◐", "3"
 	case "error", "failed":
 		symbol, color = "×", "1"

@@ -18,6 +18,10 @@ const accentColor = "6"
 
 var (
 	cliAccent = lipgloss.NewStyle().Foreground(lipgloss.Color(accentColor)).Bold(true)
+	cliBlue   = lipgloss.NewStyle().Foreground(lipgloss.Color("12")).Bold(true)
+	cliPurple = lipgloss.NewStyle().Foreground(lipgloss.Color("13")).Bold(true)
+	cliGreen  = lipgloss.NewStyle().Foreground(lipgloss.Color("10")).Bold(true)
+	cliAmber  = lipgloss.NewStyle().Foreground(lipgloss.Color("11")).Bold(true)
 	cliStrong = lipgloss.NewStyle().Bold(true)
 	cliMuted  = lipgloss.NewStyle().Faint(true)
 )
@@ -79,15 +83,15 @@ type messageKind struct{ mark, color string }
 
 var (
 	info    = messageKind{"›", accentColor}
-	success = messageKind{"✓", "2"}
-	warning = messageKind{"!", "3"}
-	failure = messageKind{"×", "1"}
+	success = messageKind{"✓", "10"}
+	warning = messageKind{"!", "11"}
+	failure = messageKind{"×", "9"}
 )
 
 func notice(output io.Writer, kind messageKind, format string, args ...any) {
 	mark := lipgloss.NewStyle().Foreground(lipgloss.Color(kind.color)).Bold(true).Render(kind.mark)
 	message := terminalText(fmt.Sprintf(format, args...))
-	width, _ := ttyOutput(output)
+	width, terminal := ttyOutput(output)
 	if width > 4 && lipgloss.Width(message) > width-4 {
 		var words []string
 		var lines []string
@@ -106,6 +110,11 @@ func notice(output io.Writer, kind messageKind, format string, args ...any) {
 			lines = append(lines, wrapTerminal(strings.Join(words, " "), width-4))
 		}
 		message = strings.ReplaceAll(strings.Join(lines, "\n"), "\n", "\n    ")
+	}
+	// Bubble Tea applies the terminal's color profile to queued notices.
+	if _, progress := output.(*launchProgress); progress && terminal && os.Getenv("TERM") != "dumb" && os.Getenv("NO_COLOR") == "" {
+		_, _ = fmt.Fprintf(output, "  %s %s\n", mark, message)
+		return
 	}
 	_, _ = lipgloss.Fprintf(output, "  %s %s\n", mark, message)
 }

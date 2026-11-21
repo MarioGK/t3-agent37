@@ -13,7 +13,7 @@ import (
 func TestLaunchProgressTracksMilestonesAndFitsTerminal(t *testing.T) {
 	p := startLaunchProgress(&bytes.Buffer{}, options{action: "create", batchSize: 2, generatedName: true})
 	defer p.close()
-	if line := ansi.Strip(p.line(80)); !strings.Contains(line, "0% · 0/2 ready · 0/2 paired") || strings.Contains(line, "━") {
+	if line := ansi.Strip(newProgressView(p.progressState, 80).line()); !strings.Contains(line, "0% · 0/2 ready · 0/2 paired") || strings.Contains(line, "━") {
 		t.Fatalf("initial progress: %q", line)
 	}
 	p.preflightDone("Creating")
@@ -23,21 +23,21 @@ func TestLaunchProgressTracksMilestonesAndFitsTerminal(t *testing.T) {
 	p.allocated()
 	p.provisioned(true)
 	p.setPhase("Waiting for T3 Code")
-	line := ansi.Strip(p.line(80))
+	line := ansi.Strip(newProgressView(p.progressState, 80).line())
 	if !strings.Contains(line, "66% · 2/2 ready · 1/2 paired · Waiting for T3 Code") {
 		t.Fatalf("partial progress: %q", line)
 	}
 	p.pairedDesktop(true)
 	p.setPhase("Syncing T3 environments")
-	if line := ansi.Strip(p.line(80)); !strings.Contains(line, "77%") || !strings.Contains(line, "Syncing T3 environments") {
+	if line := ansi.Strip(newProgressView(p.progressState, 80).line()); !strings.Contains(line, "77%") || !strings.Contains(line, "Syncing T3 environments") {
 		t.Fatalf("mesh progress: %q", line)
 	}
 	p.meshFinished(true)
-	if line := ansi.Strip(p.line(80)); !strings.Contains(line, "✓") || !strings.Contains(line, "100% · 2/2 ready · 2/2 paired · Complete") {
+	if line := ansi.Strip(newProgressView(p.progressState, 80).line()); !strings.Contains(line, "✓") || !strings.Contains(line, "100% · 2/2 ready · 2/2 paired · Complete") {
 		t.Fatalf("completed progress: %q", line)
 	}
 	for _, width := range []int{12, 24, 40, 80} {
-		if got := ansi.StringWidth(p.line(width)); got >= width {
+		if got := ansi.StringWidth(newProgressView(p.progressState, width).line()); got >= width {
 			t.Fatalf("progress wraps at terminal width %d: displayed width %d", width, got)
 		}
 	}
@@ -60,7 +60,7 @@ func TestLaunchProgressSkipsInapplicableStepsAndKeepsFailuresIncomplete(t *testi
 			}
 			p.provisioned(true)
 			p.meshFinished(false)
-			if line := ansi.Strip(p.line(80)); p.percent() != tc.want || strings.Contains(line, "paired") || !strings.Contains(line, "T3 mesh links pending") {
+			if line := ansi.Strip(newProgressView(p.progressState, 80).line()); p.percent() != tc.want || strings.Contains(line, "paired") || !strings.Contains(line, "T3 mesh links pending") {
 				t.Fatalf("pending progress: %q", line)
 			}
 			p.meshFinished(true)
@@ -75,7 +75,7 @@ func TestLaunchProgressSkipsInapplicableStepsAndKeepsFailuresIncomplete(t *testi
 	p.provisioned(true)
 	p.pairedDesktop(false)
 	p.meshFinished(true)
-	if line := ansi.Strip(p.line(80)); p.percent() != 80 || !strings.Contains(line, "1 failed") {
+	if line := ansi.Strip(newProgressView(p.progressState, 80).line()); p.percent() != 80 || !strings.Contains(line, "1 failed") {
 		t.Fatalf("partially successful progress: %q", line)
 	}
 }
@@ -104,7 +104,7 @@ func TestDeleteProgressCountsConfirmedCloudDeletes(t *testing.T) {
 	p.allocated()
 	p.allocated()
 	p.provisioned(false)
-	if line := ansi.Strip(p.line(80)); !strings.Contains(line, "2/3 deleted · 1 failed · Cleaning up T3 links") {
+	if line := ansi.Strip(newProgressView(p.progressState, 80).line()); !strings.Contains(line, "2/3 deleted · 1 failed · Cleaning up T3 links") {
 		t.Fatalf("bulk deletion progress: %q", line)
 	}
 }

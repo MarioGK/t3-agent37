@@ -35,7 +35,7 @@ func terminalTheme(danger bool) huh.ThemeFunc {
 		accent := lipgloss.Color(accentColor)
 		text := pick(lipgloss.Color("#182830"), lipgloss.Color("#e5f0f3"))
 		muted := pick(lipgloss.Color("#4a6270"), lipgloss.Color("#9ab2be"))
-		rail := accent
+		rail := pick(lipgloss.Color("#6145a7"), lipgloss.Color("#c4a4ff"))
 		button := pick(lipgloss.Color("#00685d"), lipgloss.Color("#5eead4"))
 		if danger {
 			rail = pick(lipgloss.Color("#9c2b32"), lipgloss.Color("#ff9da3"))

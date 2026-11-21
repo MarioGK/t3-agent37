@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -10,6 +11,18 @@ import (
 	"strings"
 	"testing"
 )
+
+func parse(args []string, output io.Writer) (opts options, err error) {
+	root, err := newCLI(args, output, io.Discard, func(_ context.Context, resolved options) error {
+		opts = resolved
+		return nil
+	})
+	if err != nil {
+		return opts, err
+	}
+	err = root.Execute()
+	return opts, err
+}
 
 func TestTerraScaleDryRunWithNoCredentials(t *testing.T) {
 	t.Setenv("AGENT37_API_KEY", "")
@@ -109,6 +122,10 @@ func TestNamedUpAcceptsHeadlessFlag(t *testing.T) {
 
 func TestHelpIncludesCommandsAndPublicOptions(t *testing.T) {
 	var output bytes.Buffer
+	if err := run(t.Context(), nil, &output, io.Discard); err != nil || !strings.Contains(output.String(), "Sandbox lifecycle") {
+		t.Fatalf("no-argument help = %q, %v", &output, err)
+	}
+	output.Reset()
 	if err := run(t.Context(), []string{"--help"}, &output, io.Discard); err != nil {
 		t.Fatal(err)
 	}

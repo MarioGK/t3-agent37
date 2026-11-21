@@ -6,39 +6,33 @@ import (
 	"os"
 	"strings"
 	"sync"
-	"time"
 
+	"charm.land/bubbles/v2/progress"
+	"charm.land/bubbles/v2/spinner"
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 )
 
-const clearProgressLine = "\r\x1b[2K"
-
-var progressFrames = []rune("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
-
-// launchProgress shares stderr with ordinary notices and serializes writes
-// from provisioning workers. The bar advances as launch milestones finish.
+// launchProgress serializes sandbox milestones and log lines from workers.
 type launchProgress struct {
-	output     io.Writer
-	total      int
-	deleting   bool
-	allocating bool
-	pairing    bool
+	progressState
+	output  io.Writer
+	mu      sync.Mutex
+	program *tea.Program
+	done    chan struct{}
+}
 
-	mu                     sync.Mutex
-	active                 bool
-	phase                  string
-	preflight, synced      bool
-	meshChecked            bool
-	created, ready, paired int
-	failed, frame          int
-
-	stop, done chan struct{}
-	stopOnce   sync.Once
+type progressState struct {
+	total                          int
+	deleting, allocating, pairing  bool
+	phase                          string
+	preflight, synced, meshChecked bool
+	created, ready, paired, failed int
 }
 
 func startLaunchProgress(output io.Writer, opts options) *launchProgress {
-	p := &launchProgress{output: output, total: max(opts.batchSize, 1), phase: "Looking up " + opts.name}
+	p := &launchProgress{output: output, progressState: progressState{total: max(opts.batchSize, 1), phase: "Looking up " + opts.name}}
 	if opts.action == "create" {
 		p.allocating = true
 		p.pairing = opts.generatedName && !opts.noDesktop
@@ -49,78 +43,66 @@ func startLaunchProgress(output io.Writer, opts options) *launchProgress {
 }
 
 func startSandboxProgress(output io.Writer, total int, phase string, deleting bool) *launchProgress {
-	p := &launchProgress{output: output, total: total, phase: phase, deleting: deleting}
+	p := &launchProgress{output: output, progressState: progressState{total: total, phase: phase, deleting: deleting}}
 	p.start()
 	return p
 }
 
 func (p *launchProgress) start() {
-	if _, terminal := ttyOutput(p.output); !terminal || os.Getenv("TERM") == "dumb" {
+	width, terminal := ttyOutput(p.output)
+	if !terminal || os.Getenv("TERM") == "dumb" {
 		return
 	}
-	lipgloss.EnableLegacyWindowsANSI(p.output.(*os.File))
-	p.active = true
-	p.stop, p.done = make(chan struct{}), make(chan struct{})
-	p.draw()
+	p.program = tea.NewProgram(newProgressView(p.progressState, width),
+		tea.WithOutput(p.output), tea.WithInput(nil), tea.WithoutSignalHandler(), tea.WithFPS(30))
+	p.done = make(chan struct{})
 	go func() {
 		defer close(p.done)
-		ticker := time.NewTicker(120 * time.Millisecond)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-p.stop:
-				return
-			case <-ticker.C:
-				p.mu.Lock()
-				p.frame = (p.frame + 1) % len(progressFrames)
-				p.draw()
-				p.mu.Unlock()
-			}
-		}
+		_, _ = p.program.Run()
 	}()
 }
 
 func (p *launchProgress) close() {
-	if p.stop == nil {
-		return
-	}
-	p.stopOnce.Do(func() {
-		close(p.stop)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.program != nil {
+		p.program.Send(progressFinished{})
 		<-p.done
-		p.mu.Lock()
-		defer p.mu.Unlock()
-		p.active = false
-		_, _ = io.WriteString(p.output, clearProgressLine)
+		p.program = nil
 		if p.meshChecked {
 			width, _ := ttyOutput(p.output)
-			_, _ = lipgloss.Fprintln(p.output, p.line(width))
+			_, _ = lipgloss.Fprintln(p.output, newProgressView(p.progressState, width).line())
 		}
-	})
+	}
 }
 
 func (p *launchProgress) Write(data []byte) (int, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.active {
-		_, _ = io.WriteString(p.output, clearProgressLine)
+	if p.program != nil {
+		select {
+		case <-p.done:
+		default:
+			// Send honors shutdown, unlike Program.Println in this version.
+			p.program.Send(tea.Println(strings.TrimSuffix(string(data), "\n"))())
+			return len(data), nil
+		}
 	}
-	n, err := p.output.Write(data)
-	p.draw()
-	return n, err
+	return p.output.Write(data)
 }
 
 func (p *launchProgress) setPhase(phase string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.phase = phase
-	p.draw()
+	p.sendState()
 }
 
 func (p *launchProgress) allocated() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.created++
-	p.draw()
+	p.sendState()
 }
 
 func (p *launchProgress) provisioned(ready bool) {
@@ -131,7 +113,7 @@ func (p *launchProgress) provisioned(ready bool) {
 	} else {
 		p.failed++
 	}
-	p.draw()
+	p.sendState()
 }
 
 func (p *launchProgress) preflightDone(phase string) {
@@ -139,7 +121,7 @@ func (p *launchProgress) preflightDone(phase string) {
 	defer p.mu.Unlock()
 	p.preflight = true
 	p.phase = phase
-	p.draw()
+	p.sendState()
 }
 
 func (p *launchProgress) pairedDesktop(confirmed bool) {
@@ -150,7 +132,7 @@ func (p *launchProgress) pairedDesktop(confirmed bool) {
 	} else {
 		p.failed++
 	}
-	p.draw()
+	p.sendState()
 }
 
 func (p *launchProgress) meshFinished(synced bool) {
@@ -166,10 +148,9 @@ func (p *launchProgress) meshFinished(synced bool) {
 	default:
 		p.phase = "Some sandboxes need attention"
 	}
-	p.draw()
 }
 
-func (p *launchProgress) percent() int {
+func (p progressState) percent() int {
 	if p.deleting {
 		return (p.created + p.ready) * 100 / (2 * p.total)
 	}
@@ -190,45 +171,86 @@ func (p *launchProgress) percent() int {
 	return done * 100 / total
 }
 
-func (p *launchProgress) draw() {
-	if !p.active {
-		return
+func (p *launchProgress) sendState() {
+	if p.program != nil {
+		p.program.Send(p.progressState)
 	}
-	width, _ := ttyOutput(p.output)
-	_, _ = io.WriteString(p.output, clearProgressLine)
-	_, _ = lipgloss.Fprint(p.output, p.line(width))
 }
 
-func (p *launchProgress) line(width int) string {
+type progressFinished struct{}
+
+type progressView struct {
+	progressState
+	width   int
+	bar     progress.Model
+	spinner spinner.Model
+	hidden  bool
+}
+
+func newProgressView(state progressState, width int) progressView {
+	return progressView{
+		progressState: state, width: width,
+		bar: progress.New(progress.WithoutPercentage(), progress.WithFillCharacters('━', '─'),
+			progress.WithColors(lipgloss.Color("#49D9C4"), lipgloss.Color("#758BFF"), lipgloss.Color("#BC91F5"))),
+		spinner: spinner.New(spinner.WithSpinner(spinner.MiniDot), spinner.WithStyle(cliAccent)),
+	}
+}
+
+func (m progressView) Init() tea.Cmd { return m.spinner.Tick }
+
+func (m progressView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case progressState:
+		m.progressState = msg
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+	case spinner.TickMsg:
+		var cmd tea.Cmd
+		m.spinner, cmd = m.spinner.Update(msg)
+		return m, cmd
+	case progressFinished:
+		m.hidden = true
+		return m, tea.Quit
+	}
+	return m, nil
+}
+
+func (m progressView) View() tea.View {
+	if m.hidden {
+		return tea.NewView("")
+	}
+	return tea.NewView(m.line())
+}
+
+func (p progressView) line() string {
+	width := p.width
 	if width <= 0 {
 		width = 80
 	}
 	percent := p.percent()
-	status := fmt.Sprintf("%d%% · %d/%d ready", percent, p.ready, p.total)
+	percentage := cliAccent.Render(fmt.Sprintf("%3d%%", percent))
+	ready := cliGreen.Render(fmt.Sprintf("%d/%d", p.ready, p.total)) + " ready"
+	status := percentage + " · " + ready
 	if p.deleting {
-		status = fmt.Sprintf("%d/%d deleted", p.created, p.total)
+		status = percentage + " · " + cliPurple.Render(fmt.Sprintf("%d/%d", p.created, p.total)) + " deleted"
 	} else if p.pairing {
-		status += fmt.Sprintf(" · %d/%d paired", p.paired, p.total)
+		status += " · " + cliPurple.Render(fmt.Sprintf("%d/%d", p.paired, p.total)) + " paired"
 	}
 	if p.failed > 0 {
-		status += fmt.Sprintf(" · %d failed", p.failed)
+		status += " · " + cliAmber.Render(fmt.Sprintf("%d failed", p.failed))
 	}
-	barWidth := min(22, width-lipgloss.Width(status)-min(18, lipgloss.Width(p.phase))-8)
-	frame := progressFrames[p.frame]
+	barWidth := min(22, width-lipgloss.Width(status)-lipgloss.Width(p.phase)-7)
+	mark, phase := p.spinner.View(), cliMuted.Render(p.phase)
 	if p.meshChecked {
-		frame = '!'
+		mark, phase = cliAmber.Render("!"), cliAmber.Render(p.phase)
 		if percent == 100 {
-			frame = '✓'
+			mark, phase = cliGreen.Render("✓"), cliGreen.Render(p.phase)
 		}
 	}
-	line := fmt.Sprintf("%c %s", frame, status)
+	line := mark + " " + status
 	if barWidth >= 4 {
-		filled := barWidth * percent / 100
-		if p.deleting {
-			filled = barWidth * (p.created + p.ready) / (2 * p.total)
-		}
-		bar := cliAccent.Render(strings.Repeat("━", filled)) + cliMuted.Render(strings.Repeat("─", barWidth-filled))
-		line = fmt.Sprintf("%c %s %s", frame, bar, status)
+		p.bar.SetWidth(barWidth)
+		line = mark + " " + p.bar.ViewAs(float64(percent)/100) + " " + status
 	}
-	return ansi.Truncate(line+" · "+p.phase, max(0, width-1), "…")
+	return ansi.Truncate(line+" · "+phase, max(0, width-1), "…")
 }

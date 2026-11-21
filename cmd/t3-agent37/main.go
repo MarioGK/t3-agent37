@@ -57,27 +57,7 @@ type options struct {
 	listJSON                         bool
 }
 
-func parse(args []string, output io.Writer) (options, error) {
-	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" || args[0] == "help" {
-		printHelp(output)
-		return options{}, flag.ErrHelp
-	}
-	if len(args) == 1 && (args[0] == "--version" || args[0] == "version") {
-		fmt.Fprintln(output, version)
-		return options{}, flag.ErrHelp
-	}
-	command, ok := findCommand(args[0])
-	if !ok {
-		return options{}, fmt.Errorf("unknown command %q", args[0])
-	}
-	opts := options{action: cmp.Or(command.action, command.name)}
-	flags := flag.NewFlagSet(args[0], flag.ContinueOnError)
-	flags.SetOutput(output)
-	flags.Usage = func() { printCommandHelp(output, command, flags) }
-	addCommandFlags(flags, &opts)
-	if err := flags.Parse(args[1:]); err != nil {
-		return opts, err
-	}
+func resolveOptions(opts options, flags *flag.FlagSet, args []string) (options, error) {
 	if !flags.Changed("cpu") {
 		opts.cpu = nil
 	}
@@ -85,13 +65,13 @@ func parse(args []string, output io.Writer) (options, error) {
 		opts.ram = nil
 	}
 	if opts.action == "sync" {
-		if flags.NArg() != 0 {
+		if len(args) != 0 {
 			return opts, errors.New("sync does not take a sandbox name")
 		}
 		return opts, nil
 	}
 	if opts.action == "config" || opts.action == "setup" {
-		if flags.NArg() != 0 {
+		if len(args) != 0 {
 			return opts, fmt.Errorf("%s does not take a sandbox name", opts.action)
 		}
 		if opts.checkSetup && opts.verifySetup {
@@ -109,14 +89,14 @@ func parse(args []string, output io.Writer) (options, error) {
 		return opts, nil
 	}
 	if opts.action == "up" {
-		if flags.NArg() == 1 && batchCountArgument(flags.Arg(0)) {
-			count, err := strconv.Atoi(flags.Arg(0))
+		if len(args) == 1 && batchCountArgument(args[0]) {
+			count, err := strconv.Atoi(args[0])
 			if err != nil || count < 1 || count > maxBatchSize {
 				return opts, fmt.Errorf("up expects a sandbox count from 1 to %d", maxBatchSize)
 			}
 			opts.batchSize = count
 		}
-		if flags.NArg() == 0 || opts.batchSize > 0 {
+		if len(args) == 0 || opts.batchSize > 0 {
 			opts.action = "create"
 			opts.yes = !opts.dryRun
 		} else {
@@ -128,12 +108,12 @@ func parse(args []string, output io.Writer) (options, error) {
 		}
 	}
 	if opts.action == "list" {
-		if flags.NArg() != 0 {
-			return opts, fmt.Errorf("%s does not take a sandbox name", args[0])
+		if len(args) != 0 {
+			return opts, fmt.Errorf("%s does not take a sandbox name", flags.Name())
 		}
 		return opts, nil
 	}
-	if opts.action == "link" && flags.NArg() == 0 {
+	if opts.action == "link" && len(args) == 0 {
 		return opts, nil
 	}
 	if opts.action == "down" {
@@ -141,19 +121,19 @@ func parse(args []string, output io.Writer) (options, error) {
 			return opts, errors.New("the legacy --delete and --yes flags must be used together. Use stop or sleep to keep the disk")
 		}
 		if opts.deleteAll || opts.pickDelete {
-			if flags.NArg() != 0 || opts.deleteAll && opts.pickDelete {
+			if len(args) != 0 || opts.deleteAll && opts.pickDelete {
 				return opts, errors.New("choose one of a sandbox name, --all, or --pick")
 			}
 			return opts, nil
 		}
 	}
 	switch {
-	case (opts.action == "down" || opts.action == "sleep") && flags.NArg() == 0:
+	case (opts.action == "down" || opts.action == "sleep") && len(args) == 0:
 		opts.latest = true
-	case opts.action == "create" && (flags.NArg() == 0 || opts.batchSize > 0):
+	case opts.action == "create" && (len(args) == 0 || opts.batchSize > 0):
 		opts.generatedName = true
-	case flags.NArg() == 1 && namePattern.MatchString(flags.Arg(0)):
-		opts.name = flags.Arg(0)
+	case len(args) == 1 && namePattern.MatchString(args[0]):
+		opts.name = args[0]
 	default:
 		return opts, errors.New("expected a name with 1 to 43 lowercase letters, digits, or hyphens")
 	}
@@ -629,19 +609,17 @@ func operate(ctx context.Context, client *agent37.Client, enrollment *peers.Enro
 }
 
 func run(ctx context.Context, args []string, output, diagnostic io.Writer) error {
-	if len(args) == 2 && args[0] == "help" {
-		args = []string{args[1], "--help"}
-	}
-	if len(args) != 0 && slices.Contains([]string{"completion", "__complete", "__completeNoDesc"}, args[0]) {
-		return runCompletion(ctx, args, output, diagnostic)
-	}
-	opts, err := parse(args, output)
-	if errors.Is(err, flag.ErrHelp) {
-		return nil
-	}
+	root, err := newCLI(args, output, diagnostic, func(ctx context.Context, opts options) error {
+		return runCommand(ctx, opts, output, diagnostic)
+	})
 	if err != nil {
 		return err
 	}
+	return root.ExecuteContext(ctx)
+}
+
+func runCommand(ctx context.Context, opts options, output, diagnostic io.Writer) error {
+	var err error
 	if opts.action == "config" {
 		if opts.showSize || opts.cpu != nil || opts.ram != nil {
 			return configureSandboxSize(ctx, opts, output)
