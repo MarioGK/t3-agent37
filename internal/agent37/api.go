@@ -178,7 +178,7 @@ func (c *Client) request(ctx context.Context, method, endpoint string, payload a
 		return nil
 	}
 	if json.NewDecoder(io.LimitReader(response.Body, 64<<20)).Decode(result) != nil {
-		return errRequest
+		return cmp.Or(ctx.Err(), errRequest)
 	}
 	return nil
 }

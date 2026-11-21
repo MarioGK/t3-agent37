@@ -399,6 +399,8 @@ func latestManaged(instances []agent37.Instance) (agent37.Instance, error) {
 	return latest, nil
 }
 
+var errCreateUnconfirmed = errors.New("Agent37 may still create the sandbox")
+
 func getOrCreate(ctx context.Context, client *agent37.Client, opts options, state string, diagnostic io.Writer) (agent37.Instance, error) {
 	marker := sandboxStatePath(state, opts.name, ".pending")
 	if !opts.generatedName {
@@ -448,11 +450,17 @@ func getOrCreate(ctx context.Context, client *agent37.Client, opts options, stat
 			return existing, err
 		}
 	}
-	keepMarker = true // The operation may have reached Agent37 even if the reply is lost.
 	started := time.Now()
 	notice(diagnostic, info, "Creating %s on Agent37…", opts.name)
+	if err := ctx.Err(); err != nil {
+		return existing, err
+	}
+	keepMarker = true // The operation may have reached Agent37 even if the reply is lost.
 	instance, err := client.Create(ctx, createPayload(opts, extra))
 	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return instance, fmt.Errorf("%w %s. Check t3-agent37 ls: %w", errCreateUnconfirmed, opts.name, err)
+		}
 		if response, ok := errors.AsType[*agent37.Error](err); ok {
 			switch response.Status {
 			case 400, 401, 402, 403, 404, 422, 429:
@@ -698,7 +706,7 @@ func runCommand(ctx context.Context, opts options, output, diagnostic io.Writer)
 	}
 	var progress *launchProgress
 	if opts.action == "create" || opts.action == "start" {
-		progress = startLaunchProgress(diagnostic, opts)
+		progress = startLaunchProgress(ctx, diagnostic, opts)
 		defer progress.close()
 		diagnostic = progress
 		defer launchTiming(diagnostic, cmp.Or(opts.name, "up"), "Command elapsed", time.Now())
@@ -820,17 +828,23 @@ func lockSandbox(ctx context.Context, client *agent37.Client, state string, opts
 }
 
 func main() {
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer cancel()
-	if err := run(ctx, os.Args[1:], os.Stdout, os.Stderr); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	err := run(ctx, os.Args[1:], os.Stdout, os.Stderr)
+	interrupted := ctx.Err() != nil || errors.Is(err, context.Canceled)
+	stop()
+	if err != nil {
 		for line := range strings.SplitSeq(err.Error(), "\n") {
-			if strings.TrimSpace(line) != "" && strings.TrimSpace(line) != context.Canceled.Error() {
+			line = strings.TrimSpace(strings.TrimSuffix(line, ": "+context.Canceled.Error()))
+			if line != "" && line != context.Canceled.Error() {
 				notice(os.Stderr, failure, "t3-agent37: %s", line)
 			}
 		}
-		if errors.Is(err, context.Canceled) {
-			os.Exit(130)
-		}
+	}
+	if interrupted {
+		notice(os.Stderr, warning, "Canceled.")
+		os.Exit(130)
+	}
+	if err != nil {
 		os.Exit(1)
 	}
 }

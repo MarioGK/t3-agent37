@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -31,30 +32,30 @@ type progressState struct {
 	created, ready, paired, failed int
 }
 
-func startLaunchProgress(output io.Writer, opts options) *launchProgress {
+func startLaunchProgress(ctx context.Context, output io.Writer, opts options) *launchProgress {
 	p := &launchProgress{output: output, progressState: progressState{total: max(opts.batchSize, 1), phase: "Looking up " + opts.name}}
 	if opts.action == "create" {
 		p.allocating = true
 		p.pairing = opts.generatedName && !opts.noDesktop
 		p.phase = "Checking Tailscale OAuth"
 	}
-	p.start()
+	p.start(ctx)
 	return p
 }
 
-func startSandboxProgress(output io.Writer, total int, phase string, deleting bool) *launchProgress {
+func startSandboxProgress(ctx context.Context, output io.Writer, total int, phase string, deleting bool) *launchProgress {
 	p := &launchProgress{output: output, progressState: progressState{total: total, phase: phase, deleting: deleting}}
-	p.start()
+	p.start(ctx)
 	return p
 }
 
-func (p *launchProgress) start() {
+func (p *launchProgress) start(ctx context.Context) {
 	width, terminal := ttyOutput(p.output)
 	if !terminal || os.Getenv("TERM") == "dumb" {
 		return
 	}
 	p.program = tea.NewProgram(newProgressView(p.progressState, width),
-		tea.WithOutput(p.output), tea.WithInput(nil), tea.WithoutSignalHandler(), tea.WithFPS(30))
+		tea.WithContext(ctx), tea.WithOutput(p.output), tea.WithInput(nil), tea.WithoutSignalHandler(), tea.WithFPS(30))
 	p.done = make(chan struct{})
 	go func() {
 		defer close(p.done)

@@ -63,7 +63,7 @@ func runDeleteAll(ctx context.Context, client *agent37.Client, dryRun bool, outp
 	if dryRun || len(results) == 0 {
 		return showBulkDeletions(output, results, dryRun)
 	}
-	progress := startSandboxProgress(diagnostic, len(results), "Deleting Agent37 sandboxes", true)
+	progress := startSandboxProgress(ctx, diagnostic, len(results), "Deleting Agent37 sandboxes", true)
 	defer progress.close()
 	var workers sync.WaitGroup
 	parallel := min(deleteParallelism, len(results))

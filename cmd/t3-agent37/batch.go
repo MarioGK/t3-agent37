@@ -95,13 +95,18 @@ func runBatch(ctx context.Context, client *agent37.Client, verifyEnrollment func
 		}
 		return item
 	}, func(item *batchSandbox) {
-		if launcher == nil || ctx.Err() != nil {
+		if launcher == nil {
+			return
+		}
+		if item.err = ctx.Err(); item.err != nil {
 			return
 		}
 		progress.setPhase("Pairing T3 Code as sandboxes become ready")
 		proof, err := pairSandboxWithPromptGate(ctx, client, item.instance, item.proof, state, item.name, launcher, progress, gate, nil)
 		progress.pairedDesktop(err == nil)
-		if err != nil {
+		if ctx.Err() != nil && err != nil {
+			item.err = ctx.Err()
+		} else if err != nil {
 			item.err = fmt.Errorf("run t3-agent37 link %s to finish pairing: %w", item.name, err)
 		} else {
 			item.proof = proof
@@ -110,7 +115,7 @@ func runBatch(ctx context.Context, client *agent37.Client, verifyEnrollment func
 	var failures []error
 	meshErr := finishBatchMesh(ctx, client, configured, results, progress)
 	for _, item := range results {
-		if item.err != nil {
+		if item.err != nil && item.err != ctx.Err() {
 			failures = append(failures, fmt.Errorf("%s: %w", item.name, item.err))
 		}
 	}
@@ -207,7 +212,9 @@ func provisionAndPairBatch(count, parallel, pairingWorkers int, provision func(i
 func provisionBatchSandbox(ctx context.Context, client *agent37.Client, enrollment *peers.Enrollment, opts options, state string, entry sandboxReservation, progress *launchProgress) (item batchSandbox) {
 	defer func() {
 		if entry.lock != nil {
-			item.err = errors.Join(item.err, entry.lock.Unlock())
+			if err := entry.lock.Unlock(); err != nil {
+				item.err = errors.Join(item.err, err)
+			}
 		}
 	}()
 	for {
@@ -237,7 +244,11 @@ func provisionBatchSandbox(ctx context.Context, client *agent37.Client, enrollme
 	progress.allocated()
 	item.proof, item.err = prepareCreated(ctx, client, enrollment, item.instance, opts, progress)
 	if item.err != nil {
-		item.err = fmt.Errorf("sandbox exists. Run t3-agent37 up %s to retry setup: %w", opts.name, item.err)
+		if ctx.Err() != nil {
+			item.err = ctx.Err()
+		} else {
+			item.err = fmt.Errorf("sandbox exists. Run t3-agent37 up %s to retry setup: %w", opts.name, item.err)
+		}
 		return item
 	}
 	item.instance.Status = "running"
@@ -263,6 +274,9 @@ func showBatchResult(output io.Writer, results []batchSandbox, noDesktop, meshPe
 			row["environment_id"] = item.proof.EnvironmentID
 		} else if item.instance.ID != "" {
 			value = "Setup pending"
+		} else if errors.Is(item.err, context.Canceled) && !errors.Is(item.err, errCreateUnconfirmed) {
+			value = "Canceled before creation"
+			row["status"] = "canceled"
 		} else {
 			value = "Creation unconfirmed"
 			row["status"] = "unconfirmed"

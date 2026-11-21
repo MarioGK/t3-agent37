@@ -11,7 +11,7 @@ import (
 )
 
 func TestLaunchProgressTracksMilestonesAndFitsTerminal(t *testing.T) {
-	p := startLaunchProgress(&bytes.Buffer{}, options{action: "create", batchSize: 2, generatedName: true})
+	p := startLaunchProgress(t.Context(), &bytes.Buffer{}, options{action: "create", batchSize: 2, generatedName: true})
 	defer p.close()
 	if line := ansi.Strip(newProgressView(p.progressState, 80).line()); !strings.Contains(line, "0% · 0/2 ready · 0/2 paired") || strings.Contains(line, "━") {
 		t.Fatalf("initial progress: %q", line)
@@ -53,7 +53,7 @@ func TestLaunchProgressSkipsInapplicableStepsAndKeepsFailuresIncomplete(t *testi
 		{"resume", options{action: "start"}, 66},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			p := startLaunchProgress(&bytes.Buffer{}, tc.opts)
+			p := startLaunchProgress(t.Context(), &bytes.Buffer{}, tc.opts)
 			p.preflightDone("Starting sandbox")
 			if tc.opts.action == "create" {
 				p.allocated()
@@ -69,7 +69,7 @@ func TestLaunchProgressSkipsInapplicableStepsAndKeepsFailuresIncomplete(t *testi
 			}
 		})
 	}
-	p := startLaunchProgress(&bytes.Buffer{}, options{action: "create", generatedName: true})
+	p := startLaunchProgress(t.Context(), &bytes.Buffer{}, options{action: "create", generatedName: true})
 	p.preflightDone("Creating sandbox")
 	p.allocated()
 	p.provisioned(true)
@@ -82,7 +82,7 @@ func TestLaunchProgressSkipsInapplicableStepsAndKeepsFailuresIncomplete(t *testi
 
 func TestLaunchProgressSerializesRedirectedLogsWithoutControlCodes(t *testing.T) {
 	var output bytes.Buffer
-	p := startLaunchProgress(&output, options{action: "create", batchSize: 10, generatedName: true})
+	p := startLaunchProgress(t.Context(), &output, options{action: "create", batchSize: 10, generatedName: true})
 	var group sync.WaitGroup
 	for i := range 10 {
 		group.Go(func() {
@@ -100,7 +100,7 @@ func TestLaunchProgressSerializesRedirectedLogsWithoutControlCodes(t *testing.T)
 }
 
 func TestDeleteProgressCountsConfirmedCloudDeletes(t *testing.T) {
-	p := startSandboxProgress(&bytes.Buffer{}, 3, "Cleaning up T3 links", true)
+	p := startSandboxProgress(t.Context(), &bytes.Buffer{}, 3, "Cleaning up T3 links", true)
 	p.allocated()
 	p.allocated()
 	p.provisioned(false)

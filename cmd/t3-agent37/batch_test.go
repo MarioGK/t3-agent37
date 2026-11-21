@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -149,7 +150,7 @@ func TestBatchStartsTenCreatesInParallelAndReportsPartialResults(t *testing.T) {
 	state := t.TempDir()
 	var output bytes.Buffer
 	opts := options{action: "create", batchSize: 10, parallelism: 10, size: sandboxSize{4, 16}, generatedName: true, namePrefix: "terra", provider: "codex", template: "fixture@1", tailscale: true, noDesktop: true}
-	progress := startLaunchProgress(io.Discard, opts)
+	progress := startLaunchProgress(ctx, io.Discard, opts)
 	err := runBatch(ctx, agent37.New("fixture"), func(context.Context) (*peers.Enrollment, error) { return nil, nil }, opts, state, &output, progress)
 	if err == nil || creates.Load() != 10 || !strings.Contains(err.Error(), "160 GB") || ctx.Err() != nil {
 		t.Fatalf("batch status: %d create requests, command error %v, context error %v", creates.Load(), err, ctx.Err())
@@ -171,6 +172,74 @@ func TestBatchStartsTenCreatesInParallelAndReportsPartialResults(t *testing.T) {
 		if _, err := os.Stat(sandboxStatePath(state, name, ".pending")); !os.IsNotExist(err) {
 			t.Fatalf("conclusive create outcome left a pending marker for %s: %v", name, err)
 		}
+	}
+}
+
+func TestCanceledBatchPreservesStartedSandboxesAndReleasesReservedNames(t *testing.T) {
+	t.Setenv("T3_AGENT37_PEERS_FILE", "")
+	original := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = original })
+	var creates atomic.Int32
+	secondCreateSent := make(chan struct{})
+	http.DefaultTransport = downTestTransport(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/instances":
+			return downResponse(200, `{"data":[]}`), nil
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/instances":
+			switch creates.Add(1) {
+			case 1:
+				return downResponse(201, `{"id":"aaaaaaaaaa","name":"terra-1","template":"fixture@1","status":"running","metadata":{"environment":"terra-1","managed_by":"t3-agent37","provider":"codex","tailnet":"tailscale"}}`), nil
+			case 2:
+				close(secondCreateSent)
+				<-r.Context().Done()
+				return nil, r.Context().Err()
+			}
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/exec"):
+			return downResponse(200, `{"exit_code":1}`), nil
+		}
+		t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		return nil, errors.New("unexpected API request")
+	})
+	state := t.TempDir()
+	var output bytes.Buffer
+	opts := options{action: "create", batchSize: 3, parallelism: 1, size: sandboxSize{4, 8}, generatedName: true, namePrefix: "terra", provider: "codex", template: "fixture@1", tailscale: true, noDesktop: true}
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	progress := startLaunchProgress(ctx, io.Discard, opts)
+	defer progress.close()
+	finished := make(chan error, 1)
+	go func() {
+		finished <- runBatch(ctx, agent37.New("fixture"), func(context.Context) (*peers.Enrollment, error) { return nil, nil }, opts, state, &output, progress)
+	}()
+	select {
+	case <-secondCreateSent:
+		cancel()
+	case <-ctx.Done():
+		t.Fatal("never reached the second create")
+	}
+	if err := <-finished; !errors.Is(err, context.Canceled) || !errors.Is(err, errCreateUnconfirmed) || creates.Load() != 2 {
+		t.Fatalf("canceled batch made %d create requests and returned %v", creates.Load(), err)
+	}
+
+	var result struct {
+		Sandboxes []map[string]any
+	}
+	if err := json.Unmarshal(output.Bytes(), &result); err != nil || len(result.Sandboxes) != 3 {
+		t.Fatalf("invalid cancellation result: %s, %v", &output, err)
+	}
+	if result.Sandboxes[0]["id"] != "aaaaaaaaaa" || result.Sandboxes[1]["status"] != "unconfirmed" || result.Sandboxes[2]["status"] != "canceled" {
+		t.Fatalf("incorrect cancellation results: %v", result.Sandboxes)
+	}
+	for i, name := range []string{"terra-1", "terra-2", "terra-3"} {
+		_, err := os.Stat(sandboxStatePath(state, name, ".pending"))
+		if i == 1 && err != nil || i != 1 && !os.IsNotExist(err) {
+			t.Fatalf("wrong pending marker for %s: %v", name, err)
+		}
+		lock := sandboxLock(state, name)
+		if locked, err := lock.TryLock(); err != nil || !locked {
+			t.Fatalf("canceled launch held the lifecycle lock for %s: %v", name, err)
+		}
+		_ = lock.Unlock()
 	}
 }
 

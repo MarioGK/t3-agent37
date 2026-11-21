@@ -351,7 +351,7 @@ func TestBatchWorkspaceFailureCanResumeByName(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	progress := startLaunchProgress(&diagnostic, opts)
+	progress := startLaunchProgress(ctx, &diagnostic, opts)
 	err = runBatch(ctx, agent37.New("fixture"), func(context.Context) (*peers.Enrollment, error) { return nil, nil }, opts, state, &output, progress)
 	if err == nil || !strings.Contains(err.Error(), "could not clone example-org/example-tools") ||
 		!strings.Contains(diagnostic.String(), "agent-2 Workspace ready in T3 Code") ||

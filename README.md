@@ -61,6 +61,8 @@ the sandbox and its projects pass verification.
 
 `up 10 --dry-run` previews the batch. `up 10 --no-desktop` runs it headless.
 Use `up <name>` to start an existing sandbox.
+Press Ctrl+C to cancel a launch. Agent37 keeps any sandboxes it already
+created. Run `ls` to see them and `up <name>` to finish setup.
 The terminal progress bar starts with the launch checks and tracks sandbox
 readiness, T3 Code approvals, and mesh sync for single launches and batches.
 It reaches 100% when all required steps finish successfully.
