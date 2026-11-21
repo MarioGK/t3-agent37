@@ -99,6 +99,9 @@ to its path.
 An optional `root_repository` checks out a repository at `path` itself.
 The CLI clones up to four child repositories at a time while the sandbox joins
 Tailscale. It verifies their T3 projects before requesting desktop pairing.
+When an existing workspace starts, the CLI fast-forwards its tracked GitHub
+branches before checking the projects. It preserves local branches, pinned
+tags, and conflicting files.
 Use `up --workspace=false` to skip the playbook for a launch. Set
 `T3_AGENT37_TIMINGS=1` to print the duration of each stage.
 

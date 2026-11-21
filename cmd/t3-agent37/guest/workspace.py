@@ -1,4 +1,4 @@
-"""Clone one GitHub repository without modifying any existing checkout."""
+"""Clone or fast-forward a GitHub checkout while preserving local work."""
 
 import json
 import os
@@ -45,6 +45,50 @@ def valid_path_part(part):
     return bool(part) and part not in {".", ".."} and "/" not in part and "\\" not in part
 
 
+def refresh_checkout(checkout, env, workspace_root):
+    git = ["git", "-C", str(checkout)]
+    branch = subprocess.run([*git, "symbolic-ref", "--quiet", "--short", "HEAD"],
+                            capture_output=True, text=True, timeout=5, env=env)
+    if branch.returncode != 0:
+        return "existing"
+    branch_name = branch.stdout.strip()
+    remote = subprocess.run([*git, "config", "--get", f"branch.{branch_name}.remote"],
+                            capture_output=True, text=True, timeout=5, env=env)
+    if remote.returncode != 0 or remote.stdout.strip() != "origin":
+        return "existing"
+    merge_ref = subprocess.run([*git, "config", "--get", f"branch.{branch_name}.merge"],
+                               capture_output=True, text=True, timeout=5, env=env)
+    ref = merge_ref.stdout.strip()
+    if merge_ref.returncode != 0 or not ref.startswith("refs/heads/"):
+        return "pull_conflict"
+    fetched = subprocess.run(["timeout", "--kill-after=5s", "120s", *git, "fetch", "--quiet",
+                              "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head",
+                              "origin", ref], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
+    if fetched.returncode in {124, 137}:
+        return "timeout"
+    if fetched.returncode != 0:
+        return "fetch_failed"
+    current = subprocess.run([*git, "symbolic-ref", "--quiet", "--short", "HEAD"],
+                             capture_output=True, text=True, timeout=5, env=env)
+    if current.stdout.strip() != branch_name:
+        return "pull_conflict"
+    upstream = subprocess.run([*git, "rev-parse", "--verify", "@{upstream}^{commit}"],
+                              capture_output=True, text=True, timeout=5, env=env)
+    if upstream.returncode != 0:
+        return "pull_conflict"
+    revision = upstream.stdout.strip()
+    if workspace_root:
+        nested = {entry.name for entry in checkout.iterdir() if (entry / ".git").exists()}
+        changes = subprocess.run([*git, "diff", "--name-only", "-z", "HEAD", revision],
+                                 capture_output=True, text=True, timeout=10, env=env)
+        if changes.returncode != 0 or any(name.split("/", 1)[0] in nested for name in changes.stdout.split("\0")):
+            return "pull_conflict"
+    # Like a fast-forward pull, with Git's additional guard against replacing ignored files.
+    merged = subprocess.run([*git, "merge", "--quiet", "--ff-only", "--no-autostash", "--no-overwrite-ignore", revision],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30, env=env)
+    return "existing" if merged.returncode == 0 else "pull_conflict"
+
+
 def clone_repository(home, workspace_path, repo, directory, ref):
     parts = workspace_path.removeprefix("~/").split("/")
     if (not workspace_path.startswith("~/") or not all(map(valid_path_part, parts))
@@ -63,7 +107,7 @@ def clone_repository(home, workspace_path, repo, directory, ref):
     env = git_environment()
     if target.exists() or target.is_symlink():
         if matches_checkout(target, repo, env):
-            return "existing"
+            return refresh_checkout(target, env, not directory)
         if directory or not can_adopt_root(target):
             return "conflict"
 
@@ -95,7 +139,7 @@ def clone_repository(home, workspace_path, repo, directory, ref):
             if result.returncode == 0 and move_without_overwrite(checkout / ".git", target / ".git"):
                 return "cloned"
         if target.exists() or target.is_symlink():
-            return "existing" if matches_checkout(target, repo, env) else "conflict"
+            return refresh_checkout(target, env, not directory) if matches_checkout(target, repo, env) else "conflict"
         return "filesystem_error"
 
 

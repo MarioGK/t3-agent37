@@ -40,6 +40,15 @@ class WorkspaceTest(unittest.TestCase):
     def publish(self, name):
         self.git("clone", "--bare", str(self.source), str(self.remotes / f"{name}.git"))
 
+    def advance(self, name, filename):
+        path = self.source / filename
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("updated upstream")
+        self.git("-C", str(self.source), "add", filename)
+        self.git("-C", str(self.source), "-c", "user.name=Fixture", "-c",
+                 "user.email=git@example.test", "commit", "--no-gpg-sign", "-m", "Update")
+        self.git("-C", str(self.source), "push", str(self.remotes / f"{name}.git"), "main")
+
     def clone(self, name, ref="", directory=None):
         return workspace.clone_repository(
             self.home, self.workspace_path, f"example-org/{name}", directory or name, ref,
@@ -81,6 +90,37 @@ class WorkspaceTest(unittest.TestCase):
         self.assertEqual(self.clone("example-app"), "conflict")
         self.assertEqual(self.git("-C", str(target), "config", "remote.origin.url"),
                          "https://github.com/Other/example-app.git")
+
+    def test_refresh_fast_forwards_and_keeps_unrelated_local_work(self):
+        self.publish("example-app")
+        self.assertEqual(self.clone("example-app"), "cloned")
+        checkout = self.root / "example-app"
+        (checkout / "README").write_text("local work")
+        self.advance("example-app", "new-file")
+        self.assertEqual(self.clone("example-app"), "existing")
+        self.assertEqual((checkout / "README").read_text(), "local work")
+        self.assertEqual((checkout / "new-file").read_text(), "updated upstream")
+        self.assertEqual(self.git("-C", str(checkout), "rev-parse", "HEAD"),
+                         self.git("-C", str(self.source), "rev-parse", "HEAD"))
+
+    def test_refresh_refuses_to_overwrite_local_edits(self):
+        self.publish("example-app")
+        self.assertEqual(self.clone("example-app"), "cloned")
+        checkout = self.root / "example-app"
+        (checkout / "README").write_text("local work")
+        self.advance("example-app", "README")
+        self.assertEqual(self.clone("example-app"), "pull_conflict")
+        self.assertEqual((checkout / "README").read_text(), "local work")
+
+    def test_root_refresh_cannot_write_into_a_child_checkout(self):
+        self.publish("example-workspace")
+        self.publish("example-app")
+        args = (self.home, self.workspace_path, "example-org/example-workspace", "", "")
+        self.assertEqual(workspace.clone_repository(*args), "cloned")
+        self.assertEqual(self.clone("example-app"), "cloned")
+        self.advance("example-workspace", "example-app/new-file")
+        self.assertEqual(workspace.clone_repository(*args), "pull_conflict")
+        self.assertFalse((self.root / "example-app" / "new-file").exists())
 
     def test_publish_preserves_a_folder_created_during_clone(self):
         self.publish("example-app")

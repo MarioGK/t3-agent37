@@ -92,7 +92,8 @@ func addWorkspaceFlag(flags *flag.FlagSet) *bool {
 }
 
 func (opts *options) loadWorkspacePlaybook(metadata map[string]string) error {
-	if !opts.up || opts.workspace != nil && !*opts.workspace ||
+	startManagedWorkspace := opts.action == "start" && metadata[workspaceSetupKey] == "required"
+	if (!opts.up && !startManagedWorkspace) || opts.workspace != nil && !*opts.workspace ||
 		opts.workspace == nil && metadata[workspaceDisabledKey] == "true" {
 		return nil
 	}
@@ -303,8 +304,12 @@ func cloneWorkspaceRepository(ctx context.Context, client *agent37.Client, id, n
 		return fmt.Errorf("%s in %s conflicts with the checkout of %s. Resolve the conflict before retrying", path.Join(workspace, folder), name, repo.Repo)
 	case "clone_failed":
 		return fmt.Errorf("could not clone %s in %s. Check GitHub access and add --github when retrying the credential handoff", repo.Repo, name)
+	case "fetch_failed":
+		return fmt.Errorf("could not refresh %s in %s. Check GitHub access and retry with up %s --github", repo.Repo, name, name)
+	case "pull_conflict":
+		return fmt.Errorf("could not fast-forward %s in %s. Check the upstream branch and local changes", repo.Repo, name)
 	case "timeout":
-		return fmt.Errorf("cloning %s timed out in %s", repo.Repo, name)
+		return fmt.Errorf("checking out %s timed out in %s", repo.Repo, name)
 	case "filesystem_error":
 		return fmt.Errorf("could not prepare %s in %s. Check the workspace path, permissions, and disk space", path.Join(workspace, folder), name)
 	default:
