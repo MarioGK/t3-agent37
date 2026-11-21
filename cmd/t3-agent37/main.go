@@ -468,6 +468,7 @@ func operate(ctx context.Context, client *agent37.Client, enrollment *peers.Enro
 	var instance agent37.Instance
 	var configured []peers.Peer
 	var launcher []string
+	var progress *launchProgress
 	var err error
 	if opts.action == "create" {
 		if opts.generatedName && !opts.noDesktop {
@@ -482,6 +483,9 @@ func operate(ctx context.Context, client *agent37.Client, enrollment *peers.Enro
 				return err
 			}
 		}
+		progress = startLaunchProgress(diagnostic, 1, "Creating "+opts.name)
+		defer progress.close()
+		diagnostic = progress
 		instance, err = getOrCreate(ctx, client, opts, state, diagnostic)
 	} else if opts.targetID != "" {
 		instance, err = client.Get(ctx, opts.targetID)
@@ -546,17 +550,23 @@ func operate(ctx context.Context, client *agent37.Client, enrollment *peers.Enro
 	_, interactiveOutput := ttyOutput(output)
 	var proof setupProof
 	if opts.action == "create" {
+		progress.allocated()
+		progress.setPhase("Setting up T3 Code and Tailscale")
 		proof, err = prepareCreated(ctx, client, enrollment, instance, opts, diagnostic)
 		if err != nil {
 			return err
 		}
+		progress.provisioned(true)
 		if launcher != nil {
+			progress.setPhase("Waiting for T3 Code confirmation")
 			if err := handOffPairing(ctx, client, instance, opts.name, proof, launcher, diagnostic); err != nil {
 				return fmt.Errorf("%s is running. Run t3-agent37 link %s to finish pairing: %w", opts.name, opts.name, err)
 			}
 			proof.DesktopConfirmed = true
 		}
+		progress.setPhase("Syncing T3 environments")
 		linkStartedSandbox(ctx, client, instance, opts.name, configured, proof, diagnostic)
+		progress.close()
 		if !interactiveOutput {
 			fmt.Fprintf(output, "Cloud T3 ready (%s, %s).\n", instance.ID, proof.EnvironmentID)
 		}

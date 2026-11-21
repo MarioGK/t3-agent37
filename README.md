@@ -50,6 +50,8 @@ Use `up --no-desktop` for headless runs.
 Confirm each desktop pairing in order. The CLI then syncs the mesh once.
 `up 10 --dry-run` previews the batch. `up 10 --no-desktop` runs it headless.
 Use `up <name>` to start an existing sandbox.
+The terminal progress bar tracks sandbox readiness, T3 Code confirmation,
+and mesh sync for single launches and batches.
 New sandboxes default to **4 vCPU and 8 GB RAM**. Use `up --ram 16` for
 one launch or `up 10 --ram 4` to size every sandbox in a batch. The CLI
 selects the matching CPU count. Use `config --ram 16` to save a default or

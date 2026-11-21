@@ -23,6 +23,9 @@ var (
 )
 
 func ttyOutput(output io.Writer) (width int, terminal bool) {
+	if progress, ok := output.(*launchProgress); ok {
+		output = progress.output
+	}
 	file, ok := output.(*os.File)
 	if !ok || !term.IsTerminal(file.Fd()) {
 		return 0, false
