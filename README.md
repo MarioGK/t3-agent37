@@ -101,12 +101,13 @@ to its path.
 ```
 
 An optional `root_repository` checks out a repository at `path` itself.
-The CLI clones up to four child repositories at a time while the sandbox joins
-Tailscale. Git downloads the checked-out files and fetches historical blobs
-on demand. The CLI verifies the T3 projects before requesting desktop pairing.
-Each startup fetches and fast-forwards the tracked GitHub branches for the
-workspace root and its repositories before checking the T3 projects. It preserves local branches, pinned
-tags, and conflicting files.
+Repository checkout runs while T3 starts and the sandbox joins Tailscale.
+The CLI checks out up to four child repositories at a time. Git downloads
+the checked-out files and fetches historical blobs on demand. Each startup
+fetches and fast-forwards the tracked GitHub branches for the workspace root
+and its repositories. It preserves local branches, pinned tags, and
+conflicting files. The CLI verifies the T3 projects before requesting
+desktop pairing.
 Use `up --workspace=false` to skip the playbook for a launch. Set
 `T3_AGENT37_TIMINGS=1` to print the duration of each stage.
 

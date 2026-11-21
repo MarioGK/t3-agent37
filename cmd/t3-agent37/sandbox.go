@@ -187,7 +187,12 @@ func bootstrap(ctx context.Context, client *agent37.Client, enrollment *peers.En
 		url string
 		err error
 	}
+	type checkout struct {
+		playbook *workspacePlaybook
+		err      error
+	}
 	var earlyPublication chan publication
+	var earlyCheckout chan checkout
 	if settings.playbook != nil && !settings.mayRestart && instance.Metadata["tailnet"] == "tailscale" {
 		install, configure, requestedName, err := setupCommands(instance, settings.peerLinks)
 		if err != nil {
@@ -197,17 +202,25 @@ func bootstrap(ctx context.Context, client *agent37.Client, enrollment *peers.En
 			return proof, err
 		}
 		published := make(chan publication, 1)
-		earlyPublication = published
+		checkedOut := make(chan checkout, 1)
+		earlyPublication, earlyCheckout = published, checkedOut
 		prepare, cancel := context.WithCancel(ctx)
 		defer func() {
 			cancel()
 			if earlyPublication != nil {
 				<-earlyPublication
 			}
+			if earlyCheckout != nil {
+				<-earlyCheckout
+			}
 		}()
 		go func() {
 			url, err := publishTailnet(prepare, client, enrollment, instance.ID, name, diagnostic)
 			published <- publication{url, err}
+		}()
+		go func() {
+			playbook, err := checkoutSandboxWorkspace(prepare, client, instance.ID, name, settings, diagnostic)
+			checkedOut <- checkout{playbook, err}
 		}()
 		proof, err = configureGuestT3(ctx, client, instance.ID, requestedName, configure)
 		if err != nil {
@@ -236,27 +249,22 @@ func bootstrap(ctx context.Context, client *agent37.Client, enrollment *peers.En
 			notice(diagnostic, warning, "The sandbox could not set the T3 display name to %s.", proof.RequestedName)
 		}
 	}
-	// The GitHub handoff waits for protected gateway health. Tailscale uses its
-	// own userspace daemon and leaves GitHub DNS and routes alone.
 	var workspaceErr error
 	var prepareWorkspace func()
 	if settings.githubAccess || settings.playbook != nil || settings.skipWorkspace {
 		prepareWorkspace = func() {
-			if err := ctx.Err(); err != nil {
-				workspaceErr = err
+			var playbook *workspacePlaybook
+			if earlyCheckout != nil {
+				result := <-earlyCheckout
+				earlyCheckout = nil
+				playbook, workspaceErr = result.playbook, result.err
+			} else {
+				playbook, workspaceErr = checkoutSandboxWorkspace(ctx, client, instance.ID, name, settings, diagnostic)
+			}
+			if workspaceErr != nil {
 				return
 			}
-			if settings.githubAccess {
-				if err := configureGitHubAccess(ctx, client, instance.ID, name, diagnostic); err != nil && ctx.Err() == nil {
-					notice(diagnostic, warning, "%v", err)
-				}
-			}
-			if settings.playbook != nil {
-				playbook := *settings.playbook
-				workspaceErr = playbook.clone(ctx, client, instance.ID, name, diagnostic)
-				if workspaceErr != nil {
-					return
-				}
+			if playbook != nil {
 				var installTools func()
 				var toolErr error
 				if playbook.terraScale() {
@@ -272,9 +280,9 @@ func bootstrap(ctx context.Context, client *agent37.Client, enrollment *peers.En
 					return
 				}
 			}
-			if settings.playbook != nil || settings.skipWorkspace {
+			if playbook != nil || settings.skipWorkspace {
 				workspaceErr = requireWorkspaceReady(ctx, client, instance, name, true)
-				if workspaceErr == nil && settings.playbook != nil {
+				if workspaceErr == nil && playbook != nil {
 					notice(diagnostic, success, "%s Workspace ready in T3 Code", name)
 				}
 			}
@@ -322,6 +330,25 @@ func bootstrap(ctx context.Context, client *agent37.Client, enrollment *peers.En
 		})
 	})
 	return proof, errors.Join(err, workspaceErr)
+}
+
+func checkoutSandboxWorkspace(ctx context.Context, client *agent37.Client, id, name string, settings sandboxBootstrap, diagnostic io.Writer) (*workspacePlaybook, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if settings.githubAccess {
+		if err := configureGitHubAccess(ctx, client, id, name, diagnostic); err != nil && ctx.Err() == nil {
+			notice(diagnostic, warning, "%v", err)
+		}
+	}
+	if settings.playbook == nil {
+		return nil, ctx.Err()
+	}
+	playbook := *settings.playbook
+	if err := playbook.clone(ctx, client, id, name, diagnostic); err != nil {
+		return nil, err
+	}
+	return &playbook, nil
 }
 
 func publishTailnet(ctx context.Context, client *agent37.Client, enrollment *peers.Enrollment, id, name string, diagnostic io.Writer) (string, error) {

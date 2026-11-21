@@ -153,6 +153,7 @@ func TestBatchWorkspaceFailureCanResumeByName(t *testing.T) {
 	type fixtureSandbox struct {
 		instance       agent37.Instance
 		clones         map[string]int
+		rootCheckout   chan struct{}
 		credentialSent bool
 		githubReady    bool
 		workspaceReady bool
@@ -207,7 +208,9 @@ func TestBatchWorkspaceFailureCanResumeByName(t *testing.T) {
 			if sandboxes[instance.ID] != nil {
 				t.Error("retry created a second sandbox")
 			}
-			sandboxes[instance.ID] = &fixtureSandbox{instance: instance, clones: make(map[string]int)}
+			sandboxes[instance.ID] = &fixtureSandbox{
+				instance: instance, clones: make(map[string]int), rootCheckout: make(chan struct{}),
+			}
 			write(instance)
 		case r.URL.Path == "/.well-known/t3/environment":
 			id, _, _ := strings.Cut(strings.TrimPrefix(r.Host, "a37-agent-"), ".")
@@ -268,6 +271,15 @@ func TestBatchWorkspaceFailureCanResumeByName(t *testing.T) {
 			case strings.HasPrefix(request.Command, "if test -f") && strings.Contains(request.Command, workspaceReadyFile):
 				execResult(map[string]bool{"ready": sandbox.workspaceReady})
 			case strings.Contains(request.Command, " setup "):
+				// A cold workspace must progress even while T3 startup is pending.
+				mu.Unlock()
+				select {
+				case <-sandbox.rootCheckout:
+				case <-r.Context().Done():
+					mu.Lock()
+					return
+				}
+				mu.Lock()
 				sandbox.t3Ready = true
 				execResult(setupProof{EnvironmentID: id, Label: name, Port: 3773, ProviderReady: true, PeerProxy: true})
 			case strings.Contains(request.Command, " remote.py "):
@@ -311,6 +323,9 @@ func TestBatchWorkspaceFailureCanResumeByName(t *testing.T) {
 						t.Error("a nested repository was cloned before the workspace root")
 					}
 					sandbox.clones[repo]++
+					if repo == playbook.RootRepo && sandbox.clones[repo] == 1 {
+						close(sandbox.rootCheckout)
+					}
 					status := "cloned"
 					switch {
 					case id == firstID && repo == "example-org/example-tools" && sandbox.clones[repo] == 1:
