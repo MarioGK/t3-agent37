@@ -119,10 +119,11 @@ RUN set -eu; \
     done; \
     chmod -R a+rX "$cache"
 
-USER node
 RUN set -eu; \
     export PATH=/usr/local/bin:/usr/bin:/bin; \
-    test "$(t3 --version)" = "t3 v$T3_VERSION"; codex --version; claude --version; opencode --version; \
+    test -x "/opt/t3-agent37/versions/$T3_VERSION/t3"; \
+    test -f "/opt/t3-agent37/versions/$T3_VERSION/.verified"; \
+    codex --version; claude --version; opencode --version; \
     go version; gofmt -h >/dev/null 2>&1; \
     dotnet --list-sdks > /tmp/terrascale-sdks; \
     grep -E '^10\.' /tmp/terrascale-sdks; grep -E '^11\.' /tmp/terrascale-sdks; \
@@ -137,4 +138,7 @@ RUN set -eu; \
     ruby --version; shellcheck --version; actionlint --version; gh --version; \
     ts --version; psql --version; command -v certutil unshare nsenter strace; \
     tailscale version; tailscaled --version; \
-    playwright --version
+    playwright --version; \
+    go version -m /usr/local/bin/ts-orch | grep -F 'vcs.modified=false'
+
+USER node

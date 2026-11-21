@@ -5,12 +5,14 @@ import os
 from pathlib import Path
 import tarfile
 import tempfile
+from threading import Barrier
 import unittest
 from unittest.mock import patch
 from types import SimpleNamespace
+from urllib.error import HTTPError
 
 from remote import machine_info_with_label, select_runtime, unpack_runtime
-from remote import desktop_confirmed, pairing_status, provider_ready
+from remote import desktop_confirmed, pairing_status, provider_ready, register_projects
 
 
 class DesktopPairingTest(unittest.TestCase):
@@ -38,6 +40,51 @@ class DesktopPairingTest(unittest.TestCase):
             pairing_status("t3-agent37-desktop-" + "a" * 32, "sandbox-id")
         self.assertEqual(json.loads(output.getvalue()), {"changed": True})
         command.assert_not_called()
+
+
+class ProjectRegistrationTest(unittest.TestCase):
+    def test_parallel_creates_verify_identity_and_keep_native_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            current, archived = home / "current", home / "archived"
+            current.mkdir()
+            archived.mkdir()
+            repos = {str(current): "github.com/fixture/current",
+                     str(archived): "github.com/fixture/archived"}
+            active = {}
+            mutations = Barrier(2, timeout=3)
+
+            def open_request(request, timeout):
+                if request.get_method() == "GET":
+                    projects = [{"workspaceRoot": name, "repositoryIdentity": {"canonicalKey": identity}}
+                                for name, identity in active.items()]
+                    return io.BytesIO(json.dumps({"projects": projects}).encode())
+                name = json.loads(request.data)["workspaceRoot"]
+                mutations.wait()
+                if name == str(archived):
+                    raise HTTPError(request.full_url, 409, "archived", {}, None)
+                active[name] = repos[name]
+                return io.BytesIO(b"{}")
+
+            def run(args, **kwargs):
+                if args[1:4] == ["auth", "session", "issue"]:
+                    return SimpleNamespace(stdout='{"token":"fixture","sessionId":"registration"}')
+                if args[1:3] == ["project", "add"]:
+                    name = args[-1]
+                    self.assertEqual(name, str(archived))
+                    active[name] = repos[name]
+                return SimpleNamespace(returncode=0)
+
+            with (patch("pathlib.Path.home", return_value=home),
+                  patch("remote.build_opener", return_value=SimpleNamespace(open=open_request)),
+                  patch("remote.subprocess.run", side_effect=run) as commands):
+                register_projects({"~/current": "fixture/current", "~/archived": "fixture/archived"})
+                register_projects({"~/current": "fixture/current", "~/archived": "fixture/archived"})
+            self.assertEqual(active, repos)
+            self.assertEqual(sum(call.args[0][1:3] == ["project", "add"]
+                                 for call in commands.call_args_list), 1)
+            self.assertEqual(sum(call.args[0][1:4] == ["auth", "session", "revoke"]
+                                 for call in commands.call_args_list), 2)
 
 
 class ProvidersTest(unittest.TestCase):
