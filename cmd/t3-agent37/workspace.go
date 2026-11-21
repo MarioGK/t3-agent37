@@ -11,13 +11,13 @@ import (
 	"os"
 	"path"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
 
 	"github.com/MarioGK/t3-agent37/internal/agent37"
 	flag "github.com/spf13/pflag"
-	"golang.org/x/sync/errgroup"
 )
 
 const (
@@ -197,7 +197,7 @@ func previewCreatePayload(opts options) map[string]any {
 	return payload
 }
 
-const workspaceCloneParallelism = 4
+const workspaceCloneGroupSize = 4
 
 func (playbook *workspacePlaybook) clone(ctx context.Context, client *agent37.Client, id, name string, diagnostic io.Writer) error {
 	started := time.Now()
@@ -222,17 +222,16 @@ func (playbook *workspacePlaybook) clone(ctx context.Context, client *agent37.Cl
 		}
 	}
 	notice(diagnostic, info, "%s Checking %d workspace repositories for updates", name, len(playbook.Repositories))
-	var clones errgroup.Group
-	clones.SetLimit(workspaceCloneParallelism)
-	for _, repo := range playbook.Repositories {
-		clones.Go(func() error {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			return cloneWorkspaceRepository(ctx, client, id, name, baseCommand, playbook.Path, repo, repo.directory())
-		})
+	var failures []error
+	for group := range slices.Chunk(playbook.Repositories, workspaceCloneGroupSize) {
+		if err := ctx.Err(); err != nil {
+			return errors.Join(errors.Join(failures...), err)
+		}
+		if err := cloneWorkspaceGroup(ctx, client, id, name, baseCommand, playbook.Path, group); err != nil {
+			failures = append(failures, err)
+		}
 	}
-	if err := clones.Wait(); err != nil {
+	if err := errors.Join(failures...); err != nil {
 		return err
 	}
 	notice(diagnostic, success, "%s Checkouts ready at %s", name, playbook.Path)
@@ -291,25 +290,52 @@ func (playbook workspacePlaybook) installTerraScaleTools(ctx context.Context, cl
 	}
 }
 
+// A bounded group fits inside the same exec timeout as a single checkout.
+func cloneWorkspaceGroup(ctx context.Context, client *agent37.Client, id, name, baseCommand, workspace string, repos []workspaceRepository) error {
+	payload, err := json.Marshal(repos)
+	if err != nil {
+		return err
+	}
+	result, err := client.ExecJSON[struct{ Statuses []string }](ctx, id, baseCommand+" --batch "+shellQuote(string(payload)))
+	if err != nil {
+		return fmt.Errorf("could not check out workspace repositories in %s: %w", name, err)
+	}
+	if len(result.Statuses) != len(repos) {
+		return errors.New("sandbox returned incomplete checkout results")
+	}
+	var failures []error
+	for i, status := range result.Statuses {
+		repo := repos[i]
+		if err := checkoutError(status, workspace, name, repo.Repo, repo.directory()); err != nil {
+			failures = append(failures, err)
+		}
+	}
+	return errors.Join(failures...)
+}
+
 func cloneWorkspaceRepository(ctx context.Context, client *agent37.Client, id, name, baseCommand, workspace string, repo workspaceRepository, folder string) error {
 	command := baseCommand + " " + shellQuote(repo.Repo) + " " + shellQuote(folder) + " " + shellQuote(repo.Ref)
 	result, err := client.ExecJSON[struct{ Status string }](ctx, id, command)
 	if err != nil {
 		return fmt.Errorf("could not clone %s in %s: %w", repo.Repo, name, err)
 	}
-	switch result.Status {
+	return checkoutError(result.Status, workspace, name, repo.Repo, folder)
+}
+
+func checkoutError(status, workspace, name, repo, folder string) error {
+	switch status {
 	case "cloned", "existing":
 		return nil
 	case "conflict":
-		return fmt.Errorf("%s in %s conflicts with the checkout of %s. Resolve the conflict before retrying", path.Join(workspace, folder), name, repo.Repo)
+		return fmt.Errorf("%s in %s conflicts with the checkout of %s. Resolve the conflict before retrying", path.Join(workspace, folder), name, repo)
 	case "clone_failed":
-		return fmt.Errorf("could not clone %s in %s. Check GitHub access and add --github when retrying the credential handoff", repo.Repo, name)
+		return fmt.Errorf("could not clone %s in %s. Check GitHub access and add --github when retrying the credential handoff", repo, name)
 	case "fetch_failed":
-		return fmt.Errorf("could not refresh %s in %s. Check GitHub access and retry with up %s --github", repo.Repo, name, name)
+		return fmt.Errorf("could not refresh %s in %s. Check GitHub access and retry with up %s --github", repo, name, name)
 	case "pull_conflict":
-		return fmt.Errorf("could not fast-forward %s in %s. Check the upstream branch and local changes", repo.Repo, name)
+		return fmt.Errorf("could not fast-forward %s in %s. Check the upstream branch and local changes", repo, name)
 	case "timeout":
-		return fmt.Errorf("checking out %s timed out in %s", repo.Repo, name)
+		return fmt.Errorf("checking out %s timed out in %s", repo, name)
 	case "filesystem_error":
 		return fmt.Errorf("could not prepare %s in %s. Check the workspace path, permissions, and disk space", path.Join(workspace, folder), name)
 	default:

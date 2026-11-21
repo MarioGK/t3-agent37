@@ -1,5 +1,6 @@
 """Clone or fast-forward a GitHub checkout while preserving local work."""
 
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 import re
@@ -8,6 +9,9 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+
+PUBLIC_GIT_CACHE = Path("/opt/terrascale/git-cache")
 
 
 def git_environment():
@@ -118,6 +122,9 @@ def clone_repository(home, workspace_path, repo, directory, ref):
     with tempfile.TemporaryDirectory(prefix=".t3-agent37-clone-", dir=parent) as stage:
         checkout = Path(stage) / target.name
         command = ["timeout", "--kill-after=5s", "210s", "git", "clone", "--quiet", "--filter=blob:none"]
+        cache = PUBLIC_GIT_CACHE / (repo.lower() + ".git")
+        if cache.is_dir():
+            command.extend(["--reference-if-able", str(cache), "--dissociate"])
         if ref:
             command.extend(["--branch", ref])
         command.extend(["--", f"https://github.com/{repo}.git", str(checkout)])
@@ -160,11 +167,32 @@ def move_without_overwrite(source, destination):
     return result.returncode == 0 and not source.exists()
 
 
-if __name__ == "__main__":
+def checkout_status(home, workspace_path, repo, directory, ref):
     try:
-        status = clone_repository(Path.home(), *sys.argv[1:])
+        return clone_repository(home, workspace_path, repo, directory, ref)
     except subprocess.TimeoutExpired:
-        status = "timeout"
+        return "timeout"
     except (OSError, ValueError):
-        status = "filesystem_error"
-    print(json.dumps({"status": status}))
+        return "filesystem_error"
+
+
+def checkout_group(home, workspace_path, repositories):
+    if not 1 <= len(repositories) <= 4:
+        raise ValueError("Expected one to four workspace repositories")
+
+    def checkout(item):
+        repo = item["repo"]
+        directory = item.get("directory") or repo.rsplit("/", 1)[-1]
+        return checkout_status(home, workspace_path, repo, directory, item.get("ref", ""))
+
+    with ThreadPoolExecutor(max_workers=len(repositories)) as worker:
+        return list(worker.map(checkout, repositories))
+
+
+if __name__ == "__main__":
+    workspace_path, *request = sys.argv[1:]
+    if request[0] == "--batch":
+        response = {"statuses": checkout_group(Path.home(), workspace_path, json.loads(request[1]))}
+    else:
+        response = {"status": checkout_status(Path.home(), workspace_path, *request)}
+    print(json.dumps(response))

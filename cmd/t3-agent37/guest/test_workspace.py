@@ -91,6 +91,37 @@ class WorkspaceTest(unittest.TestCase):
         self.assertEqual(self.git("-C", str(target), "config", "remote.origin.url"),
                          "https://github.com/Other/example-app.git")
 
+    def test_checkout_group_reports_partial_failure_and_safely_retries(self):
+        self.publish("example-app")
+        repositories = [{"repo": "example-org/example-app"},
+                        {"repo": "example-org/example-tools", "directory": "tools", "ref": "main"}]
+        checkout = self.root / "example-app"
+        self.assertEqual(workspace.checkout_group(self.home, self.workspace_path, repositories),
+                         ["cloned", "clone_failed"])
+        (checkout / "README").write_text("keep this edit")
+        self.publish("example-tools")
+        self.assertEqual(workspace.checkout_group(self.home, self.workspace_path, repositories),
+                         ["existing", "cloned"])
+        self.assertEqual((checkout / "README").read_text(), "keep this edit")
+        self.assertTrue((self.root / "tools" / "README").is_file())
+
+    def test_checkout_uses_cache_and_checks_out_current_upstream(self):
+        self.publish("example-app")
+        cache = self.home / "git-cache"
+        cached_repo = cache / "example-org" / "example-app.git"
+        cached_repo.parent.mkdir(parents=True)
+        self.git("clone", "--bare", str(self.remotes / "example-app.git"), str(cached_repo))
+        self.advance("example-app", "new-file")
+        with patch.object(workspace, "PUBLIC_GIT_CACHE", cache):
+            self.assertEqual(self.clone("example-app"), "cloned")
+        checkout = self.root / "example-app"
+        self.assertEqual((checkout / "new-file").read_text(), "updated upstream")
+        self.assertFalse((checkout / ".git" / "objects" / "info" / "alternates").exists())
+        shutil.rmtree(cache)
+        self.assertEqual(self.git("-C", str(checkout), "rev-parse", "HEAD"),
+                         self.git("-C", str(self.source), "rev-parse", "HEAD"))
+        self.git("-C", str(checkout), "diff", "--quiet", "HEAD")
+
     def test_refresh_fast_forwards_and_keeps_unrelated_local_work(self):
         self.publish("example-app")
         self.assertEqual(self.clone("example-app"), "cloned")

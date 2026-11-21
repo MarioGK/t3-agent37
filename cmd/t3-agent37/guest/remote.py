@@ -1,6 +1,7 @@
 """Install and start a checksum-pinned T3 runtime on an Agent37 sandbox."""
 
 from copy import deepcopy
+from concurrent.futures import ThreadPoolExecutor
 import fcntl
 import hashlib
 import json
@@ -389,26 +390,34 @@ def register_projects(checkouts):
         return {project["workspaceRoot"]: (project.get("repositoryIdentity") or {}).get("canonicalKey")
                 for project in projects if not project.get("deletedAt") and not project.get("archivedAt")}
 
+    def create_project(project):
+        command = {"type": "project.create", "commandId": str(uuid.uuid4()),
+                   "projectId": str(uuid.uuid4()), "title": Path(project).name,
+                   "workspaceRoot": project}
+        request = Request(url + "/mutate", data=json.dumps(command).encode(),
+                          headers={**authorization, "Content-Type": "application/json"})
+        try:
+            with opener.open(request, timeout=5):
+                return None
+        except HTTPError as error:
+            status = error.code
+            error.close()
+            if status in {400, 404, 409, 422}:
+                return project
+            raise RuntimeError(f"T3 could not register the project at {project}") from None
+
     try:
         active = active_projects()
         missing = sorted(expected.keys() - active.keys())
-        for project in missing:
-            try:
-                command = {"type": "project.create", "commandId": str(uuid.uuid4()),
-                           "projectId": str(uuid.uuid4()), "title": Path(project).name,
-                           "workspaceRoot": project}
-                request = Request(url + "/mutate", data=json.dumps(command).encode(),
-                                  headers={**authorization, "Content-Type": "application/json"})
-                with opener.open(request, timeout=5):
-                    pass
-            except HTTPError as error:
-                if error.code in {400, 404, 409, 422}:
-                    # Use the native CLI for older servers and archived projects.
-                    result = subprocess.run([str(T3), "project", "add", *base_args, "--", project],
-                                            capture_output=True, timeout=20)
-                    if result.returncode == 0 or project in active_projects():
-                        continue
-                raise RuntimeError(f"T3 could not register the project at {project}") from None
+        if missing:
+            with ThreadPoolExecutor(max_workers=min(4, len(missing))) as worker:
+                fallback = [project for project in worker.map(create_project, missing) if project]
+            for project in fallback:
+                # Use the native CLI for older servers and archived projects.
+                result = subprocess.run([str(T3), "project", "add", *base_args, "--", project],
+                                        capture_output=True, timeout=20)
+                if result.returncode != 0 and project not in active_projects():
+                    raise RuntimeError(f"T3 could not register the project at {project}")
         deadline = time.monotonic() + 10
         while True:
             active = active_projects()

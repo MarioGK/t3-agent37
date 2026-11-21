@@ -98,6 +98,27 @@ RUN set -eu; \
     install -d "$MISE_DATA_DIR/installs/go"; \
     ln -s /usr/local/go "$MISE_DATA_DIR/installs/go/$version"
 
+
+# Cache public Git objects only. Each sandbox still checks GitHub for current refs.
+RUN set -eu; \
+    stage="$(mktemp -d)"; \
+    trap 'rm -rf "$stage"' EXIT; \
+    export HOME="$stage" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0; \
+    cache=/opt/terrascale/git-cache/terrascale; \
+    install -d -m 0755 "$cache"; \
+    for repo in branch-action homebrew-tap terraform-provider-terrascale terrascale \
+      test-skills ts-orchestrator ts-resources; do \
+      git -c credential.helper= clone --quiet --filter=blob:none \
+        "https://github.com/TerraScale/$repo.git" "$stage/$repo"; \
+      if [ "$repo" = ts-orchestrator ]; then \
+        (cd "$stage/$repo" && CGO_ENABLED=0 GOTOOLCHAIN=local \
+          go build -trimpath -buildvcs=true -ldflags="-s -w" \
+          -o /usr/local/bin/ts-orch ./cmd/terrascale-orchestrator); \
+      fi; \
+      mv "$stage/$repo/.git" "$cache/$repo.git"; \
+    done; \
+    chmod -R a+rX "$cache"
+
 USER node
 RUN set -eu; \
     export PATH=/usr/local/bin:/usr/bin:/bin; \

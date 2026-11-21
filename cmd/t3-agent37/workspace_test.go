@@ -142,13 +142,7 @@ func TestBatchWorkspaceFailureCanResumeByName(t *testing.T) {
 	t.Setenv("AGENT37_API_KEY", "fixture")
 	t.Setenv("T3_AGENT37_GITHUB_TOKEN", "fixture-workspace-token")
 	playbook := writeWorkspaceFixture(t)
-	cloneCommands := map[string]string{
-		strings.Join([]string{shellQuote(playbook.Path), shellQuote(playbook.RootRepo), "''", "''"}, " "): playbook.RootRepo,
-	}
-	for _, repo := range playbook.Repositories {
-		arguments := []string{shellQuote(playbook.Path), shellQuote(repo.Repo), shellQuote(repo.directory()), shellQuote(repo.Ref)}
-		cloneCommands[strings.Join(arguments, " ")] = repo.Repo
-	}
+	rootArgs := strings.Join([]string{shellQuote(playbook.Path), shellQuote(playbook.RootRepo), "''", "''"}, " ")
 	const firstID, secondID = "aaaaaaaaaa", "bbbbbbbbbb"
 	type fixtureSandbox struct {
 		instance       agent37.Instance
@@ -285,7 +279,7 @@ func TestBatchWorkspaceFailureCanResumeByName(t *testing.T) {
 			case strings.Contains(request.Command, " remote.py "):
 				execResult(nil)
 			case strings.Contains(request.Command, " register-projects "):
-				if !sandbox.t3Ready || len(sandbox.clones) != len(cloneCommands) ||
+				if !sandbox.t3Ready || len(sandbox.clones) != len(playbook.Repositories)+1 ||
 					!strings.Contains(request.Command, playbook.RootRepo) || !strings.Contains(request.Command, playbook.Path) {
 					t.Error("T3 registration did not include the workspace project after startup")
 				}
@@ -311,29 +305,41 @@ func TestBatchWorkspaceFailureCanResumeByName(t *testing.T) {
 				execResult(proof)
 			case strings.HasSuffix(request.Command, " list --json"):
 				execResult([]any{})
+			case strings.HasSuffix(request.Command, " "+rootArgs):
+				if !sandbox.githubReady {
+					t.Error("workspace cloning ran before GitHub access was configured")
+				}
+				sandbox.clones[playbook.RootRepo]++
+				if sandbox.clones[playbook.RootRepo] == 1 {
+					close(sandbox.rootCheckout)
+				}
+				execResult(map[string]string{"status": "cloned"})
 			default:
-				for arguments, repo := range cloneCommands {
-					if !strings.HasSuffix(request.Command, " "+arguments) {
-						continue
+				index := strings.LastIndex(request.Command, " --batch ")
+				if index >= 0 {
+					if !sandbox.githubReady || sandbox.clones[playbook.RootRepo] == 0 {
+						t.Error("a nested repository started before GitHub access and the workspace root")
 					}
-					if !sandbox.githubReady {
-						t.Error("workspace cloning ran before GitHub access was configured")
+					var repos []workspaceRepository
+					args := strings.Trim(request.Command[index+len(" --batch "):], "'")
+					if err := json.Unmarshal([]byte(args), &repos); err != nil || len(repos) != 2 {
+						t.Errorf("invalid guest repository group: %v", err)
+						w.WriteHeader(http.StatusBadRequest)
+						return
 					}
-					if repo != playbook.RootRepo && sandbox.clones[playbook.RootRepo] == 0 {
-						t.Error("a nested repository was cloned before the workspace root")
+					statuses := make([]string, 0, len(repos))
+					for _, repo := range repos {
+						sandbox.clones[repo.Repo]++
+						status := "cloned"
+						switch {
+						case id == firstID && repo.Repo == "example-org/example-tools" && sandbox.clones[repo.Repo] == 1:
+							status = "clone_failed"
+						case id == firstID && repo.Repo == "example-org/example-app" && sandbox.clones[repo.Repo] > 1:
+							status = "existing"
+						}
+						statuses = append(statuses, status)
 					}
-					sandbox.clones[repo]++
-					if repo == playbook.RootRepo && sandbox.clones[repo] == 1 {
-						close(sandbox.rootCheckout)
-					}
-					status := "cloned"
-					switch {
-					case id == firstID && repo == "example-org/example-tools" && sandbox.clones[repo] == 1:
-						status = "clone_failed"
-					case id == firstID && repo == "example-org/example-app" && sandbox.clones[repo] > 1:
-						status = "existing"
-					}
-					execResult(map[string]string{"status": status})
+					execResult(map[string][]string{"statuses": statuses})
 					return
 				}
 				t.Error("unexpected guest command")
