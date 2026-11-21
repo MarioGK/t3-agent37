@@ -672,6 +672,14 @@ func runCommand(ctx context.Context, opts options, output, diagnostic io.Writer)
 		defer progress.close()
 		diagnostic = progress
 	}
+	var enrollment *peers.Enrollment
+	if opts.action == "create" && opts.batchSize == 0 {
+		enrollment, err = verifyTailscaleEnrollment(ctx)
+		if err != nil {
+			return err
+		}
+		progress.setPhase("Preparing sandbox launch")
+	}
 	key, err := agent37APIKey()
 	if err != nil {
 		return err
@@ -679,14 +687,6 @@ func runCommand(ctx context.Context, opts options, output, diagnostic io.Writer)
 	client := agent37.New(key)
 	if opts.batchSize > 0 {
 		return runBatch(ctx, client, verifyTailscaleEnrollment, opts, state, output, progress)
-	}
-	var enrollment *peers.Enrollment
-	if opts.action == "create" {
-		enrollment, err = verifyTailscaleEnrollment(ctx)
-		if err != nil {
-			return err
-		}
-		progress.setPhase("Preparing sandbox launch")
 	}
 	if opts.action == "sync" {
 		return syncSandboxLinks(ctx, client, opts.dryRun, output, diagnostic)

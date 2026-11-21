@@ -70,12 +70,12 @@ func runBatch(ctx context.Context, client *agent37.Client, verifyEnrollment func
 			return err
 		}
 	}
-	if err := os.MkdirAll(state, 0o700); err != nil {
-		return err
-	}
 	progress.setPhase("Checking OAuth and sandbox inventory")
 	instances, enrollment, err := batchPreflight(ctx, client, verifyEnrollment)
 	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(state, 0o700); err != nil {
 		return err
 	}
 	reserved, err := reserveSandboxNames(ctx, state, opts.namePrefix, instances, opts.batchSize)

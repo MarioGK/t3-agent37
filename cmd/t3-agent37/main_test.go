@@ -176,6 +176,10 @@ func TestCreateWithoutName(t *testing.T) {
 }
 
 func TestProvisioningRequiresTailnetBeforeCreatingState(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv(agent37KeyName, "")
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", filepath.Join(t.TempDir(), "new-state"))
 	t.Setenv("T3_AGENT37_TAILSCALE_CLIENT_ID", "")
