@@ -108,7 +108,10 @@ def prepare(workspace_path):
         for tool in ("git", "gh", "dotnet", "go", "node", "npm", "python3", "rustc", "codex", "claude", "opencode", "ts"):
             if shutil.which(tool) is None:
                 return stage
-        run(["dotnet", "--version"], cwd=workspace / "terrascale")
+        product = workspace / "terrascale"
+        run(["dotnet", "--version"], cwd=product)
+        if (product / ".config/dotnet-tools.json").is_file():
+            run(["dotnet", "tool", "restore", "--disable-parallel"], cwd=product, timeout=45)
         stage = "mise"
         prepare_mise(home, orchestrator)
         stage = "orchestrator"

@@ -324,8 +324,10 @@ func VerifyTailnet(ctx context.Context, name, environmentID, address string) (st
 	client := newHTTPClient(5 * time.Second)
 	defer client.CloseIdleConnections()
 	target := newPeerAPI(client, name, origin, environmentID)
-	timeout := fmt.Errorf("%s joined Tailscale, but its private HTTPS endpoint did not become ready within one minute", name)
-	ready, cancel := context.WithTimeoutCause(ctx, time.Minute, timeout)
+	// Accept the endpoint as soon as it works, with enough time for a fresh
+	// node to finish certificate issuance after a slow first handshake.
+	timeout := fmt.Errorf("%s joined Tailscale, but its private HTTPS endpoint did not become ready within two minutes", name)
+	ready, cancel := context.WithTimeoutCause(ctx, 2*time.Minute, timeout)
 	defer cancel()
 	if err := target.verify(ready, 240, false); err != nil {
 		return "", cmp.Or(context.Cause(ready), err)
