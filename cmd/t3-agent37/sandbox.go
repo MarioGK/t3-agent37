@@ -252,17 +252,31 @@ func bootstrap(ctx context.Context, client *agent37.Client, enrollment *peers.En
 				}
 			}
 			if settings.playbook != nil {
-				workspaceErr = settings.playbook.clone(ctx, client, instance.ID, name, diagnostic)
+				playbook := *settings.playbook
+				workspaceErr = playbook.clone(ctx, client, instance.ID, name, diagnostic)
 				if workspaceErr != nil {
 					return
 				}
-				workspaceErr = settings.playbook.register(ctx, client, instance.ID, name, diagnostic)
+				var installTools func()
+				var toolErr error
+				if playbook.terraScale() {
+					installTools = func() {
+						toolErr = playbook.installTerraScaleTools(ctx, client, instance.ID, name, diagnostic)
+					}
+				}
+				projectErr := finishSandboxSetup(ctx, installTools, func() error {
+					return playbook.register(ctx, client, instance.ID, name, diagnostic)
+				})
+				workspaceErr = errors.Join(projectErr, toolErr)
 				if workspaceErr != nil {
 					return
 				}
 			}
 			if settings.playbook != nil || settings.skipWorkspace {
 				workspaceErr = requireWorkspaceReady(ctx, client, instance, name, true)
+				if workspaceErr == nil && settings.playbook != nil {
+					notice(diagnostic, success, "%s Workspace ready in T3 Code", name)
+				}
 			}
 		}
 	}

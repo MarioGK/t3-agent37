@@ -93,6 +93,11 @@ RUN HOME=/root PLAYWRIGHT_BROWSERS_PATH=/opt/terrascale/playwright playwright in
 ARG CLAUDE_VERSION=2.1.329
 RUN npm install --global --prefix /usr/local --no-audit --no-fund "@anthropic-ai/claude-code@${CLAUDE_VERSION}"
 
+RUN set -eu; \
+    version="$(go env GOVERSION | cut -c3-)"; \
+    install -d "$MISE_DATA_DIR/installs/go"; \
+    ln -s /usr/local/go "$MISE_DATA_DIR/installs/go/$version"
+
 USER node
 RUN set -eu; \
     export PATH=/usr/local/bin:/usr/bin:/bin; \

@@ -383,3 +383,23 @@ func TestBatchWorkspaceFailureCanResumeByName(t *testing.T) {
 		t.Fatal("both sandboxes must have verified workspace registrations after retry")
 	}
 }
+func TestTerraScaleManifestAddsMissingProjects(t *testing.T) {
+	original := workspacePlaybook{
+		Path:     "~/Projects/TerraScale",
+		RootRepo: "TerraScale/workspace",
+		Repositories: []workspaceRepository{
+			{Repo: "TerraScale/terrascale", Ref: "main"},
+		},
+	}
+	expanded := original
+	if err := expanded.applyTerraScaleManifest("terrascale\nts-orchestrator\n"); err != nil {
+		t.Fatal(err)
+	}
+	if len(original.Repositories) != 1 || len(expanded.Repositories) != 2 ||
+		expanded.Repositories[0].Ref != "main" || expanded.Repositories[1].Repo != "TerraScale/ts-orchestrator" {
+		t.Fatalf("unexpected requirements: %+v", expanded.Repositories)
+	}
+	if err := expanded.applyTerraScaleManifest("../outside"); err == nil {
+		t.Fatal("manifest traversal must fail")
+	}
+}

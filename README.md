@@ -102,6 +102,11 @@ Tailscale. It verifies their T3 projects before requesting desktop pairing.
 Use `up --workspace=false` to skip the playbook for a launch. Set
 `T3_AGENT37_TIMINGS=1` to print the duration of each stage.
 
+With `TerraScale/workspace` as `root_repository`, `up` also reads its
+committed `repos.txt`, installs the workspace's skills and helper links,
+checks the .NET and Mise Go toolchains, and builds `ts-orch` from the cloned
+revision. T3 pairing waits for the tools and projects to be ready.
+
 On another PC, join the same tailnet, run `t3-agent37 setup`, then run
 `t3-agent37 link`. It wakes existing sandboxes as needed and opens each
 pairing request in T3 Code. Use `link <name>` for one sandbox or

@@ -173,3 +173,10 @@ agent37 templates build templates/terrascale --name terrascale-agent37 --default
 
 The Agent37 gateway uses port 3737 and T3 uses protected port 3773.
 Give each sandbox access to its repositories at runtime. [Dockerfile](../templates/terrascale/Dockerfile)
+
+For a private template, you can include a Linux amd64 `ts-orch` built with
+Go's VCS metadata from a clean `ts-orchestrator` checkout. Place the
+executable beside the Dockerfile in a private build directory and add
+`COPY ts-orch /usr/local/bin/ts-orch` before `USER node`. The CLI reuses
+the binary when its build revision matches the cloned workspace. A newer
+checkout triggers a fresh build before pairing.
