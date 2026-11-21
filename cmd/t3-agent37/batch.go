@@ -50,7 +50,7 @@ type batchSandbox struct {
 	err      error
 }
 
-func runBatch(ctx context.Context, client *agent37.Client, enrollment *peers.Enrollment, opts options, state string, output, diagnostic io.Writer) error {
+func runBatch(ctx context.Context, client *agent37.Client, enrollment *peers.Enrollment, opts options, state string, output io.Writer, progress *launchProgress) error {
 	var launcher []string
 	if !opts.noDesktop {
 		var err error
@@ -70,6 +70,7 @@ func runBatch(ctx context.Context, client *agent37.Client, enrollment *peers.Enr
 	if err := os.MkdirAll(state, 0o700); err != nil {
 		return err
 	}
+	progress.setPhase("Reserving sandbox names")
 	instances, err := client.List(ctx)
 	if err != nil {
 		return err
@@ -79,16 +80,14 @@ func runBatch(ctx context.Context, client *agent37.Client, enrollment *peers.Enr
 		return err
 	}
 	parallel := min(batchParallelism, len(reserved))
-	notice(diagnostic, info, "Provisioning %d Agent37 sandboxes, up to %d at a time…", len(reserved), parallel)
-	progress := startLaunchProgress(diagnostic, len(reserved), "Creating and setting up sandboxes")
-	defer progress.close()
-	diagnostic = progress
+	progress.preflightDone("Creating and setting up sandboxes")
+	notice(progress, info, "Provisioning %d Agent37 sandboxes, up to %d at a time…", len(reserved), parallel)
 	var ready int
 	results := provisionAndPairBatch(len(reserved), parallel, func(i int) batchSandbox {
 		item := provisionBatchSandbox(ctx, client, enrollment, opts, state, reserved[i], progress)
 		progress.provisioned(item.err == nil)
 		if item.err == nil {
-			notice(diagnostic, success, "%s is ready on Tailscale.", item.name)
+			notice(progress, success, "%s is ready on Tailscale.", item.name)
 		}
 		return item
 	}, func(item *batchSandbox) {
@@ -97,7 +96,8 @@ func runBatch(ctx context.Context, client *agent37.Client, enrollment *peers.Enr
 			return
 		}
 		progress.setPhase("Waiting for T3 Code · " + item.name)
-		proof, err := pairSandbox(ctx, client, item.instance, item.proof, state, item.name, launcher, diagnostic, nil)
+		proof, err := pairSandbox(ctx, client, item.instance, item.proof, state, item.name, launcher, progress, nil)
+		progress.pairedDesktop(err == nil)
 		if err != nil {
 			item.err = fmt.Errorf("run t3-agent37 link %s to finish pairing: %w", item.name, err)
 		} else {
@@ -114,12 +114,13 @@ func runBatch(ctx context.Context, client *agent37.Client, enrollment *peers.Enr
 	meshPending := ready > 0
 	if ready > 0 && ctx.Err() == nil {
 		progress.setPhase("Syncing T3 environments")
-		notice(diagnostic, info, "Syncing T3 environments…")
-		if err := syncSandboxLinks(ctx, client, false, io.Discard, diagnostic); err != nil {
-			notice(diagnostic, warning, "T3 mesh has pending links. Run t3-agent37 sync. %v", err)
+		notice(progress, info, "Syncing T3 environments…")
+		if err := syncSandboxLinks(ctx, client, false, io.Discard, progress); err != nil {
+			notice(progress, warning, "T3 mesh has pending links. Run t3-agent37 sync. %v", err)
 		} else {
 			meshPending = false
 		}
+		progress.meshFinished(!meshPending)
 	}
 	progress.close()
 	return errors.Join(errors.Join(failures...), ctx.Err(), showBatchResult(output, results, opts.noDesktop, meshPending))

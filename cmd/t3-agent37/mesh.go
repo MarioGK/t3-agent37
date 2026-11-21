@@ -177,32 +177,33 @@ func discoverCloudNodes(ctx context.Context, client *agent37.Client, instances [
 	return ready, errors.Join(failures...)
 }
 
-func linkStartedSandbox(ctx context.Context, client *agent37.Client, instance agent37.Instance, name string, configured []peers.Peer, proof setupProof, diagnostic io.Writer) {
+func linkStartedSandbox(ctx context.Context, client *agent37.Client, instance agent37.Instance, name string, configured []peers.Peer, proof setupProof, diagnostic io.Writer) bool {
 	if requiresDesktopConfirmation(instance) && !proof.DesktopConfirmed {
 		notice(diagnostic, warning, "T3 linking awaits desktop confirmation. Run t3-agent37 link %s.", name)
-		return
+		return false
 	}
 	if !proof.PeerProxy || proof.EnvironmentID == "" {
 		notice(diagnostic, warning, "T3 mesh pending for %s. Sandbox needs a fresh boot for T3 peer routing.", name)
-		return
+		return false
 	}
 	node, err := meshNode(client, instance.ID, name, sandboxPeer{
 		EnvironmentID: proof.EnvironmentID, URL: proof.TailnetURL, PeerProxy: proof.PeerProxy,
 	})
 	if err != nil {
 		notice(diagnostic, warning, "T3 mesh pending for %s. %v", name, err)
-		return
+		return false
 	}
 	meshCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
 	instances, inventoryErr := client.List(meshCtx)
 	others, discoveryErr := cloudMeshNodes(meshCtx, client, instances, instance.ID, true)
 	count, linkErr := peers.ReconcileMesh(meshCtx, configured, append([]peers.MeshNode{node}, others...))
-	if err := errors.Join(inventoryErr, discoveryErr, linkErr); err != nil {
+	if err := errors.Join(inventoryErr, discoveryErr, linkErr, meshCtx.Err()); err != nil {
 		notice(diagnostic, warning, "T3 mesh incomplete (%d links verified). Run t3-agent37 sync. %v", count, err)
-		return
+		return false
 	}
 	reportMesh(count, diagnostic)
+	return true
 }
 
 func reportMesh(count int, diagnostic io.Writer) {

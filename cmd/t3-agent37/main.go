@@ -471,11 +471,10 @@ func getOrCreate(ctx context.Context, client *agent37.Client, opts options, stat
 	return instance, nil
 }
 
-func operate(ctx context.Context, client *agent37.Client, enrollment *peers.Enrollment, opts options, state string, output, diagnostic io.Writer) error {
+func operate(ctx context.Context, client *agent37.Client, enrollment *peers.Enrollment, opts options, state string, output, diagnostic io.Writer, progress *launchProgress) error {
 	var instance agent37.Instance
 	var configured []peers.Peer
 	var launcher []string
-	var progress *launchProgress
 	var err error
 	if opts.action == "create" {
 		if opts.generatedName && !opts.noDesktop {
@@ -490,9 +489,7 @@ func operate(ctx context.Context, client *agent37.Client, enrollment *peers.Enro
 				return err
 			}
 		}
-		progress = startLaunchProgress(diagnostic, 1, "Creating "+opts.name)
-		defer progress.close()
-		diagnostic = progress
+		progress.preflightDone("Creating " + opts.name)
 		instance, err = getOrCreate(ctx, client, opts, state, diagnostic)
 	} else if opts.targetID != "" {
 		instance, err = client.Get(ctx, opts.targetID)
@@ -521,13 +518,19 @@ func operate(ctx context.Context, client *agent37.Client, enrollment *peers.Enro
 		if err != nil {
 			return err
 		}
+		progress.preflightDone("Starting " + opts.name + " and restoring T3 Code")
 		instance, proof, err := startSandbox(ctx, client, instance, opts.name, true, opts.githubAccess, diagnostic)
 		if err != nil {
 			return err
 		}
+		progress.provisioned(true)
+		synced := false
 		if proof.TailnetURL != "" {
-			linkStartedSandbox(ctx, client, instance, opts.name, configured, proof, diagnostic)
+			progress.setPhase("Syncing T3 environments")
+			synced = linkStartedSandbox(ctx, client, instance, opts.name, configured, proof, diagnostic)
 		}
+		progress.meshFinished(synced)
+		progress.close()
 		return showLifecycleResult(output, "Sandbox started", instance, proof.TailnetURL)
 	case "stop":
 		instance, err = stopSandbox(ctx, client, instance, opts.name)
@@ -572,13 +575,15 @@ func operate(ctx context.Context, client *agent37.Client, enrollment *peers.Enro
 		progress.provisioned(true)
 		if launcher != nil {
 			progress.setPhase("Waiting for T3 Code confirmation")
-			if err := handOffPairing(ctx, client, instance, opts.name, proof, launcher, diagnostic); err != nil {
+			err := handOffPairing(ctx, client, instance, opts.name, proof, launcher, diagnostic)
+			progress.pairedDesktop(err == nil)
+			if err != nil {
 				return fmt.Errorf("%s is running. Run t3-agent37 link %s to finish pairing: %w", opts.name, opts.name, err)
 			}
 			proof.DesktopConfirmed = true
 		}
 		progress.setPhase("Syncing T3 environments")
-		linkStartedSandbox(ctx, client, instance, opts.name, configured, proof, diagnostic)
+		progress.meshFinished(linkStartedSandbox(ctx, client, instance, opts.name, configured, proof, diagnostic))
 		progress.close()
 		if !interactiveOutput {
 			fmt.Fprintf(output, "Cloud T3 ready (%s, %s).\n", instance.ID, proof.EnvironmentID)
@@ -677,12 +682,19 @@ func run(ctx context.Context, args []string, output, diagnostic io.Writer) error
 	if opts.pickDelete && !terminalAvailable(diagnostic) {
 		return errors.New("interactive deletion requires a terminal. Use down <name> to select a sandbox")
 	}
+	var progress *launchProgress
+	if opts.action == "create" || opts.action == "start" {
+		progress = startLaunchProgress(diagnostic, opts)
+		defer progress.close()
+		diagnostic = progress
+	}
 	var enrollment *peers.Enrollment
 	if opts.action == "create" {
 		enrollment, err = verifyTailscaleEnrollment(ctx)
 		if err != nil {
 			return err
 		}
+		progress.setPhase("Preparing sandbox launch")
 	}
 	key, err := agent37APIKey()
 	if err != nil {
@@ -690,7 +702,7 @@ func run(ctx context.Context, args []string, output, diagnostic io.Writer) error
 	}
 	client := agent37.New(key)
 	if opts.batchSize > 0 {
-		return runBatch(ctx, client, enrollment, opts, state, output, diagnostic)
+		return runBatch(ctx, client, enrollment, opts, state, output, progress)
 	}
 	if opts.action == "sync" {
 		return syncSandboxLinks(ctx, client, opts.dryRun, output, diagnostic)
@@ -752,11 +764,14 @@ func run(ctx context.Context, args []string, output, diagnostic io.Writer) error
 		return err
 	}
 	for {
+		if opts.generatedName {
+			progress.setPhase("Selecting a sandbox name")
+		}
 		lock, err := lockSandbox(ctx, client, state, &opts)
 		if err != nil {
 			return err
 		}
-		err = operate(ctx, client, enrollment, opts, state, output, diagnostic)
+		err = operate(ctx, client, enrollment, opts, state, output, diagnostic, progress)
 		unlockErr := lock.Unlock()
 		if opts.generatedName && errors.Is(err, errSandboxNameTaken) && unlockErr == nil {
 			continue

@@ -142,10 +142,14 @@ func TestBatchStartsTenCreatesInParallelAndReportsPartialResults(t *testing.T) {
 	defer cancel()
 	state := t.TempDir()
 	var output bytes.Buffer
-	opts := options{batchSize: 10, size: sandboxSize{4, 16}, generatedName: true, namePrefix: "terra", provider: "codex", template: "fixture@1", tailscale: true, noDesktop: true}
-	err := runBatch(ctx, agent37.New("fixture"), nil, opts, state, &output, io.Discard)
+	opts := options{action: "create", batchSize: 10, size: sandboxSize{4, 16}, generatedName: true, namePrefix: "terra", provider: "codex", template: "fixture@1", tailscale: true, noDesktop: true}
+	progress := startLaunchProgress(io.Discard, opts)
+	err := runBatch(ctx, agent37.New("fixture"), nil, opts, state, &output, progress)
 	if err == nil || creates.Load() != 10 || !strings.Contains(err.Error(), "160 GB") || ctx.Err() != nil {
 		t.Fatalf("batch status: %d create requests, command error %v, context error %v", creates.Load(), err, ctx.Err())
+	}
+	if !progress.preflight || progress.created != 9 || progress.failed != 10 || progress.synced {
+		t.Fatalf("unexpected progress totals: created=%d failed=%d synced=%t", progress.created, progress.failed, progress.synced)
 	}
 	var result struct {
 		Sandboxes []map[string]any
