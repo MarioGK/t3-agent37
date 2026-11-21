@@ -186,7 +186,7 @@ func finishBulkCleanup(ctx context.Context, client *agent37.Client, results []bu
 		progress.setPhase("Cleaning up T3 links")
 		if err := unlinkSandboxes(ctx, client, links, progress); err != nil {
 			linksPending = true
-			notice(progress, warning, "T3 cleanup pending. Retry delete --all or run t3-agent37 sync. %v", err)
+			notice(progress, warning, "T3 cleanup pending. Retry down --all or run t3-agent37 sync. %v", err)
 		}
 		if _, err := desktopLauncher(ctx); err == nil {
 			notice(progress, info, "Remove any saved entries for deleted sandboxes under T3 Code → Settings → Connections.")

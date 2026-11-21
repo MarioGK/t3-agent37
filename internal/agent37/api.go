@@ -259,7 +259,7 @@ func (c *Client) Lifecycle(ctx context.Context, id, action string) (Instance, er
 		return Instance{}, err
 	}
 	switch action {
-	case "start", "stop", "restart":
+	case "start", "stop", "restart", "sleep":
 	default:
 		return Instance{}, errors.New("unknown Agent37 lifecycle action")
 	}

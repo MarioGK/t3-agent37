@@ -28,7 +28,9 @@ func TestCompleteCommandsAndFlags(t *testing.T) {
 		{args: []string{"up", "ts-1", "--"}, present: "--github", absent: "--provider"},
 		{args: []string{"up", "--provider", ""}, present: "cliproxy"},
 		{args: []string{"connect", "ts-1", "--"}, present: "--pair"},
-		{args: []string{"del", "--"}, present: "--dry-run"},
+		{args: []string{"down", "--"}, present: "--all", absent: "--delete"},
+		{args: []string{"down", "--all", "--"}, present: "--dry-run", absent: "--pick"},
+		{args: []string{"sleep", "--"}, present: "--dry-run", absent: "--all"},
 		{args: []string{"sync", "--"}, present: "--dry-run", absent: "--no-desktop"},
 		{args: []string{"completion", ""}, present: "fish"},
 	} {
@@ -66,8 +68,8 @@ func TestCompleteSandboxNamesAndTemplateRevisions(t *testing.T) {
 		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body))}, nil
 	})
 	for _, tc := range []struct{ args, want []string }{
-		{args: []string{"delete", "agent-"}, want: []string{"agent-1", "agent-2"}},
-		{args: []string{"del", "agent-"}, want: []string{"agent-1", "agent-2"}},
+		{args: []string{"down", "agent-"}, want: []string{"agent-1", "agent-2"}},
+		{args: []string{"sleep", "agent-"}, want: []string{"agent-1", "agent-2"}},
 		{args: []string{"create", "agent-"}, want: []string{"agent-3"}},
 		{args: []string{"up", "--no-desktop", ""}, want: []string{"10", "2", "5", "agent-1", "agent-2"}},
 		{args: []string{"up", "1"}, want: []string{"10"}},
@@ -75,6 +77,8 @@ func TestCompleteSandboxNamesAndTemplateRevisions(t *testing.T) {
 		{args: []string{"up", "10", "--ram", ""}, want: []string{"4", "8", "16", "32"}},
 		{args: []string{"config", "--cpu", ""}, want: []string{"2", "4"}},
 		{args: []string{"down", "agent-1", ""}},
+		{args: []string{"down", "--all", "agent-"}},
+		{args: []string{"down", "--pick", "agent-"}},
 		{args: []string{"up", "--template", ""}, want: []string{"terra-agent", "terra-agent@4"}},
 		{args: []string{"up", "--template", "terra-agent@"}, want: []string{"terra-agent@2", "terra-agent@4"}},
 	} {

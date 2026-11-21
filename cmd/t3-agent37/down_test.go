@@ -73,14 +73,14 @@ func TestDeletionCommandsSelectManagedTargets(t *testing.T) {
 		t.Fatalf("wrong deletion: %v, %v, %v", row, calls, err)
 	}
 	output.Reset()
-	if err := run(ctx, []string{"delete", "z-older", "--dry-run"}, &output, &diagnostic); err != nil {
+	if err := run(ctx, []string{"down", "z-older", "--dry-run"}, &output, &diagnostic); err != nil {
 		t.Fatal(err)
 	}
 	if err := json.Unmarshal(output.Bytes(), &row); err != nil || row["id"] != "aaaaaaaaaa" || row["action"] != "delete" || len(calls) != 5 {
 		t.Fatalf("wrong named preview: %v, %v, %v", row, calls, err)
 	}
 	output.Reset()
-	if err := run(ctx, []string{"delete", "z-older"}, &output, &diagnostic); err != nil {
+	if err := run(ctx, []string{"down", "z-older"}, &output, &diagnostic); err != nil {
 		t.Fatal(err)
 	}
 	if err := json.Unmarshal(output.Bytes(), &row); err != nil || row["id"] != "aaaaaaaaaa" || row["status"] != "deleted" || len(calls) != 8 {
@@ -88,17 +88,78 @@ func TestDeletionCommandsSelectManagedTargets(t *testing.T) {
 	}
 }
 
-func TestBareDeleteUsesPickerInATerminal(t *testing.T) {
-	opts, err := parse([]string{"delete"}, io.Discard)
-	if err != nil || !opts.pickDelete || !opts.deleteSandbox {
-		t.Fatalf("bare delete = %+v, %v", opts, err)
+func TestDownPickerRequiresATerminal(t *testing.T) {
+	opts, err := parse([]string{"down", "--pick"}, io.Discard)
+	if err != nil || opts.action != "down" || !opts.pickDelete {
+		t.Fatalf("down --pick = %+v, %v", opts, err)
 	}
-	err = run(context.Background(), []string{"delete"}, io.Discard, io.Discard)
+	err = run(context.Background(), []string{"down", "--pick"}, io.Discard, io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "requires a terminal") {
-		t.Fatalf("bare delete with redirected input/output = %v", err)
+		t.Fatalf("down --pick with redirected input/output = %v", err)
 	}
-	if _, err := parse([]string{"delete", "two", "names"}, io.Discard); err == nil {
-		t.Fatal("delete accepted multiple names")
+	if _, err := parse([]string{"down", "two", "names"}, io.Discard); err == nil {
+		t.Fatal("down accepted multiple names")
+	}
+	for _, args := range [][]string{{"down", "ts-1", "--pick"}, {"down", "--all", "--pick"}} {
+		if _, err := parse(args, io.Discard); err == nil {
+			t.Errorf("accepted conflicting targets %v", args)
+		}
+	}
+}
+
+func TestSleepUsesProviderHibernateWithoutTouchingT3OrTailnet(t *testing.T) {
+	t.Setenv("AGENT37_API_KEY", "fixture-only")
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const old = `{"id":"aaaaaaaaaa","status":"running","created":100,"metadata":{"managed_by":"t3-agent37","environment":"ts-1"}}`
+	const newest = `{"id":"bbbbbbbbbb","status":%q,"created":200,"metadata":{"managed_by":"t3-agent37","environment":"ts-2","tailnet":"tailscale"}}`
+	const unmanaged = `{"id":"cccccccccc","status":"running","created":300}`
+	status := "running"
+	checkpointing := true
+	var calls []string
+	originalTransport := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = originalTransport })
+	http.DefaultTransport = downTestTransport(func(r *http.Request) (*http.Response, error) {
+		call := r.Method + " " + r.URL.Path
+		calls = append(calls, call)
+		switch call {
+		case "GET /v1/instances":
+			body := `{"data":[` + strings.Join([]string{old, unmanaged, fmt.Sprintf(newest, status)}, ",") + `]}`
+			return downResponse(http.StatusOK, body), nil
+		case "GET /v1/instances/bbbbbbbbbb":
+			return downResponse(http.StatusOK, fmt.Sprintf(newest, status)), nil
+		case "POST /v1/instances/bbbbbbbbbb/sleep":
+			if checkpointing {
+				checkpointing = false
+				return downResponse(http.StatusConflict, `{"error":"try_again"}`), nil
+			}
+			status = "sleeping"
+			return downResponse(http.StatusOK, `{"id":"bbbbbbbbbb","status":"sleeping"}`), nil
+		default:
+			return nil, fmt.Errorf("unexpected request %s", call)
+		}
+	})
+	preview := runDownTest(t, "sleep", "ts-2", "--dry-run")
+	if preview["action"] != "sleep" || preview["id"] != "bbbbbbbbbb" || len(calls) != 1 {
+		t.Fatalf("sleep preview = %v, requests = %v", preview, calls)
+	}
+	calls = nil
+	result := runDownTest(t, "sleep")
+	want := []string{
+		"GET /v1/instances", "GET /v1/instances/bbbbbbbbbb",
+		"POST /v1/instances/bbbbbbbbbb/sleep", "POST /v1/instances/bbbbbbbbbb/sleep",
+	}
+	if result["status"] != "sleeping" || result["name"] != "ts-2" || !slices.Equal(calls, want) {
+		t.Fatalf("sleep = %v, requests = %v", result, calls)
+	}
+	calls = nil
+	result = runDownTest(t, "sleep", "ts-2")
+	if result["status"] != "sleeping" || !slices.Equal(calls, want[:2]) {
+		t.Fatalf("sleeping sandbox = %v, requests = %v", result, calls)
+	}
+	status = "stopped"
+	calls = nil
+	if err := run(t.Context(), []string{"sleep", "ts-2"}, io.Discard, io.Discard); err == nil || !slices.Equal(calls, want[:2]) {
+		t.Fatalf("stopped sandbox = %v, requests = %v", err, calls)
 	}
 }
 
@@ -165,7 +226,7 @@ func TestDownRetriesExactTargetAfterLostDeleteResponse(t *testing.T) {
 		!slices.Equal(calls, []string{"GET /v1/instances"}) {
 		t.Fatalf("preview selected an older sandbox: %v, %v", row, calls)
 	}
-	if row := runDownTest(t, "delete", "ts-2"); row["name"] != "ts-2" || row["status"] != "absent" {
+	if row := runDownTest(t, "down", "ts-2"); row["name"] != "ts-2" || row["status"] != "absent" {
 		t.Fatalf("named deletion was not idempotent: %v", row)
 	}
 }
@@ -177,9 +238,9 @@ func TestDeleteRetriesAcrossEntrypoints(t *testing.T) {
 		retry     []string
 		loseReply bool
 	}{
-		{"same name after lost reply", []string{"delete", "con"}, []string{"del", "con"}, true},
+		{"same name after lost reply", []string{"down", "con"}, []string{"down", "con"}, true},
 		{"bare then named after lost reply", []string{"down"}, []string{"down", "--delete", "--yes", "con"}, true},
-		{"named then bare after lost result", []string{"del", "con"}, []string{"down"}, false},
+		{"named then bare after lost result", []string{"down", "con"}, []string{"down"}, false},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			t.Setenv("AGENT37_API_KEY", "fixture-only")
@@ -390,15 +451,12 @@ func runDownTest(t *testing.T, args ...string) map[string]any {
 	return row
 }
 
-func TestDelAlias(t *testing.T) {
-	for _, tail := range [][]string{nil, {"--dry-run"}, {"ts-1"}, {"ts-1", "--dry-run"}} {
-		want, err := parse(append([]string{"delete"}, tail...), io.Discard)
-		if err != nil {
-			t.Fatal(err)
-		}
-		got, err := parse(append([]string{"del"}, tail...), io.Discard)
-		if err != nil || got != want {
-			t.Fatalf("del %v = %+v, %v, want %+v", tail, got, err, want)
+func TestRetiredDeletionCommandsAreRejected(t *testing.T) {
+	for _, command := range []string{"delete", "del"} {
+		for _, args := range [][]string{{command}, {command, "ts-1"}, {command, "--all"}} {
+			if _, err := parse(args, io.Discard); err == nil {
+				t.Errorf("accepted retired command %v", args)
+			}
 		}
 	}
 }

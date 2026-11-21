@@ -21,7 +21,7 @@ func printMainHelp(output io.Writer, width int) {
 		title    string
 		commands []string
 	}{
-		{"Sandbox lifecycle", []string{"up", "ls", "create", "start", "down", "stop", "delete"}},
+		{"Sandbox lifecycle", []string{"up", "ls", "create", "start", "sleep", "stop", "down"}},
 		{"T3 Code and access", []string{"connect", "link", "sync", "terminal", "prepare"}},
 		{"Workstation", []string{"setup", "config", "completion"}},
 	}
@@ -35,8 +35,6 @@ func printMainHelp(output io.Writer, width int) {
 			switch name {
 			case "ls":
 				label = "ls, list"
-			case "delete":
-				label = "delete, del"
 			case "completion":
 				description = "Generate shell completions"
 			}
@@ -70,9 +68,9 @@ func printCommandHelpAtWidth(output io.Writer, command cliCommand, flags *flag.F
 	switch command.name {
 	case "up":
 		usage = "up [count|name]"
-	case "delete", "del":
-		usage = command.name + " [name|--all]"
-	case "create", "down", "link":
+	case "down":
+		usage = "down [name|--all|--pick]"
+	case "create", "sleep", "link":
 		usage = command.name + " [name]"
 	}
 	switch command.name {
@@ -83,9 +81,9 @@ func printCommandHelpAtWidth(output io.Writer, command cliCommand, flags *flag.F
 	case "create":
 		description += ". Omit the name to use the lowest available number."
 	case "down":
-		description = "Delete the newest managed sandbox and its disk. Retries keep the saved target while cleanup is pending. Pass a name to stop that sandbox and keep its disk."
-	case "delete", "del":
-		description = "Permanently delete a sandbox and its disk. Use --all for every managed sandbox, or omit the name to open the picker."
+		description = "Permanently delete a sandbox and its disk. Omit the name for the newest sandbox, use --all for every managed sandbox, or use --pick to choose in a menu. Retries keep the saved target while cleanup is pending."
+	case "sleep":
+		description = "Suspend a sandbox and keep its disk and T3 links. Omit the name for the newest sandbox. Run up <name> to wake it."
 	}
 	flagHelp := strings.TrimRight(flags.FlagUsagesWrapped(max(0, width)), "\n")
 	if flagHelp != "" {

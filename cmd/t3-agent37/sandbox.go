@@ -250,7 +250,7 @@ func stopSandbox(ctx context.Context, client *agent37.Client, instance agent37.I
 			if !loggedOut {
 				err := leaveSandboxTailnet(stopCtx, client, instance.ID)
 				if err != nil && !agent37RetryAfterCheckpoint(err) {
-					return instance, fmt.Errorf("Tailscale logout failed for %s. Retry down: %w", name, err)
+					return instance, fmt.Errorf("Tailscale logout failed for %s. Retry stop: %w", name, err)
 				}
 				loggedOut = err == nil
 			}
@@ -279,6 +279,36 @@ func stopSandbox(ctx context.Context, client *agent37.Client, instance agent37.I
 			return instance, err
 		}
 		instance = current
+	}
+}
+
+func sleepSandbox(ctx context.Context, client *agent37.Client, instance agent37.Instance, name string) (agent37.Instance, error) {
+	switch instance.Status {
+	case "sleeping":
+		return instance, nil
+	case "running":
+	default:
+		return instance, fmt.Errorf("%s is %s. Start the sandbox before putting it to sleep", name, instance.Status)
+	}
+	ctx, cancel := context.WithTimeout(ctx, 4*time.Minute)
+	defer cancel()
+	for {
+		update, err := client.Lifecycle(ctx, instance.ID, "sleep")
+		if err == nil {
+			if update.ID != instance.ID || update.Status != "sleeping" {
+				return instance, fmt.Errorf("Agent37 did not confirm that %s is sleeping", name)
+			}
+			instance.Status = update.Status
+			return instance, nil
+		}
+		if !agent37RetryAfterCheckpoint(err) {
+			return instance, err
+		}
+		select {
+		case <-ctx.Done():
+			return instance, ctx.Err()
+		case <-time.After(time.Second):
+		}
 	}
 }
 

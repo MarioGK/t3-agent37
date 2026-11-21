@@ -72,17 +72,22 @@ At 8 GB per sandbox, ten new sandboxes require 80 GB of running memory in
 addition to the memory in use by existing sandboxes. Agent37 enforces the
 [workspace memory limit](https://www.agent37.com/docs/agents-api/errors#sandbox-api-codes).
 
-`down` deletes the newest managed sandbox. It tries to log out its Tailscale
+`sleep [name]` suspends the sandbox and keeps its disk, Tailscale enrollment,
+and T3 links. Omit the name to suspend the newest managed sandbox. Run
+`up <name>` to wake it. `stop <name>` logs out the device and stops the sandbox
+while keeping its disk. Use `up <name>` to restore peer links after a stop.
+
+`down <name>` permanently deletes the named sandbox and its disk. Bare `down`
+targets the newest managed sandbox. It tries to log out the sandbox's Tailscale
 device first. If the guest is unavailable, the CLI can remove its exact tagged
 device with Tailscale Devices Core Write. Without that grant, the ephemeral
 device expires and the CLI reports pending cleanup.
-`down` and `delete <name>` save the target ID on the workstation, so a retry
-can finish the same operation if its result is lost. Bare `down` retries
-pending cleanup before selecting a newer sandbox. Use `delete <name>` to
-choose another sandbox. After rotating an API key, use the `delete` picker
-if the CLI needs you to confirm a sandbox under the new key.
-`down <name>` logs out the device and stops that sandbox. Both unlink it from
-available T3 environments. Use `up <name>` to restore peer links after a stop.
+`down` saves the target ID on the workstation before deleting it. Bare `down`
+retries pending cleanup before selecting a newer sandbox. Use `down <name>` to
+choose another sandbox or `down --pick` to confirm one in a menu, including after
+an API key rotation. `down --all` shows progress for bulk deletion. Add
+`--dry-run` to preview any form of `down`.
+`down` unlinks deleted sandboxes from available T3 environments.
 Cleanup warnings leave a successful sandbox deletion intact. JSON output
 includes `"cleanup_pending": true` when links still need attention. Run `sync`
 when an unavailable peer comes back online.
@@ -96,7 +101,7 @@ To include fixed T3 servers in the mesh, save the peers in
 
 `create`, `up`, and `sync` establish links in both directions between
 configured T3 servers and managed sandboxes in the workspace. They can wake
-auto-sleeping sandboxes to link them. A sandbox stopped with `down <name>`
+auto-sleeping sandboxes to link them. A sandbox stopped with `stop <name>`
 returns to the mesh after `up <name>`. `sync` also removes links from available
 peers to stopped or deleted sandboxes. For an ID Agent37 cannot find, `sync`
 requires a local deletion record before removing the link. An ID from another

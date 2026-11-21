@@ -24,7 +24,7 @@ import (
 var (
 	legacyReceiptName = regexp.MustCompile(`^last-down-[a-f0-9]{32}\.json$`)
 	keyScopePattern   = regexp.MustCompile(`^[a-f0-9]{32}$`)
-	errDownKeyChanged = errors.New("the Agent37 key changed since this target was saved. Use the delete picker to confirm a target")
+	errDownKeyChanged = errors.New("the Agent37 key changed since this target was saved. Use down --pick to confirm a target")
 )
 
 // A receipt binds a retry to an instance ID, even after its name is reused.
@@ -192,7 +192,7 @@ func runRecordedDown(ctx context.Context, client *agent37.Client, opts options, 
 			}
 			receipt.Status = target.Status
 		}
-		return previewSandboxDown(output, receipt.instance(), true)
+		return previewSandboxLifecycle(output, receipt.instance(), "down")
 	}
 
 	opts.name, opts.targetID = receipt.Name, receipt.ID
@@ -263,7 +263,7 @@ func interruptedDeletion(state, currentPath, scope string, opts options, knownSc
 			continue
 		}
 		if match != "" {
-			return "", errors.New("more than one deletion needs a retry. Use delete <name> to choose one")
+			return "", errors.New("more than one deletion needs a retry. Use down <name> to choose one")
 		}
 		match = path
 	}
@@ -321,7 +321,7 @@ func selectDownTarget(ctx context.Context, client *agent37.Client, opts options,
 	}
 	latest, err := latestManaged(instances)
 	if err == nil && latest.ID != "" && receipt.ID != "" && latest.Created == receipt.Created {
-		return agent37.Instance{}, errors.New("another sandbox has the same Agent37 creation time as the previous down target. Use delete <name> to select it")
+		return agent37.Instance{}, errors.New("another sandbox has the same Agent37 creation time as the previous down target. Use down <name> to select it")
 	}
 	return latest, err
 }
@@ -499,7 +499,7 @@ func cleanupSandboxLinks(ctx context.Context, client *agent37.Client, name, id s
 	return true
 }
 
-func previewSandboxDown(output io.Writer, instance agent37.Instance, deleteSandbox bool) error {
+func previewSandboxLifecycle(output io.Writer, instance agent37.Instance, action string) error {
 	if instance.Status == "deleted" {
 		if _, terminal := ttyOutput(output); terminal {
 			return printSandboxResult(output, "Preview · sandbox already deleted", instance, "")
@@ -508,9 +508,12 @@ func previewSandboxDown(output io.Writer, instance agent37.Instance, deleteSandb
 		target["action"] = "none"
 		return jsonOutput(output, target, true)
 	}
-	title, action := "Preview · stop sandbox", "stop"
-	if deleteSandbox {
+	title := "Preview · stop sandbox"
+	switch action {
+	case "down":
 		title, action = "Preview · delete sandbox and disk", "delete"
+	case "sleep":
+		title = "Preview · put sandbox to sleep"
 	}
 	if _, terminal := ttyOutput(output); terminal {
 		return printSandboxResult(output, title, instance, "")

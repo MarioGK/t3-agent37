@@ -42,7 +42,7 @@ type options struct {
 	cpu, ram                         *int
 	showSize                         bool
 	yes, dryRun, pair, tailscale     bool
-	deleteSandbox                    bool
+	legacyDelete                     bool
 	deleteAll                        bool
 	checkSetup                       bool
 	verifySetup                      bool
@@ -136,34 +136,26 @@ func parse(args []string, output io.Writer) (options, error) {
 	if opts.action == "link" && flags.NArg() == 0 {
 		return opts, nil
 	}
-	if opts.deleteAll {
-		if flags.NArg() != 0 {
-			return opts, errors.New("delete --all does not take a sandbox name")
+	if opts.action == "down" {
+		if (flags.Changed("delete") || flags.Changed("yes")) && (!opts.legacyDelete || !opts.yes) {
+			return opts, errors.New("the legacy --delete and --yes flags must be used together. Use stop or sleep to keep the disk")
 		}
-		return opts, nil
-	}
-	if opts.action == "stop" && opts.yes != opts.deleteSandbox {
-		return opts, errors.New("use --delete and --yes together to permanently delete the sandbox")
+		if opts.deleteAll || opts.pickDelete {
+			if flags.NArg() != 0 || opts.deleteAll && opts.pickDelete {
+				return opts, errors.New("choose one of a sandbox name, --all, or --pick")
+			}
+			return opts, nil
+		}
 	}
 	switch {
-	case opts.action == "delete" && flags.NArg() == 0:
-		opts.pickDelete = true
-	case args[0] == "down" && flags.NArg() == 0:
-		if flags.Changed("delete") && !opts.deleteSandbox {
-			return opts, errors.New("specify a sandbox name to stop it and keep its disk")
-		}
+	case (opts.action == "down" || opts.action == "sleep") && flags.NArg() == 0:
 		opts.latest = true
-		opts.deleteSandbox = true
 	case opts.action == "create" && (flags.NArg() == 0 || opts.batchSize > 0):
 		opts.generatedName = true
 	case flags.NArg() == 1 && namePattern.MatchString(flags.Arg(0)):
 		opts.name = flags.Arg(0)
 	default:
 		return opts, errors.New("expected a name with 1 to 43 lowercase letters, digits, or hyphens")
-	}
-	if opts.action == "delete" {
-		opts.action = "stop"
-		opts.deleteSandbox = true
 	}
 	if opts.action == "create" {
 		if opts.yes == opts.dryRun {
@@ -255,18 +247,23 @@ func addCommandFlags(flags *flag.FlagSet, opts *options) {
 	if opts.action == "link" {
 		flags.BoolVar(&opts.dryRun, "dry-run", false, "List the sandboxes without waking or pairing them")
 	}
-	if opts.action == "stop" {
-		flags.BoolVar(&opts.deleteSandbox, "delete", false, "Permanently delete the managed sandbox and its disk")
+	if opts.action == "down" {
+		flags.BoolVar(&opts.legacyDelete, "delete", false, "Permanently delete the managed sandbox and its disk")
 		flags.BoolVar(&opts.yes, "yes", false, "Confirm permanent deletion")
+		_ = flags.MarkHidden("delete")
+		_ = flags.MarkHidden("yes")
+		flags.BoolVar(&opts.deleteAll, "all", false, "Permanently delete all managed sandboxes and their disks")
+		flags.BoolVar(&opts.pickDelete, "pick", false, "Select a sandbox and confirm deletion in a menu")
+		flags.BoolVar(&opts.dryRun, "dry-run", false, "Show which sandboxes and disks would be deleted")
 	}
 	if opts.action == "sync" {
 		flags.BoolVar(&opts.dryRun, "dry-run", false, "Show stale T3 links without removing them")
 	}
-	if opts.action == "stop" || opts.action == "delete" {
-		flags.BoolVar(&opts.dryRun, "dry-run", false, "Show which sandbox would be stopped or deleted")
+	if opts.action == "stop" {
+		flags.BoolVar(&opts.dryRun, "dry-run", false, "Show which sandbox would be stopped")
 	}
-	if opts.action == "delete" {
-		flags.BoolVar(&opts.deleteAll, "all", false, "Permanently delete all managed sandboxes and their disks")
+	if opts.action == "sleep" {
+		flags.BoolVar(&opts.dryRun, "dry-run", false, "Show which sandbox would go to sleep")
 	}
 }
 
@@ -385,7 +382,7 @@ func latestManaged(instances []agent37.Instance) (agent37.Instance, error) {
 			continue
 		}
 		if instance.Created <= 0 {
-			return agent37.Instance{}, errors.New("Agent37 omitted a creation time. Use down <name> --delete --yes to select the sandbox")
+			return agent37.Instance{}, errors.New("Agent37 omitted a creation time. Pass a sandbox name explicitly")
 		}
 		if instance.Created > latest.Created {
 			latest, tied = instance, false
@@ -394,7 +391,7 @@ func latestManaged(instances []agent37.Instance) (agent37.Instance, error) {
 		}
 	}
 	if tied {
-		return agent37.Instance{}, errors.New("the newest managed sandboxes share a creation time. Use down <name> --delete --yes to select the sandbox")
+		return agent37.Instance{}, errors.New("the newest managed sandboxes share a creation time. Pass a sandbox name explicitly")
 	}
 	if latest.Created != 0 &&
 		(agent37.ValidateID(latest.ID) != nil || !namePattern.MatchString(latest.Metadata["environment"])) {
@@ -544,6 +541,12 @@ func operate(ctx context.Context, client *agent37.Client, enrollment *peers.Enro
 			return err
 		}
 		return showLifecycleResult(output, "Sandbox stopped", instance, "")
+	case "sleep":
+		instance, err = sleepSandbox(ctx, client, instance, opts.name)
+		if err != nil {
+			return err
+		}
+		return showLifecycleResult(output, "Sandbox sleeping", instance, "")
 	case "terminal":
 		link, err := client.Terminal(ctx, instance.ID)
 		if err != nil {
@@ -672,7 +675,7 @@ func run(ctx context.Context, args []string, output, diagnostic io.Writer) error
 		return jsonOutput(output, createPayload(opts, nil), true)
 	}
 	if opts.pickDelete && !terminalAvailable(diagnostic) {
-		return errors.New("interactive deletion requires a terminal. Use delete <name> to select a sandbox")
+		return errors.New("interactive deletion requires a terminal. Use down <name> to select a sandbox")
 	}
 	var enrollment *peers.Enrollment
 	if opts.action == "create" {
@@ -698,10 +701,10 @@ func run(ctx context.Context, args []string, output, diagnostic io.Writer) error
 	if opts.deleteAll {
 		return runDeleteAll(ctx, client, opts.dryRun, output, diagnostic)
 	}
-	if opts.deleteSandbox && !opts.pickDelete {
+	if opts.action == "down" && !opts.pickDelete {
 		return runRecordedDown(ctx, client, opts, output, diagnostic)
 	}
-	if opts.action == "list" || opts.dryRun || opts.pickDelete {
+	if opts.action == "list" || opts.action == "sleep" || opts.dryRun || opts.pickDelete {
 		instances, err := client.List(ctx)
 		if err != nil {
 			return err
@@ -716,6 +719,8 @@ func run(ctx context.Context, args []string, output, diagnostic io.Writer) error
 			if err == nil && instance.ID == "" {
 				return nil
 			}
+		case opts.latest:
+			instance, err = latestManaged(instances)
 		default:
 			instance, err = namedManaged(instances, opts.name)
 		}
@@ -723,10 +728,13 @@ func run(ctx context.Context, args []string, output, diagnostic io.Writer) error
 			return err
 		}
 		if instance.ID == "" {
+			if opts.latest {
+				return showAbsentSandbox(output, "", opts.dryRun)
+			}
 			return fmt.Errorf("no managed Agent37 environment named %s", opts.name)
 		}
 		if opts.dryRun {
-			return previewSandboxDown(output, instance, opts.deleteSandbox)
+			return previewSandboxLifecycle(output, instance, opts.action)
 		}
 		opts.name = instance.Metadata["environment"]
 		opts.targetID = instance.ID

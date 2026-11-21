@@ -224,14 +224,14 @@ func TestUpWithoutNameCreatesAndNamedUpStarts(t *testing.T) {
 	}
 }
 
-func TestDeleteRequiresExplicitConfirmation(t *testing.T) {
-	for _, incomplete := range []string{"--yes", "--delete"} {
+func TestDownLegacyFlagsRequireAnExplicitPair(t *testing.T) {
+	for _, incomplete := range []string{"--yes", "--delete", "--delete=false", "--yes=false"} {
 		if _, err := parse([]string{"down", "dev", incomplete}, &bytes.Buffer{}); err == nil {
 			t.Fatalf("down accepted %s without its companion flag", incomplete)
 		}
 	}
 	opts, err := parse([]string{"down", "dev", "--delete", "--yes"}, &bytes.Buffer{})
-	if err != nil || opts.action != "stop" || !opts.deleteSandbox {
+	if err != nil || opts.action != "down" || !opts.legacyDelete {
 		t.Fatalf("unexpected delete options: %+v, %v", opts, err)
 	}
 }

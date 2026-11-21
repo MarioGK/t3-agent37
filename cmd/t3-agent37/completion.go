@@ -27,10 +27,9 @@ var commands = []cliCommand{
 	{name: "create", summary: "Create a sandbox", sandbox: true},
 	{name: "up", summary: "Create sandboxes or start one by name", sandbox: true},
 	{name: "start", summary: "Start an existing sandbox", sandbox: true},
-	{name: "down", action: "stop", summary: "Delete the newest sandbox or stop one by name", sandbox: true},
+	{name: "down", summary: "Permanently delete sandboxes and their disks", sandbox: true},
+	{name: "sleep", summary: "Suspend a sandbox and keep its disk and T3 links", sandbox: true},
 	{name: "stop", summary: "Stop a sandbox and keep its disk", sandbox: true},
-	{name: "delete", summary: "Permanently delete a sandbox", sandbox: true},
-	{name: "del", action: "delete", summary: "Permanently delete a sandbox", sandbox: true},
 	{name: "list", summary: "List managed sandboxes"},
 	{name: "ls", action: "list", summary: "List managed sandboxes"},
 	{name: "sync", summary: "Link T3 environments and remove stale links"},
@@ -96,6 +95,8 @@ func runCompletion(ctx context.Context, args []string, output, diagnostic io.Wri
 			command.MarkFlagsMutuallyExclusive("dry-run", "verify")
 		case "create":
 			command.MarkFlagsMutuallyExclusive("yes", "dry-run")
+		case "down":
+			command.MarkFlagsMutuallyExclusive("all", "pick")
 		case "config":
 			command.MarkFlagsMutuallyExclusive("show-size", "cpu")
 			command.MarkFlagsMutuallyExclusive("show-size", "ram")
@@ -158,8 +159,12 @@ func completeSandboxNames(command *cobra.Command, args []string, prefix string) 
 	if len(args) > 0 {
 		return nil, directive
 	}
-	if flag := command.Flags().Lookup("all"); flag != nil && flag.Value.String() == "true" {
-		return nil, directive
+	if command.Name() == "down" {
+		all, _ := command.Flags().GetBool("all")
+		pick, _ := command.Flags().GetBool("pick")
+		if all || pick {
+			return nil, directive
+		}
 	}
 	var names []string
 	if command.Name() == "up" {

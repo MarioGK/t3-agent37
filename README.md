@@ -24,7 +24,8 @@ t3-agent37 setup --verify
 t3-agent37 up
 t3-agent37 up 10 --dry-run
 t3-agent37 ls
-t3-agent37 down
+t3-agent37 sleep
+t3-agent37 down --dry-run
 ```
 
 `setup` opens Tailscale Trust credentials and walks through the Agent37 API key,
@@ -60,7 +61,7 @@ selects the matching CPU count. Use `config --ram 16` to save a default or
 Agent37 Default supports 2 vCPU with 4 GB, or 4 vCPU with 8, 16, or 32 GB.
 [Agent37 sizing](https://www.agent37.com/docs/agents-api/instance-sizing)
 
-Use `ls --json` for scripts. Sandbox previews and `start`, `stop`, and `delete`
+Use `ls --json` for scripts. Sandbox previews and `start`, `stop`, `sleep`, and `down`
 results keep their JSON output when piped.
 
 With the TerraScale template and CLIProxy selected, `up` configures Codex,
@@ -78,19 +79,16 @@ pairing request in T3 Code. Use `link <name>` for one sandbox or
 `link --dry-run` to preview. `connect <name> --pair` prints a fresh link.
 
 `create dev --yes` creates a sandbox with an explicit name.
-`down` permanently deletes the newest managed sandbox and its disk.
-Retries keep the same sandbox while its deletion or T3 cleanup is pending.
-Use `down --dry-run` to preview the target.
-`down <name>` stops a specific sandbox and keeps its disk.
-`delete` (or `del`) opens a terminal picker. Press `/` to filter the list, then
-select a sandbox and confirm deletion. For scripts, use `delete <name>`. Add
-`--dry-run` to preview.
-Use `delete --all --dry-run` to preview every managed sandbox, then
-`delete --all` to permanently delete them with a progress bar. The command
-reports each result and retries pending cleanup by sandbox ID.
-`down` and `delete` unlink the sandbox from reachable environments. If a
-peer is offline, deletion succeeds and reports pending cleanup. Use
-`delete <name>` to select a different sandbox while bare `down` is retrying.
+`sleep [name]` suspends the sandbox and keeps its disk and T3 links. Omit the
+name for the newest managed sandbox. Run `up <name>` to wake it.
+`stop <name>` shuts it down and keeps its disk.
+
+**`down <name>` permanently deletes the named sandbox and its disk.** Bare
+`down` deletes the newest managed sandbox. `down --pick` opens a picker with
+confirmation, and `down --all` deletes all managed sandboxes with a progress
+bar. Add `--dry-run` to any form to preview the targets.
+`down` removes T3 links on reachable peers and reports pending cleanup for
+offline peers. Retries keep the saved sandbox ID while cleanup is pending.
 `sync` repairs the mesh and clears confirmed stale links. It wakes auto-sleeping
 sandboxes as needed. `sync --dry-run` previews configured servers without
 waking sandboxes. Remove saved desktop entries under

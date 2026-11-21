@@ -66,7 +66,7 @@ func TestDeleteAllPreviewAndRetryOnlyManagedIDs(t *testing.T) {
 		}
 		return result, err
 	}
-	plan, err := call("delete", "--all", "--dry-run")
+	plan, err := call("down", "--all", "--dry-run")
 	if err != nil || len(plan) != 3 || len(attempts) != 0 || plan[0]["action"] != "delete" {
 		t.Fatalf("preview = %v, %v, attempts %v", plan, err, attempts)
 	}
@@ -74,23 +74,23 @@ func TestDeleteAllPreviewAndRetryOnlyManagedIDs(t *testing.T) {
 	if _, err := os.Stat(state); !os.IsNotExist(err) {
 		t.Fatalf("preview created state: %v", err)
 	}
-	result, err := call("del", "--all")
+	result, err := call("down", "--all")
 	if err == nil || len(result) != 3 || result[2]["error"] == nil || len(attempts) != 3 || lists != 3 {
 		t.Fatalf("initial deletion = %v, %v, attempts %v, list count %d", result, err, attempts, lists)
 	}
-	plan, err = call("delete", "--all", "--dry-run")
+	plan, err = call("down", "--all", "--dry-run")
 	if err != nil || len(plan) != 1 || plan[0]["action"] != "cleanup" || attempts["cccccccccc"] != 1 {
 		t.Fatalf("retry preview = %v, %v, attempts %v", plan, err, attempts)
 	}
-	result, err = call("delete", "--all")
+	result, err = call("down", "--all")
 	if err != nil || len(result) != 1 || result[0]["id"] != "cccccccccc" || result[0]["status"] != "deleted" || attempts["cccccccccc"] != 1 {
 		t.Fatalf("retry = %v, %v, attempts %v", result, err, attempts)
 	}
-	result, err = call("delete", "--all")
+	result, err = call("down", "--all")
 	if err != nil || len(result) != 0 || strings.Contains(diagnostic.String(), "\x1b") {
 		t.Fatalf("empty retry or diagnostics = %v, %v, %q", result, err, &diagnostic)
 	}
-	if _, err := parse([]string{"delete", "--all", "alpha"}, io.Discard); err == nil {
+	if _, err := parse([]string{"down", "--all", "alpha"}, io.Discard); err == nil {
 		t.Fatal("accepted a named bulk deletion")
 	}
 }
