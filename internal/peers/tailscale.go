@@ -2,13 +2,17 @@ package peers
 
 import (
 	"context"
+	"crypto/tls"
 	json "encoding/json/v2"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -66,6 +70,9 @@ func tailscaleHTTPClient() *http.Client {
 func verifyEnrollment(ctx context.Context, client *http.Client, base *url.URL, clientID, clientSecret string, tags []string) (*Enrollment, error) {
 	api, err := tailscaleOAuthClient(ctx, client, base, clientID, clientSecret, "auth_keys", tags)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		if reply, ok := errors.AsType[*oauth2.RetrieveError](err); ok {
 			var status int
 			if reply.Response != nil {
@@ -83,7 +90,7 @@ func verifyEnrollment(ctx context.Context, client *http.Client, base *url.URL, c
 				return nil, fmt.Errorf("Tailscale OAuth returned HTTP %d. Retry setup --verify", status)
 			}
 		}
-		return nil, errors.New("could not verify the Tailscale OAuth client. Check network access to api.tailscale.com and retry")
+		return nil, oauthConnectionError(err)
 	}
 	return &Enrollment{keys: api.Keys(), tags: slices.Clone(tags)}, nil
 }
@@ -99,7 +106,7 @@ func tailscaleOAuthClient(ctx context.Context, client *http.Client, base *url.UR
 	if len(tags) != 0 {
 		config.EndpointParams = url.Values{"tags": {strings.Join(tags, " ")}}
 	}
-	token, err := config.Token(context.WithValue(ctx, oauth2.HTTPClient, client))
+	token, err := exchangeTailscaleToken(context.WithValue(ctx, oauth2.HTTPClient, client), config)
 	if err != nil {
 		return nil, err
 	}
@@ -107,6 +114,77 @@ func tailscaleOAuthClient(ctx context.Context, client *http.Client, base *url.UR
 	apiHTTP := *client
 	apiHTTP.Transport = &oauth2.Transport{Source: oauth2.StaticTokenSource(token), Base: client.Transport}
 	return &tailscale.Client{BaseURL: base, HTTP: &apiHTTP, UserAgent: "t3-agent37"}, nil
+}
+
+func exchangeTailscaleToken(ctx context.Context, config clientcredentials.Config) (*oauth2.Token, error) {
+	for attempt := 0; ; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		token, err := config.Token(ctx)
+		if err == nil || attempt == 2 {
+			return token, err
+		}
+		delay, retry := oauthRetryDelay(err, 500*time.Millisecond<<attempt)
+		if !retry {
+			return nil, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(delay):
+		}
+	}
+}
+
+func oauthRetryDelay(err error, delay time.Duration) (time.Duration, bool) {
+	reply, ok := errors.AsType[*oauth2.RetrieveError](err)
+	if !ok || reply.Response == nil {
+		if dns, ok := errors.AsType[*net.DNSError](err); ok && dns.IsNotFound {
+			return 0, false
+		}
+		_, connectionFailed := errors.AsType[*net.OpError](err)
+		return delay, connectionFailed || oauthTimedOut(err) ||
+			errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
+	}
+	switch reply.Response.StatusCode {
+	case http.StatusRequestTimeout, http.StatusTooManyRequests, http.StatusInternalServerError,
+		http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+	default:
+		return 0, false
+	}
+	// Bound automatic waits and leave a longer server-requested pause to the caller.
+	const maxDelay = 5 * time.Second
+	retryAfter := reply.Response.Header.Get("Retry-After")
+	if seconds, err := strconv.ParseInt(retryAfter, 10, 64); err == nil {
+		if seconds > int64(maxDelay/time.Second) {
+			return 0, false
+		}
+		if seconds >= 0 {
+			delay = max(delay, time.Duration(seconds)*time.Second)
+		}
+	} else if until, err := http.ParseTime(retryAfter); err == nil {
+		delay = max(delay, time.Until(until))
+	}
+	return delay, delay <= maxDelay
+}
+
+func oauthTimedOut(err error) bool {
+	networkError, ok := errors.AsType[net.Error](err)
+	return errors.Is(err, context.DeadlineExceeded) || ok && networkError.Timeout()
+}
+
+func oauthConnectionError(err error) error {
+	if _, ok := errors.AsType[*net.DNSError](err); ok {
+		return errors.New("Tailscale OAuth could not resolve api.tailscale.com. Check this PC's DNS and retry")
+	}
+	if oauthTimedOut(err) {
+		return errors.New("Tailscale OAuth timed out. Check access to api.tailscale.com and retry")
+	}
+	if _, ok := errors.AsType[*tls.CertificateVerificationError](err); ok {
+		return errors.New("Tailscale OAuth could not verify the TLS certificate for api.tailscale.com. Check this PC's clock and trusted certificates")
+	}
+	return errors.New("could not complete the Tailscale OAuth request to api.tailscale.com. Retry setup --verify")
 }
 
 func oauthRejectedTags(reply *oauth2.RetrieveError) bool {

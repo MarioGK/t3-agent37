@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -12,10 +13,74 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"tailscale.com/client/tailscale/v2"
 )
+
+type oauthTestTransport func(*http.Request) (*http.Response, error)
+
+func (f oauthTestTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+func TestEnrollmentRetriesTemporaryOAuthFailures(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var attempts []time.Time
+		client := &http.Client{Transport: oauthTestTransport(func(r *http.Request) (*http.Response, error) {
+			attempts = append(attempts, time.Now())
+			if r.Method != http.MethodPost || r.URL.Path != "/api/v2/oauth/token" {
+				t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			}
+			switch len(attempts) {
+			case 1:
+				return nil, io.EOF
+			case 2:
+				return &http.Response{StatusCode: http.StatusServiceUnavailable,
+					Header: http.Header{"Content-Type": {"application/json"}, "Retry-After": {"2"}},
+					Body:   io.NopCloser(strings.NewReader(`{"error":"temporarily_unavailable"}`))}, nil
+			default:
+				return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"application/json"}},
+					Body: io.NopCloser(strings.NewReader(`{"access_token":"fixture-token","token_type":"Bearer"}`))}, nil
+			}
+		})}
+		enrollment, err := verifyEnrollment(t.Context(), client, &tailscaleAPI, "fixture-id", "fixture-secret", []string{DefaultEnrollmentTag})
+		if err != nil || enrollment == nil || len(attempts) != 3 {
+			t.Fatalf("expected recovery on the third request, got %d requests, err=%v", len(attempts), err)
+		}
+		if attempts[1].Sub(attempts[0]) < 500*time.Millisecond || attempts[2].Sub(attempts[1]) < 2*time.Second {
+			t.Fatalf("retries ignored backoff or Retry-After: %v", attempts)
+		}
+	})
+}
+
+func TestEnrollmentBoundsRetriesAndStopsOnCancellation(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		deadline time.Duration
+		calls    int
+	}{
+		{"attempt limit", time.Minute, 3},
+		{"deadline during backoff", 100 * time.Millisecond, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				calls := 0
+				client := &http.Client{Transport: oauthTestTransport(func(*http.Request) (*http.Response, error) {
+					calls++
+					return nil, io.ErrUnexpectedEOF
+				})}
+				ctx, cancel := context.WithTimeout(t.Context(), tc.deadline)
+				defer cancel()
+				_, err := verifyEnrollment(ctx, client, &tailscaleAPI, "fixture-id", "fixture-secret", []string{DefaultEnrollmentTag})
+				if err == nil || calls != tc.calls || errors.Is(err, context.DeadlineExceeded) != (tc.calls == 1) {
+					t.Fatalf("OAuth exchanged %d times, err=%v", calls, err)
+				}
+			})
+		})
+	}
+}
 
 func TestEnrollmentVerifiesScopeAndRevokesFailedAttempt(t *testing.T) {
 	tags := []string{"tag:sandbox", "tag:terra"}
@@ -87,7 +152,9 @@ func TestEnrollmentVerifiesScopeAndRevokesFailedAttempt(t *testing.T) {
 }
 
 func TestEnrollmentRedactsRejectedOAuthCredentials(t *testing.T) {
+	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		fmt.Fprint(w, `{"error":"invalid_scope","error_description":"fixture-secret"}`)
@@ -99,7 +166,7 @@ func TestEnrollmentRedactsRejectedOAuthCredentials(t *testing.T) {
 	}
 	_, err = verifyEnrollment(t.Context(), server.Client(), base, "fixture-id", "fixture-secret", []string{DefaultEnrollmentTag})
 	if err == nil || !strings.Contains(err.Error(), "Auth Keys Write for tag:agent37") ||
-		strings.Contains(err.Error(), "fixture-secret") {
+		strings.Contains(err.Error(), "fixture-secret") || requests.Load() != 1 {
 		t.Fatalf("unexpected scope error: %v", err)
 	}
 }
