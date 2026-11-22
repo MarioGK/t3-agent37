@@ -12,6 +12,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"os"
 	"os/exec"
@@ -20,6 +21,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -291,7 +293,7 @@ func (p peerAPI) verify(ctx context.Context, attempts int, requirePeerLinks bool
 		if attempt > 0 {
 			delay := time.Second
 			if !requirePeerLinks && attempt <= 8 {
-				delay = 250 * time.Millisecond
+				delay = 100 * time.Millisecond
 			}
 			select {
 			case <-ctx.Done():
@@ -317,7 +319,7 @@ func (p peerAPI) verify(ctx context.Context, attempts int, requirePeerLinks bool
 }
 
 // VerifyTailnet checks that the private address serves the expected sandbox.
-func VerifyTailnet(ctx context.Context, name, environmentID, address string) (string, error) {
+func VerifyTailnet(ctx context.Context, name, environmentID, address string, report func(string, time.Duration)) (string, error) {
 	origin, err := privateOrigin(address)
 	if err != nil {
 		return "", err
@@ -330,8 +332,48 @@ func VerifyTailnet(ctx context.Context, name, environmentID, address string) (st
 	timeout := fmt.Errorf("%s joined Tailscale, but its private HTTPS endpoint did not become ready within two minutes", name)
 	ready, cancel := context.WithTimeoutCause(ctx, 2*time.Minute, timeout)
 	defer cancel()
-	if err := target.verify(ready, 240, false); err != nil {
-		return "", cmp.Or(context.Cause(ready), err)
+	started := time.Now()
+	var resolved, connected, secured atomic.Int64
+	record := func(value *atomic.Int64) { value.CompareAndSwap(0, int64(time.Since(started))) }
+	trace := &httptrace.ClientTrace{
+		DNSDone: func(result httptrace.DNSDoneInfo) {
+			if result.Err == nil && len(result.Addrs) > 0 {
+				record(&resolved)
+			}
+		},
+		ConnectDone: func(_, _ string, err error) {
+			if err == nil {
+				record(&connected)
+			}
+		},
+		TLSHandshakeDone: func(_ tls.ConnectionState, err error) {
+			if err == nil {
+				record(&secured)
+			}
+		},
+	}
+	verifyErr := target.verify(httptrace.WithClientTrace(ready, trace), 240, false)
+	milestone := "waiting for MagicDNS"
+	for _, step := range []struct {
+		label string
+		at    int64
+	}{
+		{"MagicDNS resolved", resolved.Load()},
+		{"Tailscale TCP connected", connected.Load()},
+		{"Trusted TLS connected", secured.Load()},
+	} {
+		if step.at > 0 {
+			milestone = step.label
+			if report != nil {
+				report(step.label, time.Duration(step.at))
+			}
+		}
+	}
+	if verifyErr != nil {
+		if context.Cause(ready) == timeout {
+			return "", fmt.Errorf("%w (last milestone: %s)", timeout, milestone)
+		}
+		return "", cmp.Or(context.Cause(ready), verifyErr)
 	}
 	return origin, nil
 }

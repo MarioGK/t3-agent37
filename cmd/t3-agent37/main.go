@@ -43,6 +43,7 @@ type options struct {
 	workspace                        *bool
 	playbook                         *workspacePlaybook
 	orchestrator                     *sharedOrchestrator
+	preparedGitHub                   func() (githubHandoff, error)
 	up                               bool
 	showSize                         bool
 	yes, dryRun, pair, tailscale     bool

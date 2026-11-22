@@ -1,14 +1,42 @@
 import gzip
 import hashlib
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
 
-from terrascale import install_links, install_shared
+from terrascale import install_links, install_orchestrator, install_shared
 
 
 class WorkspaceToolsTest(unittest.TestCase):
+    def test_cached_build_uses_the_image_dependencies_with_shared_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            workspace = home / "work/ts-orchestrator"
+            workspace.mkdir(parents=True)
+            cache = home / "orch-go-cache"
+            (cache / "build").mkdir(parents=True)
+            (cache / "modules").mkdir()
+            destination = home / ".local/bin/ts-orch"
+            destination.parent.mkdir(parents=True)
+            destination.touch(mode=0o755)
+            target = {"arch": "amd64", "revision": "b" * 40, "go_version": "go1.27.4"}
+            with (patch("terrascale.ORCHESTRATOR_CACHE", cache),
+                  patch("terrascale.build_info", return_value={"vcs.revision": "a" * 40}),
+                  patch("terrascale.run", return_value=target["revision"]),
+                  patch("terrascale.orchestrator_target", return_value=target),
+                  patch("terrascale.build_orchestrator") as build):
+                self.assertIsNone(install_orchestrator(workspace, home, request_shared=True))
+                args, kwargs = build.call_args
+                self.assertEqual(args[:2], (workspace, destination))
+                self.assertEqual(args[2]["GOCACHE"], str(cache / "build"))
+                self.assertEqual(args[2]["GOMODCACHE"], str(cache / "modules"))
+                self.assertEqual(args[2]["CGO_ENABLED"], "0")
+                self.assertEqual(kwargs["target"], target)
+                build.side_effect = subprocess.TimeoutExpired("go", kwargs["timeout"])
+                self.assertEqual(install_orchestrator(workspace, home, request_shared=True), target)
+
     def test_links_committed_tools_for_each_provider_and_preserves_local_files(self):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)

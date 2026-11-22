@@ -72,7 +72,11 @@ func TestGitHubHandoffSendsCredentialsOnlyInThePrivateUpload(t *testing.T) {
 		}
 		return &http.Response{StatusCode: status, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(response))}, nil
 	})
-	result, err := inheritGitHub(t.Context(), agent37.New("fixture-workspace-key"), "ab12cd34ef")
+	handoff, err := readGitHubHandoff(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := inheritGitHub(t.Context(), agent37.New("fixture-workspace-key"), "ab12cd34ef", handoff)
 	if err != nil || !result.GitHub || result.GitIdentity || count != len(actions) {
 		t.Fatalf("handoff result=%+v count=%d err=%v", result, count, err)
 	}
@@ -81,7 +85,11 @@ func TestGitHubHandoffSendsCredentialsOnlyInThePrivateUpload(t *testing.T) {
 func TestGitHubHandoffIgnoresMissingWorkstationTools(t *testing.T) {
 	t.Setenv("T3_AGENT37_GITHUB_TOKEN", "")
 	t.Setenv("PATH", t.TempDir())
-	result, err := inheritGitHub(t.Context(), agent37.New("fixture-workspace-key"), "invalid-instance")
+	handoff, err := readGitHubHandoff(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := inheritGitHub(t.Context(), agent37.New("fixture-workspace-key"), "invalid-instance", handoff)
 	if err != nil || result != (githubAccessResult{}) {
 		t.Fatalf("missing workstation tools result=%+v err=%v", result, err)
 	}

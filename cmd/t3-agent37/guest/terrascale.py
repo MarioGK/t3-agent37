@@ -79,6 +79,7 @@ def prepare_mise(home, orchestrator):
 
 
 MAX_ORCHESTRATOR_SIZE = 200 * 1024 * 1024
+ORCHESTRATOR_CACHE = Path("/opt/terrascale/orch-go-cache")
 
 
 def workspace_root(home, workspace_path):
@@ -117,6 +118,19 @@ def install_orchestrator(orchestrator, home, request_shared=False):
                 return None
         except subprocess.CalledProcessError:
             pass
+    env = {**os.environ, "GOTOOLCHAIN": "local", "GIT_TERMINAL_PROMPT": "0"}
+    build_cache, modules = (ORCHESTRATOR_CACHE / name for name in ("build", "modules"))
+    if build_cache.is_dir() and modules.is_dir():
+        try:
+            target = orchestrator_target(orchestrator)
+            if target is not None:
+                cached_env = {**env, "GOCACHE": str(build_cache), "GOMODCACHE": str(modules), "CGO_ENABLED": "0"}
+                build_orchestrator(orchestrator, destination, cached_env, timeout=25, target=target)
+                return None
+        except (OSError, ValueError, subprocess.SubprocessError):
+            # New dependencies or a template mismatch can make a cached build
+            # take longer. Reuse the normal shared or local build in that case.
+            pass
     if request_shared:
         try:
             target = orchestrator_target(orchestrator)
@@ -124,11 +138,16 @@ def install_orchestrator(orchestrator, home, request_shared=False):
                 return target
         except (OSError, subprocess.SubprocessError):
             pass
-    env = {**os.environ, "GOTOOLCHAIN": "local", "GIT_TERMINAL_PROMPT": "0"}
+    build_orchestrator(orchestrator, destination, env)
+
+
+def build_orchestrator(orchestrator, destination, env, timeout=165, target=None):
     with tempfile.TemporaryDirectory(prefix=".ts-orch-", dir=destination.parent) as stage:
         binary = Path(stage) / "ts-orch"
         run(["go", "build", "-trimpath", "-buildvcs=true", "-ldflags=-s -w", "-o", str(binary),
-             "./cmd/terrascale-orchestrator"], cwd=orchestrator, timeout=165, env=env)
+             "./cmd/terrascale-orchestrator"], cwd=orchestrator, timeout=timeout, env=env)
+        if target is not None:
+            verify_build_target(binary, destination.parent, target)
         binary.replace(destination)
 
 
@@ -156,14 +175,18 @@ def install_shared(workspace_path, filename, digest):
                     output.write(data)
             if checksum.hexdigest() != digest:
                 raise ValueError("Shared orchestrator checksum mismatch")
-            info = build_info(staged, home)
-            if (info.get("vcs.revision") != target["revision"] or info.get("vcs.modified") != "false"
-                    or info.get("GOOS") != "linux" or info.get("GOARCH") != target["arch"]):
-                raise ValueError("Shared orchestrator targets another revision or platform")
+            verify_build_target(staged, home, target)
             staged.chmod(0o755)
             staged.replace(destination)
     finally:
         compressed.unlink(missing_ok=True)
+
+
+def verify_build_target(binary, cwd, target):
+    info = build_info(binary, cwd)
+    if (info.get("vcs.revision") != target["revision"] or info.get("vcs.modified") != "false"
+            or info.get("GOOS") != "linux" or info.get("GOARCH") != target["arch"]):
+        raise ValueError("Orchestrator build targets another revision or platform")
 
 
 def prepare(workspace_path, request_shared=False):

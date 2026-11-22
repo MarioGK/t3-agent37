@@ -67,6 +67,8 @@ RUN set -eu; \
       72dcfbdc6fa1a3ce50598c3097efc88096b12e9d14a770592fd5ec88355f1e56; \
     fetch "https://pkgs.tailscale.com/stable/tailscale_${TAILSCALE_VERSION}_amd64.tgz" tailscale.tgz \
       512f613ed7d04fc7282f7dc5bd76aa105aae28168fbb9357eb749ebcbc29f0ae; \
+    fetch "https://github.com/anomalyco/opencode/releases/download/v${OPENCODE_VERSION}/opencode-linux-x64-baseline.tar.gz" opencode.tar.gz \
+      17c200fd4b2289954cc01552559f9b6d03ec157b2ddfb5eb54144f491656333d; \
     runtime="/opt/t3-agent37/versions/${T3_VERSION}"; \
     mkdir -p "$runtime"; \
     tar -xzf "$downloads/t3.tar.gz" --strip-components=1 -C "$runtime"; \
@@ -79,19 +81,26 @@ RUN set -eu; \
     tailscale_archive="tailscale_${TAILSCALE_VERSION}_amd64"; \
     tar -xzf "$downloads/tailscale.tgz" --strip-components=1 -C /usr/local/bin \
       "$tailscale_archive/tailscale" "$tailscale_archive/tailscaled"; \
-    rm -rf "$downloads"; \
-    npm install --global --prefix /usr/local --no-audit --no-fund "opencode-ai@${OPENCODE_VERSION}" playwright@1.63.0; \
+    install -d "$downloads/opencode"; \
+    tar -xzf "$downloads/opencode.tar.gz" -C "$downloads/opencode"; \
+    install -m 0755 "$downloads/opencode/opencode" /usr/local/bin/opencode; \
+    export npm_config_cache="$downloads/npm-cache"; \
+    npm install --global --prefix /usr/local --no-audit --no-fund playwright@1.63.0; \
     uv python install 3.12.16; \
     ln -s "$(uv python find 3.12.16)" /usr/local/bin/python3.12; \
     mise install node@24.21.0 node@24.22.1; \
     node_home=$(mise where node@24.21.0); \
-    mise exec node@24.21.0 -- npm install --global --prefix "$node_home" --no-audit --no-fund npm@11.18.0
+    mise exec node@24.21.0 -- npm install --global --prefix "$node_home" --no-audit --no-fund npm@11.18.0; \
+    rm -rf "$downloads"
 
 RUN HOME=/root PLAYWRIGHT_BROWSERS_PATH=/opt/terrascale/playwright playwright install --with-deps chromium \
  && rm -rf /var/lib/apt/lists/*
 
 ARG CLAUDE_VERSION=2.1.329
-RUN npm install --global --prefix /usr/local --no-audit --no-fund "@anthropic-ai/claude-code@${CLAUDE_VERSION}"
+RUN set -eu; \
+    cache="$(mktemp -d)"; \
+    npm install --global --prefix /usr/local --cache "$cache" --no-audit --no-fund "@anthropic-ai/claude-code@${CLAUDE_VERSION}"; \
+    rm -rf "$cache"
 
 ARG ANTIGRAVITY_VERSION=1.5.14
 RUN set -eu; \
@@ -116,6 +125,7 @@ RUN set -eu; \
     export HOME="$stage" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0; \
     snapshots=/opt/terrascale/worktree-snapshots/terrascale; \
     cache=/opt/terrascale/git-cache/terrascale; \
+    toolcache=/opt/terrascale/orch-go-cache; \
     install -d -m 0755 "$snapshots" "$cache"; \
     for repo in branch-action homebrew-tap terraform-provider-terrascale terrascale \
       test-skills ts-orchestrator ts-resources; do \
@@ -123,6 +133,7 @@ RUN set -eu; \
         "https://github.com/TerraScale/$repo.git" "$stage/$repo"; \
       if [ "$repo" = ts-orchestrator ]; then \
         (cd "$stage/$repo" && CGO_ENABLED=0 GOTOOLCHAIN=local \
+          GOCACHE="$toolcache/build" GOMODCACHE="$toolcache/modules" \
           go build -trimpath -buildvcs=true -ldflags="-s -w" \
           -o /usr/local/bin/ts-orch ./cmd/terrascale-orchestrator); \
       fi; \
@@ -130,7 +141,8 @@ RUN set -eu; \
       mv "$stage/$repo" "$snapshots/$repo"; \
       ln -s "$snapshots/$repo/.git" "$cache/$repo.git"; \
     done; \
-    chmod -R a+rX "$snapshots"
+    chmod -R a+rX "$snapshots"; \
+    chown -R node:node "$toolcache"
 
 RUN set -eu; \
     export PATH=/usr/local/bin:/usr/bin:/bin; \

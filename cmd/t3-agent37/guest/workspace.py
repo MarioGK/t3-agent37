@@ -238,10 +238,31 @@ def checkout_group(home, workspace_path, repositories):
         return list(worker.map(checkout, repositories))
 
 
+def checkout_terrascale_root(home, workspace_path):
+    result = {"status": checkout_status(home, workspace_path, "TerraScale/workspace", "", "")}
+    if result["status"] not in {"cloned", "existing", "seeded"}:
+        return result
+    root = home / workspace_path.removeprefix("~/")
+    # Bound the manifest before reading it into exec output.
+    git = ["git", "-C", str(root)]
+    try:
+        size = subprocess.check_output([*git, "cat-file", "-s", "HEAD:repos.txt"], stderr=subprocess.DEVNULL, timeout=5)
+        if int(size) > 16 * 1024:
+            return {**result, "manifestError": "too_large"}
+        result["manifest"] = subprocess.check_output(
+            [*git, "show", "HEAD:repos.txt"], stderr=subprocess.DEVNULL, text=True, timeout=5,
+        )
+    except (OSError, ValueError, subprocess.SubprocessError):
+        result["manifestError"] = "unreadable"
+    return result
+
+
 if __name__ == "__main__":
     workspace_path, *request = sys.argv[1:]
     if request[0] == "--batch":
         response = {"statuses": checkout_group(Path.home(), workspace_path, json.loads(request[1]))}
+    elif request == ["--terrascale-root"]:
+        response = checkout_terrascale_root(Path.home(), workspace_path)
     else:
         response = {"status": checkout_status(Path.home(), workspace_path, *request)}
     print(json.dumps(response))

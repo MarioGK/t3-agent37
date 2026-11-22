@@ -208,11 +208,12 @@ func TestBatchWorkspaceFailureCanResumeByName(t *testing.T) {
 			write(instance)
 		case r.URL.Path == "/.well-known/t3/environment":
 			id, _, _ := strings.Cut(strings.TrimPrefix(r.Host, "a37-agent-"), ".")
-			if strings.HasSuffix(r.Host, ".ts.net") {
-				_, id, _ = strings.Cut(id, "-")
-			} else {
-				id, _, _ = strings.Cut(id, "-")
+			if !strings.HasSuffix(r.Host, ".ts.net") {
+				t.Error("workspace setup waited for the unused protected T3 route")
+				w.WriteHeader(http.StatusBadGateway)
+				return
 			}
+			_, id, _ = strings.Cut(id, "-")
 			write(map[string]string{"environmentId": id})
 		case r.Method == http.MethodPut && r.URL.Path == "/v1/files/content":
 			id, _, _ := strings.Cut(r.Host, ".")

@@ -72,6 +72,19 @@ class WorkspaceTest(unittest.TestCase):
         self.assertEqual((checkout / "README").read_text(), "edited")
         self.assertEqual(self.git("-C", str(checkout), "branch", "--show-current"), "local-work")
 
+    def test_terrascale_root_returns_the_committed_manifest(self):
+        self.git("config", "--global", "--add", "url." + self.remotes.as_uri() + "/.insteadOf",
+                 "https://github.com/TerraScale/")
+        self.publish("workspace")
+        self.assertEqual(workspace.checkout_terrascale_root(self.home, self.workspace_path),
+                         {"status": "cloned", "manifestError": "unreadable"})
+        self.advance("workspace", "repos.txt")
+        self.assertEqual(workspace.checkout_terrascale_root(self.home, self.workspace_path),
+                         {"status": "existing", "manifest": "updated upstream"})
+        (self.root / "repos.txt").write_text("uncommitted local change")
+        self.assertEqual(workspace.checkout_terrascale_root(self.home, self.workspace_path),
+                         {"status": "existing", "manifest": "updated upstream"})
+
     def test_conflicting_destination_is_preserved(self):
         target = self.root / "example-app"
         target.mkdir(parents=True)

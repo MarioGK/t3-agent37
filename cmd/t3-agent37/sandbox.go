@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -68,7 +69,11 @@ func setup(ctx context.Context, client *agent37.Client, instance agent37.Instanc
 	if err != nil {
 		return setupProof{}, err
 	}
-	return configureGuestT3(ctx, client, instance.ID, name, install+" && "+configure)
+	proof, err := configureGuestT3(ctx, client, instance.ID, name, install+" && "+configure)
+	if err == nil {
+		_, _, err = client.WaitForT3(ctx, instance.ID, proof.EnvironmentID, proof.Port)
+	}
+	return proof, err
 }
 
 func setupCommands(instance agent37.Instance, peerLinks bool) (install, configure, name string, err error) {
@@ -101,7 +106,7 @@ func configureGuestT3(ctx context.Context, client *agent37.Client, id, name, com
 	if proof.EnvironmentID == "" {
 		return proof, errors.New("sandbox setup did not return a T3 environment ID")
 	}
-	_, _, err = client.WaitForT3(ctx, id, proof.EnvironmentID, proof.Port)
+	_, err = agent37.ProtectedOrigin(id, proof.Port)
 	return proof, err
 }
 
@@ -112,7 +117,7 @@ type tailIdentity struct {
 	EnrollmentRequired bool   `json:"enrollmentRequired"`
 }
 
-func enrollAndServe(ctx context.Context, client *agent37.Client, enrollment *peers.Enrollment, id, name string, fresh bool) (string, error) {
+func enrollAndServe(ctx context.Context, client *agent37.Client, enrollment *peers.Enrollment, id, name string, fresh bool, helpersReady <-chan struct{}) (string, error) {
 	if err := agent37.ValidateID(id); err != nil {
 		return "", err
 	}
@@ -127,9 +132,21 @@ func enrollAndServe(ctx context.Context, client *agent37.Client, enrollment *pee
 		}
 		return nil
 	}
+	waitForHelpers := func() error {
+		if helpersReady != nil {
+			select {
+			case <-helpersReady:
+			case <-ctx.Done():
+			}
+		}
+		return ctx.Err()
+	}
 	var proof tailIdentity
 	var err error
 	if !fresh {
+		if err := waitForHelpers(); err != nil {
+			return "", err
+		}
 		proof, err = client.ExecJSON[tailIdentity](ctx, id, command)
 		if err != nil {
 			return "", err
@@ -150,6 +167,9 @@ func enrollAndServe(ctx context.Context, client *agent37.Client, enrollment *pee
 	}
 	filename := "tailscale-enrollment-" + hex.EncodeToString(nonce[:])
 	err = enrollment.UseKey(ctx, func(key string) error {
+		if err := waitForHelpers(); err != nil {
+			return err
+		}
 		err := uploadGuestFile(ctx, func() error { return client.UploadEnrollmentKey(ctx, id, filename, key) })
 		if err == nil {
 			proof, err = client.ExecJSON[tailIdentity](ctx, id, command+" "+filename)
@@ -172,6 +192,7 @@ type sandboxBootstrap struct {
 	prepareDesktop, fresh                              bool
 	playbook                                           *workspacePlaybook
 	orchestrator                                       *sharedOrchestrator
+	preparedGitHub                                     func() (githubHandoff, error)
 }
 
 func bootstrap(ctx context.Context, client *agent37.Client, enrollment *peers.Enrollment, instance agent37.Instance, name string, settings sandboxBootstrap, diagnostic io.Writer) (setupProof, error) {
@@ -201,7 +222,8 @@ func bootstrap(ctx context.Context, client *agent37.Client, enrollment *peers.En
 		}
 		published := make(chan publication, 1)
 		checkedOut := make(chan checkout, 1)
-		earlyCheckout = checkedOut
+		helpersReady := make(chan struct{})
+		earlyCheckout, earlyPublication = checkedOut, published
 		prepare, cancel := context.WithCancel(ctx)
 		defer func() {
 			cancel()
@@ -216,23 +238,29 @@ func bootstrap(ctx context.Context, client *agent37.Client, enrollment *peers.En
 			playbook, err := checkoutSandboxWorkspace(prepare, client, instance.ID, name, settings, diagnostic)
 			checkedOut <- checkout{playbook, err}
 		}()
+		go func() {
+			url, err := publishTailnet(prepare, client, enrollment, instance.ID, name, settings.fresh, helpersReady, diagnostic)
+			published <- publication{url, err}
+		}()
 		stageTools := settings.fresh && settings.orchestrator != nil && settings.orchestrator.latestReady != nil
 		if stageTools {
-			install += ` && (go version -m /usr/local/bin/ts-orch 2>/dev/null | sed -n 's/.*vcs.revision=//p')`
+			install += ` && if test -d /opt/terrascale/orch-go-cache/build && test -d /opt/terrascale/orch-go-cache/modules; then
+				printf '%s\n' image-go-cache
+			else
+				go version -m /usr/local/bin/ts-orch 2>/dev/null | sed -n 's/.*vcs.revision=//p'
+			fi`
 		}
 		installed, err := client.Exec(ctx, instance.ID, install)
 		if err != nil {
 			return proof, err
 		}
-		if stageTools {
-			stagedTools = settings.orchestrator.stage(prepare, client, instance.ID, strings.TrimSpace(installed))
+		close(helpersReady)
+		if imageTools := strings.TrimSpace(installed); stageTools && imageTools != "image-go-cache" {
+			stagedTools = settings.orchestrator.stage(prepare, client, instance.ID, imageTools)
 			defer stagedTools.finish(ctx, client, instance.ID)
 		}
-		earlyPublication = published
-		go func() {
-			url, err := publishTailnet(prepare, client, enrollment, instance.ID, name, settings.fresh, diagnostic)
-			published <- publication{url, err}
-		}()
+		// The guest has verified the local descriptor. The tailnet probe below
+		// verifies the same identity on the URL that desktop and peers use.
 		proof, err = configureGuestT3(ctx, client, instance.ID, requestedName, configure)
 		if err != nil {
 			return proof, err
@@ -318,7 +346,7 @@ func bootstrap(ctx context.Context, client *agent37.Client, enrollment *peers.En
 			url = result.url
 		} else {
 			var err error
-			url, err = publishTailnet(ctx, client, enrollment, instance.ID, name, settings.fresh, diagnostic)
+			url, err = publishTailnet(ctx, client, enrollment, instance.ID, name, settings.fresh, nil, diagnostic)
 			if err != nil {
 				return err
 			}
@@ -338,7 +366,13 @@ func bootstrap(ctx context.Context, client *agent37.Client, enrollment *peers.En
 		}
 		return finishSandboxSetup(ctx, preparePairing, func() error {
 			var err error
-			proof.TailnetURL, err = peers.VerifyTailnet(ctx, name, proof.EnvironmentID, url)
+			var report func(string, time.Duration)
+			if os.Getenv("T3_AGENT37_TIMINGS") == "1" {
+				report = func(stage string, elapsed time.Duration) {
+					notice(diagnostic, info, "%s · %s · %.3fs", name, stage, elapsed.Seconds())
+				}
+			}
+			proof.TailnetURL, err = peers.VerifyTailnet(ctx, name, proof.EnvironmentID, url, report)
 			if err == nil {
 				launchTiming(diagnostic, name, "Tailscale HTTPS verification", verifyStarted)
 			}
@@ -353,7 +387,7 @@ func checkoutSandboxWorkspace(ctx context.Context, client *agent37.Client, id, n
 		return nil, err
 	}
 	if settings.githubAccess {
-		if err := configureGitHubAccess(ctx, client, id, name, diagnostic); err != nil && ctx.Err() == nil {
+		if err := configureGitHubAccess(ctx, client, id, name, diagnostic, settings.preparedGitHub); err != nil && ctx.Err() == nil {
 			notice(diagnostic, warning, "%v", err)
 		}
 	}
@@ -367,9 +401,9 @@ func checkoutSandboxWorkspace(ctx context.Context, client *agent37.Client, id, n
 	return &playbook, nil
 }
 
-func publishTailnet(ctx context.Context, client *agent37.Client, enrollment *peers.Enrollment, id, name string, fresh bool, diagnostic io.Writer) (string, error) {
+func publishTailnet(ctx context.Context, client *agent37.Client, enrollment *peers.Enrollment, id, name string, fresh bool, helpersReady <-chan struct{}, diagnostic io.Writer) (string, error) {
 	started := time.Now()
-	address, err := enrollAndServe(ctx, client, enrollment, id, name, fresh)
+	address, err := enrollAndServe(ctx, client, enrollment, id, name, fresh, helpersReady)
 	if err != nil {
 		return "", fmt.Errorf("could not publish %s on Tailscale: %w", name, err)
 	}
@@ -554,6 +588,7 @@ func prepareCreated(ctx context.Context, client *agent37.Client, enrollment *pee
 	proof, err := bootstrap(ctx, client, enrollment, instance, opts.name, sandboxBootstrap{
 		peerLinks: true, mayRestart: wasStopped, githubAccess: opts.githubAccess,
 		prepareDesktop: opts.up && !opts.noDesktop, fresh: fresh, playbook: opts.playbook, orchestrator: opts.orchestrator,
+		preparedGitHub: opts.preparedGitHub,
 	}, diagnostic)
 	if err == nil && !proof.ProviderReady {
 		notice(diagnostic, warning, "%s needs sign-in. Run t3-agent37 terminal %s.", providerLabel(provider), opts.name)
@@ -564,8 +599,15 @@ func prepareCreated(ctx context.Context, client *agent37.Client, enrollment *pee
 	return proof, err
 }
 
-func configureGitHubAccess(ctx context.Context, client *agent37.Client, id, name string, diagnostic io.Writer) error {
-	access, err := inheritGitHub(ctx, client, id)
+func configureGitHubAccess(ctx context.Context, client *agent37.Client, id, name string, diagnostic io.Writer, prepared func() (githubHandoff, error)) error {
+	if prepared == nil {
+		prepared = func() (githubHandoff, error) { return readGitHubHandoff(ctx) }
+	}
+	handoff, err := prepared()
+	var access githubAccessResult
+	if err == nil {
+		access, err = inheritGitHub(ctx, client, id, handoff)
+	}
 	if err != nil {
 		return fmt.Errorf("could not set up GitHub for %s. Retry with t3-agent37 up %s --github: %w", name, name, err)
 	}

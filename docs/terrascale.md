@@ -190,4 +190,6 @@ private checkout files are stored in the image.
 
 The image includes a `ts-orch` built from its baked public
 `ts-orchestrator` revision. The CLI reuses it when its build revision
-matches the current checkout and builds it again when the revision changes.
+matches the current checkout. When the revision changes, the guest tries
+building it with the Go dependencies and compile cache in the image. Older
+images and cache misses can use the verified shared build.

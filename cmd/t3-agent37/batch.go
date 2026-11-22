@@ -71,6 +71,12 @@ func runBatch(ctx context.Context, client *agent37.Client, verifyEnrollment func
 			return err
 		}
 	}
+	if opts.githubAccess {
+		prepare, cancel := context.WithCancel(ctx)
+		defer cancel()
+		opts.preparedGitHub = sync.OnceValues(func() (githubHandoff, error) { return readGitHubHandoff(prepare) })
+		go opts.preparedGitHub()
+	}
 	if opts.playbook != nil && opts.playbook.terraScale() {
 		opts.orchestrator = newSharedOrchestrator()
 		if opts.orchestrator != nil && terraTemplate(opts.template) {

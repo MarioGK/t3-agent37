@@ -39,17 +39,21 @@ type githubHandoff struct {
 
 // inheritGitHub applies the local GitHub.com login and Git author defaults
 // without placing credentials in the guest exec command or instance metadata.
-func inheritGitHub(ctx context.Context, client *agent37.Client, id string) (githubAccessResult, error) {
-	var result githubAccessResult
+func readGitHubHandoff(ctx context.Context) (githubHandoff, error) {
 	token, err := workstationGitHubToken(ctx)
 	if err != nil {
-		return result, err
+		return githubHandoff{}, err
 	}
 	name, email := workstationGitIdentity(ctx)
-	if token == "" && name == "" && email == "" {
+	return githubHandoff{Token: token, Name: name, Email: email}, ctx.Err()
+}
+
+func inheritGitHub(ctx context.Context, client *agent37.Client, id string, handoff githubHandoff) (githubAccessResult, error) {
+	var result githubAccessResult
+	if handoff == (githubHandoff{}) {
 		return result, ctx.Err()
 	}
-	payload, err := json.Marshal(githubHandoff{Token: token, Name: name, Email: email})
+	payload, err := json.Marshal(handoff)
 	if err != nil {
 		return result, errors.New("could not encode GitHub access handoff")
 	}

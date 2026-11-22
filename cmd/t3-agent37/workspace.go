@@ -207,18 +207,12 @@ func (playbook *workspacePlaybook) clone(ctx context.Context, client *agent37.Cl
 		progress.setPhase("Updating workspace checkouts")
 	}
 	baseCommand := "python3 -B -c " + shellQuote(guestWorkspace) + " " + shellQuote(playbook.Path)
-	if playbook.RootRepo != "" {
-		if err := cloneWorkspaceRepository(ctx, client, id, name, baseCommand, playbook.Path, workspaceRepository{Repo: playbook.RootRepo}, ""); err != nil {
+	if playbook.terraScale() {
+		if err := playbook.checkoutTerraScaleRoot(ctx, client, id, name, baseCommand); err != nil {
 			return err
 		}
-	}
-	if playbook.terraScale() {
-		command := "git -C \"$HOME\"/" + shellQuote(strings.TrimPrefix(playbook.Path, "~/")) + " show HEAD:repos.txt"
-		manifest, err := client.Exec(ctx, id, command)
-		if err != nil {
-			return fmt.Errorf("could not read the TerraScale repository manifest in %s: %w", name, err)
-		}
-		if err := playbook.applyTerraScaleManifest(manifest); err != nil {
+	} else if playbook.RootRepo != "" {
+		if err := cloneWorkspaceRepository(ctx, client, id, name, baseCommand, playbook.Path, workspaceRepository{Repo: playbook.RootRepo}, ""); err != nil {
 			return err
 		}
 	}
@@ -253,6 +247,24 @@ func (playbook *workspacePlaybook) clone(ctx context.Context, client *agent37.Cl
 	notice(diagnostic, success, "%s Checkouts ready at %s", name, playbook.Path)
 	launchTiming(diagnostic, name, "Repository checkout", started)
 	return nil
+}
+
+func (playbook *workspacePlaybook) checkoutTerraScaleRoot(ctx context.Context, client *agent37.Client, id, name, baseCommand string) error {
+	result, err := client.ExecJSON[struct{ Status, Manifest, ManifestError string }](ctx, id, baseCommand+" --terrascale-root")
+	if err != nil {
+		return fmt.Errorf("could not clone %s in %s: %w", playbook.RootRepo, name, err)
+	}
+	if err := checkoutError(result.Status, playbook.Path, name, playbook.RootRepo, ""); err != nil {
+		return err
+	}
+	switch result.ManifestError {
+	case "":
+		return playbook.applyTerraScaleManifest(result.Manifest)
+	case "too_large":
+		return errors.New("TerraScale repos.txt is too large")
+	default:
+		return fmt.Errorf("could not read the TerraScale repository manifest in %s", name)
+	}
 }
 
 func (playbook *workspacePlaybook) applyTerraScaleManifest(manifest string) error {
