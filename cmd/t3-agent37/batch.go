@@ -85,10 +85,19 @@ func runBatch(ctx context.Context, client *agent37.Client, verifyEnrollment func
 			opts.orchestrator.startPreparation(prepare)
 		}
 	}
-	progress.setPhase("Checking OAuth and sandbox inventory")
+	progress.setPhase("Checking credentials and sandbox inventory")
 	instances, enrollment, err := batchPreflight(ctx, client, verifyEnrollment)
 	if err != nil {
 		return err
+	}
+	if opts.playbook != nil && opts.playbook.terraScale() && opts.preparedGitHub != nil {
+		handoff, err := opts.preparedGitHub()
+		if err != nil {
+			return fmt.Errorf("could not prepare GitHub access for the TerraScale workspace: %w", err)
+		}
+		if handoff.Token == "" {
+			return errors.New("sign in with gh auth login --hostname github.com before creating the TerraScale workspace")
+		}
 	}
 	if err := os.MkdirAll(state, 0o700); err != nil {
 		return err

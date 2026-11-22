@@ -188,6 +188,9 @@ runtime using the workstation's GitHub handoff. No GitHub credentials or
 private checkout files are stored in the image.
 [Dockerfile](../templates/terrascale/Dockerfile)
 
+When GitHub handoff is enabled, a TerraScale batch checks the workstation
+login before allocating sandboxes.
+
 The image includes a `ts-orch` built from its baked public
 `ts-orchestrator` revision. The CLI reuses it when its build revision
 matches the current checkout. When the revision changes, the guest tries

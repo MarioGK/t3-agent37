@@ -99,6 +99,33 @@ func TestBatchPreviewFillsFreeSuffixes(t *testing.T) {
 	}
 }
 
+func TestTerraScaleBatchRejectsUnreadableGitHubLoginBeforeAllocation(t *testing.T) {
+	t.Setenv("T3_AGENT37_PEERS_FILE", "")
+	t.Setenv("T3_AGENT37_GITHUB_TOKEN", "invalid\nfixture")
+	original := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = original })
+	http.DefaultTransport = downTestTransport(func(request *http.Request) (*http.Response, error) {
+		if request.Method == http.MethodGet && request.URL.Path == "/v1/instances" {
+			return downResponse(200, "{\"data\":[]}"), nil
+		}
+		t.Errorf("GitHub preflight should have stopped before %s", request.Method)
+		return downResponse(500, "{}"), nil
+	})
+	opts := options{
+		batchSize: 4, parallelism: 4, provider: "codex", noDesktop: true, githubAccess: true,
+		playbook: &workspacePlaybook{Path: "~/Projects/TerraScale", RootRepo: "TerraScale/workspace"},
+	}
+	progress := startLaunchProgress(t.Context(), io.Discard, opts)
+	defer progress.close()
+	err := runBatch(t.Context(), agent37.New("fixture"),
+		func(context.Context) (*peers.Enrollment, error) { return nil, nil },
+		opts, t.TempDir(), io.Discard, progress)
+	if err == nil || !strings.Contains(err.Error(), "could not prepare GitHub access") ||
+		strings.Contains(err.Error(), "fixture") {
+		t.Fatalf("unexpected GitHub preflight result: %v", err)
+	}
+}
+
 func TestBatchStartsTenCreatesInParallelAndReportsPartialResults(t *testing.T) {
 	t.Setenv("T3_AGENT37_PEERS_FILE", "")
 	original := http.DefaultTransport
