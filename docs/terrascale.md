@@ -43,6 +43,12 @@ Set `T3_AGENT37_CLIPROXY_MODEL` before `create` to pick another default model
 that CLIProxy supports across the three APIs. Run `t3-agent37 prepare terrascale-dev`
 to configure a running sandbox and refresh its OpenCode model catalog.
 
+The template includes Antigravity CLI (`agy`). It uses the sandbox's CLIProxy
+key through the Gemini-compatible endpoint. Run `agy models` to see the
+Gemini models advertised by the proxy and the available fallback. With the
+default CLIProxy catalog, `agy` uses GLM 5.3 Flash until CLIProxy has a Gemini
+model. Add a Google account to CLIProxy to enable its Gemini models.
+
 `setup --verify` requests a Tailscale token for the configured tag set and
 checks MagicDNS and HTTPS if the local Tailscale CLI is available. On an OAuth
 authorization failure, it opens Trust credentials from an interactive
@@ -155,7 +161,7 @@ to configure a sandbox that already exists.
 
 ## Publish the template
 
-The image includes T3, OpenCode, Codex, Claude Code, Tailscale, .NET 10 and 11, Go 1.27.4,
+The image includes T3, OpenCode, Codex, Claude Code, Antigravity CLI, Tailscale, .NET 10 and 11, Go 1.27.4,
 Rust 1.99.1 with rustfmt and Clippy, Python 3.12 with uv, and Node 24 with
 mise. The Node pins are 24.21.0 with npm 11.18.0 and 24.22.1. The image also
 includes Git, GitHub CLI, GCC, Make, Ruby, ShellCheck, actionlint, the TerraScale `ts`

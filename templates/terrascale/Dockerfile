@@ -93,6 +93,16 @@ RUN HOME=/root PLAYWRIGHT_BROWSERS_PATH=/opt/terrascale/playwright playwright in
 ARG CLAUDE_VERSION=2.1.329
 RUN npm install --global --prefix /usr/local --no-audit --no-fund "@anthropic-ai/claude-code@${CLAUDE_VERSION}"
 
+ARG ANTIGRAVITY_VERSION=1.5.14
+RUN set -eu; \
+    archive=$(mktemp); \
+    curl -fLsS --retry 2 "https://storage.googleapis.com/antigravity-public/antigravity-cli/${ANTIGRAVITY_VERSION}-5302690847260672/linux-x64/cli_linux_x64.tar.gz" -o "$archive"; \
+    printf '%s  %s\n' '83311d3f354567612dc16c1ae2ea9b503d6f6833aa4e138d39aa229da3f3bb99b0e4d7cca0bce4796b0060d6a51d8113eb7449ed5dc0e7900bf217107ea5bff9' "$archive" | sha512sum -c -; \
+    install -d /opt/terrascale/antigravity; \
+    tar -xzf "$archive" -C /opt/terrascale/antigravity; \
+    rm "$archive"
+COPY --chmod=0755 agy /usr/local/bin/agy
+
 RUN set -eu; \
     version="$(go env GOVERSION | cut -c3-)"; \
     install -d "$MISE_DATA_DIR/installs/go"; \
@@ -123,7 +133,7 @@ RUN set -eu; \
     export PATH=/usr/local/bin:/usr/bin:/bin; \
     test -x "/opt/t3-agent37/versions/$T3_VERSION/t3"; \
     test -f "/opt/t3-agent37/versions/$T3_VERSION/.verified"; \
-    codex --version; claude --version; opencode --version; \
+    codex --version; claude --version; opencode --version; test "$(agy --version)" = "$ANTIGRAVITY_VERSION"; \
     go version; gofmt -h >/dev/null 2>&1; \
     dotnet --list-sdks > /tmp/terrascale-sdks; \
     grep -E '^10\.' /tmp/terrascale-sdks; grep -E '^11\.' /tmp/terrascale-sdks; \

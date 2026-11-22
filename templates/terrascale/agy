@@ -1,0 +1,97 @@
+#!/usr/bin/env python3
+"""Expose CLIProxy's Gemini endpoint to the bundled Antigravity CLI."""
+import json
+import os
+from pathlib import Path
+import re
+import sys
+import tempfile
+from urllib.error import HTTPError
+from urllib.parse import urlsplit
+from urllib.request import HTTPRedirectHandler, Request, build_opener
+
+BINARY = "/opt/terrascale/antigravity/antigravity"
+MODEL_ROOT = "gemini-api://models/"
+
+
+class NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+def proxy_models(base, key):
+    request = Request(base + "/v1beta/models", headers={"x-goog-api-key": key})
+    try:
+        with build_opener(NoRedirect()).open(request, timeout=3) as response:
+            entries = json.load(response)["models"]
+        return {entry["name"].removeprefix("models/") for entry in entries
+                if isinstance(entry, dict) and isinstance(entry.get("name"), str)}
+    except HTTPError as error:
+        if error.code in (401, 403):
+            raise ValueError("CLIProxy rejected the sandbox client key") from None
+    except (OSError, ValueError, TypeError, KeyError):
+        pass
+    return set()
+
+
+def configure(models):
+    path = Path.home() / ".gemini/antigravity-cli/settings.json"
+    try:
+        settings = json.loads(path.read_text())
+    except FileNotFoundError:
+        settings = {}
+    original = json.dumps(settings, sort_keys=True)
+    settings["modelProvider"] = "gemini"
+    custom = settings.setdefault("customModelsConfig", {})
+    choices = [entry for entry in custom.get("customModels", []) if not entry.get("label", "").startswith("CLIProxy ")]
+    existing = {choice.get("modelName") for choice in choices}
+    choices.extend({"modelName": MODEL_ROOT + model, "label": f"CLIProxy {model}"}
+                   for model in models if MODEL_ROOT + model not in existing)
+    custom["customModels"] = choices
+    if json.dumps(settings, sort_keys=True) != original:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as output:
+            staged = Path(output.name)
+            try:
+                output.write(json.dumps(settings, indent=2) + "\n")
+                output.close()
+                staged.replace(path)
+            finally:
+                staged.unlink(missing_ok=True)
+    return choices
+
+
+def main():
+    arguments = sys.argv[1:]
+    base = os.environ.get("T3_AGENT37_CLIPROXY_URL", "").rstrip("/").removesuffix("/v1")
+    key = os.environ.get("T3_AGENT37_CLIPROXY_KEY")
+    if arguments in (["--version"], ["--help"], ["-h"]) or not (base or key):
+        os.execv(BINARY, [BINARY, *arguments])
+    origin = urlsplit(base)
+    if origin.scheme != "https" or not origin.hostname or origin.username or origin.password or origin.query or origin.fragment or not key:
+        raise ValueError("CLIProxy needs an HTTPS base URL and sandbox client key")
+    advertised = proxy_models(base, key)
+    gemini = sorted(model for model in advertised
+                    if re.fullmatch(r"(?:gemini-|antigravity[-/])[a-zA-Z0-9_.-]+", model))
+    fallback = "glm-5.3-flash" if "glm-5.3-flash" in advertised else os.environ.get("T3_AGENT37_CLIPROXY_MODEL", "glm-5.3")
+    if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]*", fallback):
+        raise ValueError("invalid CLIProxy default model")
+    choices = configure(list(dict.fromkeys([*gemini, fallback])))
+    if arguments == ["models"]:
+        for choice in choices:
+            print(f"{choice['modelName']}\t{choice.get('label', '')}")
+        return
+    if (not arguments or arguments[0].startswith("-")) and not any(
+            argument == "--model" or argument.startswith("--model=") for argument in arguments):
+        default = next((model for model in gemini if "flash" in model), gemini[0] if gemini else fallback)
+        arguments = ["--model", MODEL_ROOT + default, *arguments]
+    env = {**os.environ, "GEMINI_API_KEY": key, "GOOGLE_GEMINI_BASE_URL": base}
+    env.pop("AGY_ADC_AUTH", None)
+    os.execve(BINARY, [BINARY, *arguments], env)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (OSError, ValueError) as error:
+        sys.exit(f"agy: {error}")
