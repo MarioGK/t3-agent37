@@ -104,7 +104,8 @@ to its path.
 
 An optional `root_repository` checks out a repository at `path` itself.
 Repository checkout runs while T3 starts and the sandbox joins Tailscale.
-The CLI checks out up to four child repositories in one guest request. Git
+The CLI runs up to two guest requests in parallel, with up to four child
+repositories per request. Git
 fetches historical blobs on demand and can reuse public objects from the
 TerraScale image. Each startup
 fetches and fast-forwards the tracked GitHub branches for the workspace root
@@ -118,7 +119,9 @@ With `TerraScale/workspace` as `root_repository`, `up` also reads its
 committed `repos.txt`, installs the workspace's skills and helper links,
 and verifies the .NET and Mise Go toolchains. When the image's `ts-orch`
 is stale, `up <count>` can build the current revision once with a matching
-workstation Go toolchain and share it across the batch. Sandboxes can build
+workstation Go toolchain and share it across the batch. The workstation starts
+the build during allocation and sends it while the guests check out the
+workspace. Sandboxes can build
 locally when the shared build is unavailable. T3 pairing waits until the
 tools and projects are ready.
 

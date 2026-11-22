@@ -107,56 +107,53 @@ func configureGuestT3(ctx context.Context, client *agent37.Client, id, name, com
 type tailIdentity struct {
 	ID                 string `json:"id"`
 	Hostname           string `json:"hostname"`
+	URL                string `json:"url"`
 	EnrollmentRequired bool   `json:"enrollmentRequired"`
 }
 
-func joinTailnet(ctx context.Context, client *agent37.Client, enrollment *peers.Enrollment, id, name string) error {
-	if err := joinTailnetOnce(ctx, client, enrollment, id, name); err != nil {
-		return fmt.Errorf("could not enroll %s in Tailscale: %w", name, err)
-	}
-	return nil
-}
-
-func joinTailnetOnce(ctx context.Context, client *agent37.Client, enrollment *peers.Enrollment, id, name string) error {
+func enrollAndServe(ctx context.Context, client *agent37.Client, enrollment *peers.Enrollment, id, name string, fresh bool) (string, error) {
 	if err := agent37.ValidateID(id); err != nil {
-		return err
+		return "", err
 	}
 	if !namePattern.MatchString(name) {
-		return errors.New("invalid Tailscale sandbox name")
+		return "", errors.New("invalid Tailscale sandbox name")
 	}
 	hostname := "a37-" + name + "-" + id
-	command := remote + " tailnet-join " + hostname
-	proof, err := client.ExecJSON[tailIdentity](ctx, id, command)
-	if err != nil {
-		return err
-	}
+	command := remote + " tailnet-publish " + hostname
 	confirm := func(identity tailIdentity) error {
-		if identity.EnrollmentRequired || identity.ID == "" || identity.Hostname != hostname {
+		if identity.EnrollmentRequired || identity.ID == "" || identity.Hostname != hostname || identity.URL == "" {
 			return errors.New("Tailscale did not confirm the sandbox identity")
 		}
 		return nil
 	}
-	if !proof.EnrollmentRequired {
-		return confirm(proof)
+	var proof tailIdentity
+	var err error
+	if !fresh {
+		proof, err = client.ExecJSON[tailIdentity](ctx, id, command)
+		if err != nil {
+			return "", err
+		}
+		if !proof.EnrollmentRequired {
+			return proof.URL, confirm(proof)
+		}
 	}
 	if enrollment == nil {
 		enrollment, err = verifyTailscaleEnrollment(ctx)
 		if err != nil {
-			return err
+			return "", err
 		}
 	}
 	var nonce [16]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
-		return err
+		return "", err
 	}
 	filename := "tailscale-enrollment-" + hex.EncodeToString(nonce[:])
-	return enrollment.UseKey(ctx, func(key string) error {
+	err = enrollment.UseKey(ctx, func(key string) error {
 		err := uploadGuestFile(ctx, func() error { return client.UploadEnrollmentKey(ctx, id, filename, key) })
 		if err == nil {
-			var joined tailIdentity
-			joined, err = client.ExecJSON[tailIdentity](ctx, id, command+" "+filename)
+			proof, err = client.ExecJSON[tailIdentity](ctx, id, command+" "+filename)
 			if err == nil {
-				err = confirm(joined)
+				err = confirm(proof)
 			}
 		}
 		if err != nil {
@@ -166,11 +163,12 @@ func joinTailnetOnce(ctx context.Context, client *agent37.Client, enrollment *pe
 		}
 		return err
 	})
+	return proof.URL, err
 }
 
 type sandboxBootstrap struct {
 	peerLinks, mayRestart, githubAccess, skipWorkspace bool
-	prepareDesktop                                     bool
+	prepareDesktop, fresh                              bool
 	playbook                                           *workspacePlaybook
 	orchestrator                                       *sharedOrchestrator
 }
@@ -194,17 +192,15 @@ func bootstrap(ctx context.Context, client *agent37.Client, enrollment *peers.En
 	}
 	var earlyPublication chan publication
 	var earlyCheckout chan checkout
+	var stagedTools *stagedOrchestrator
 	if settings.playbook != nil && !settings.mayRestart && instance.Metadata["tailnet"] == "tailscale" {
 		install, configure, requestedName, err := setupCommands(instance, settings.peerLinks)
 		if err != nil {
 			return proof, err
 		}
-		if _, err := client.Exec(ctx, instance.ID, install); err != nil {
-			return proof, err
-		}
 		published := make(chan publication, 1)
 		checkedOut := make(chan checkout, 1)
-		earlyPublication, earlyCheckout = published, checkedOut
+		earlyCheckout = checkedOut
 		prepare, cancel := context.WithCancel(ctx)
 		defer func() {
 			cancel()
@@ -216,12 +212,25 @@ func bootstrap(ctx context.Context, client *agent37.Client, enrollment *peers.En
 			}
 		}()
 		go func() {
-			url, err := publishTailnet(prepare, client, enrollment, instance.ID, name, diagnostic)
-			published <- publication{url, err}
-		}()
-		go func() {
 			playbook, err := checkoutSandboxWorkspace(prepare, client, instance.ID, name, settings, diagnostic)
 			checkedOut <- checkout{playbook, err}
+		}()
+		stageTools := settings.fresh && settings.orchestrator != nil && settings.orchestrator.latestReady != nil
+		if stageTools {
+			install += ` && (go version -m /usr/local/bin/ts-orch 2>/dev/null | sed -n 's/.*vcs.revision=//p')`
+		}
+		installed, err := client.Exec(ctx, instance.ID, install)
+		if err != nil {
+			return proof, err
+		}
+		if stageTools {
+			stagedTools = settings.orchestrator.stage(prepare, client, instance.ID, strings.TrimSpace(installed))
+			defer stagedTools.finish(ctx, client, instance.ID)
+		}
+		earlyPublication = published
+		go func() {
+			url, err := publishTailnet(prepare, client, enrollment, instance.ID, name, settings.fresh, diagnostic)
+			published <- publication{url, err}
 		}()
 		proof, err = configureGuestT3(ctx, client, instance.ID, requestedName, configure)
 		if err != nil {
@@ -270,7 +279,7 @@ func bootstrap(ctx context.Context, client *agent37.Client, enrollment *peers.En
 				var toolErr error
 				if playbook.terraScale() {
 					installTools = func() {
-						toolErr = playbook.installTerraScaleTools(ctx, client, instance.ID, name, settings.orchestrator, diagnostic)
+						toolErr = playbook.installTerraScaleTools(ctx, client, instance.ID, name, settings.orchestrator, stagedTools, diagnostic)
 					}
 				}
 				projectErr := finishSandboxSetup(ctx, installTools, func() error {
@@ -303,7 +312,7 @@ func bootstrap(ctx context.Context, client *agent37.Client, enrollment *peers.En
 			url = result.url
 		} else {
 			var err error
-			url, err = publishTailnet(ctx, client, enrollment, instance.ID, name, diagnostic)
+			url, err = publishTailnet(ctx, client, enrollment, instance.ID, name, settings.fresh, diagnostic)
 			if err != nil {
 				return err
 			}
@@ -352,18 +361,14 @@ func checkoutSandboxWorkspace(ctx context.Context, client *agent37.Client, id, n
 	return &playbook, nil
 }
 
-func publishTailnet(ctx context.Context, client *agent37.Client, enrollment *peers.Enrollment, id, name string, diagnostic io.Writer) (string, error) {
+func publishTailnet(ctx context.Context, client *agent37.Client, enrollment *peers.Enrollment, id, name string, fresh bool, diagnostic io.Writer) (string, error) {
 	started := time.Now()
-	if err := joinTailnet(ctx, client, enrollment, id, name); err != nil {
-		return "", err
+	address, err := enrollAndServe(ctx, client, enrollment, id, name, fresh)
+	if err != nil {
+		return "", fmt.Errorf("could not publish %s on Tailscale: %w", name, err)
 	}
-	launchTiming(diagnostic, name, "Tailscale enrollment", started)
-	started = time.Now()
-	private, err := client.ExecJSON[struct{ URL string }](ctx, id, remote+" tailnet-serve-peer")
-	if err == nil {
-		launchTiming(diagnostic, name, "Tailscale Serve", started)
-	}
-	return private.URL, err
+	launchTiming(diagnostic, name, "Tailscale enrollment and Serve", started)
+	return address, nil
 }
 
 func finishSandboxSetup(ctx context.Context, background func(), foreground func() error) error {
@@ -532,6 +537,7 @@ func prepareCreated(ctx context.Context, client *agent37.Client, enrollment *pee
 		}
 	}
 	wasStopped := instance.Status == "stopped"
+	fresh := enrollment != nil && opts.generatedName && !wasStopped && instance.Status != "sleeping"
 	if wasStopped || instance.Status == "sleeping" {
 		var err error
 		instance, err = wake(ctx, client, instance)
@@ -541,7 +547,7 @@ func prepareCreated(ctx context.Context, client *agent37.Client, enrollment *pee
 	}
 	proof, err := bootstrap(ctx, client, enrollment, instance, opts.name, sandboxBootstrap{
 		peerLinks: true, mayRestart: wasStopped, githubAccess: opts.githubAccess,
-		prepareDesktop: opts.up && !opts.noDesktop, playbook: opts.playbook, orchestrator: opts.orchestrator,
+		prepareDesktop: opts.up && !opts.noDesktop, fresh: fresh, playbook: opts.playbook, orchestrator: opts.orchestrator,
 	}, diagnostic)
 	if err == nil && !proof.ProviderReady {
 		notice(diagnostic, warning, "%s needs sign-in. Run t3-agent37 terminal %s.", providerLabel(provider), opts.name)

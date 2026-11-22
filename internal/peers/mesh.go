@@ -13,7 +13,10 @@ import (
 	"time"
 )
 
-const meshWorkers = 6
+const (
+	meshWorkers            = 6
+	meshLinkWorkersPerNode = 4
+)
 
 // MeshNode describes a managed sandbox with its verified private T3 address
 // and a way to issue a short-lived owner session for this environment.
@@ -202,7 +205,7 @@ func reconcileListedSource(ctx context.Context, source meshEndpoint, targets []m
 	}
 	completed := make([]bool, len(targets))
 	failures := make([]error, len(targets))
-	forMeshNode(ctx, len(targets), 2, func(i int) {
+	forMeshNode(ctx, len(targets), meshLinkWorkersPerNode, func(i int) {
 		target := targets[i]
 		if source.api.environmentID == target.api.environmentID {
 			return

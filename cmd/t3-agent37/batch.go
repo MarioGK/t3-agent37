@@ -71,6 +71,14 @@ func runBatch(ctx context.Context, client *agent37.Client, verifyEnrollment func
 			return err
 		}
 	}
+	if opts.playbook != nil && opts.playbook.terraScale() {
+		opts.orchestrator = newSharedOrchestrator()
+		if opts.orchestrator != nil && terraTemplate(opts.template) {
+			prepare, cancel := context.WithCancel(ctx)
+			defer cancel()
+			opts.orchestrator.startPreparation(prepare)
+		}
+	}
 	progress.setPhase("Checking OAuth and sandbox inventory")
 	instances, enrollment, err := batchPreflight(ctx, client, verifyEnrollment)
 	if err != nil {
@@ -82,9 +90,6 @@ func runBatch(ctx context.Context, client *agent37.Client, verifyEnrollment func
 	reserved, err := reserveSandboxNames(ctx, state, opts.namePrefix, instances, opts.batchSize)
 	if err != nil {
 		return err
-	}
-	if opts.playbook != nil && opts.playbook.terraScale() {
-		opts.orchestrator = newSharedOrchestrator()
 	}
 	parallel := min(opts.parallelism, len(reserved))
 	progress.preflightDone("Creating and setting up sandboxes")

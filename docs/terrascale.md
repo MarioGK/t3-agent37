@@ -82,8 +82,9 @@ addition to the memory in use by existing sandboxes. Agent37 enforces the
 
 Batch preflight checks OAuth and reads the Agent37 inventory concurrently.
 Each guest configures GitHub access while its private Tailscale endpoint comes
-up. Both steps finish before desktop pairing. To measure scheduling with fixed
-service delays and no cloud calls, run:
+up. Fresh batch launches enroll and start private Tailscale Serve in one guest
+request. The workspace and HTTPS checks finish before desktop pairing.
+To measure scheduling with fixed service delays and no cloud calls, run:
 
 ```sh
 go test ./cmd/t3-agent37 -run '^$' -bench '^BenchmarkUpPipeline$' -benchtime=8x -count=4

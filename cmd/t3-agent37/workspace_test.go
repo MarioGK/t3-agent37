@@ -285,11 +285,9 @@ func TestBatchWorkspaceFailureCanResumeByName(t *testing.T) {
 				}
 				sandbox.registered = true
 				execResult(nil)
-			case strings.Contains(request.Command, " tailnet-join "):
+			case strings.Contains(request.Command, " tailnet-publish "):
 				sandbox.joined = true
-				execResult(tailIdentity{ID: id, Hostname: "a37-" + name + "-" + id})
-			case strings.HasSuffix(request.Command, " tailnet-serve-peer"):
-				execResult(map[string]string{"URL": origin})
+				execResult(tailIdentity{ID: id, Hostname: "a37-" + name + "-" + id, URL: origin})
 			case strings.Contains(request.Command, "import remote, tailnet"):
 				if !strings.HasSuffix(request.Command, " "+shellQuote(workspaceReadyFile)) {
 					t.Error("discovery bypassed the workspace readiness check")

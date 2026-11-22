@@ -489,9 +489,6 @@ def manage_tailnet(action, *args):
     if action == "tailnet-restore":
         tailnet.restore()
         return
-    if action == "tailnet-serve-peer":
-        print(json.dumps({"url": tailnet.serve_peer(PORT)}))
-        return
     hostname, *files = args
     key = None
     if files:
@@ -503,7 +500,9 @@ def manage_tailnet(action, *args):
             path.unlink()
             key = source.read().strip()
     try:
-        print(json.dumps(tailnet.join(hostname, key)))
+        peer = tailnet.join(hostname, key)
+        peer["url"] = tailnet.serve_peer(PORT)
+        print(json.dumps(peer))
     except tailnet.EnrollmentRequired:
         print(json.dumps({"enrollmentRequired": True}))
 
@@ -531,5 +530,5 @@ if __name__ == "__main__":
                                  "--scope", "orchestration:read", "--scope", "orchestration:operate"],
                                 capture_output=True, text=True, check=True)
         print(result.stdout.strip())
-    elif action in {"tailnet-join", "tailnet-leave", "tailnet-serve-peer"}:
+    elif action in {"tailnet-publish", "tailnet-leave"}:
         manage_tailnet(action, *sys.argv[2:])

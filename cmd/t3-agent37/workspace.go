@@ -18,6 +18,7 @@ import (
 
 	"github.com/MarioGK/t3-agent37/internal/agent37"
 	flag "github.com/spf13/pflag"
+	"golang.org/x/sync/errgroup"
 )
 
 const (
@@ -222,16 +223,21 @@ func (playbook *workspacePlaybook) clone(ctx context.Context, client *agent37.Cl
 		}
 	}
 	notice(diagnostic, info, "%s Checking %d workspace repositories for updates", name, len(playbook.Repositories))
-	var failures []error
-	for group := range slices.Chunk(playbook.Repositories, workspaceCloneGroupSize) {
+	groups := slices.Collect(slices.Chunk(playbook.Repositories, workspaceCloneGroupSize))
+	failures := make([]error, len(groups))
+	var checkouts errgroup.Group
+	checkouts.SetLimit(2)
+	for i, group := range groups {
 		if err := ctx.Err(); err != nil {
-			return errors.Join(errors.Join(failures...), err)
+			break
 		}
-		if err := cloneWorkspaceGroup(ctx, client, id, name, baseCommand, playbook.Path, group); err != nil {
-			failures = append(failures, err)
-		}
+		checkouts.Go(func() error {
+			failures[i] = cloneWorkspaceGroup(ctx, client, id, name, baseCommand, playbook.Path, group)
+			return nil
+		})
 	}
-	if err := errors.Join(failures...); err != nil {
+	_ = checkouts.Wait()
+	if err := errors.Join(errors.Join(failures...), ctx.Err()); err != nil {
 		return err
 	}
 	notice(diagnostic, success, "%s Checkouts ready at %s", name, playbook.Path)
@@ -270,7 +276,7 @@ func (playbook *workspacePlaybook) applyTerraScaleManifest(manifest string) erro
 	return playbook.validate()
 }
 
-func (playbook workspacePlaybook) installTerraScaleTools(ctx context.Context, client *agent37.Client, id, name string, shared *sharedOrchestrator, diagnostic io.Writer) error {
+func (playbook workspacePlaybook) installTerraScaleTools(ctx context.Context, client *agent37.Client, id, name string, shared *sharedOrchestrator, staged *stagedOrchestrator, diagnostic io.Writer) error {
 	started := time.Now()
 	notice(diagnostic, info, "%s Preparing TerraScale skills and tools", name)
 	command := "python3 -B -c " + shellQuote(guestTerraScale) + " " + shellQuote(playbook.Path)
@@ -284,7 +290,7 @@ func (playbook workspacePlaybook) installTerraScaleTools(ctx context.Context, cl
 	}
 	result, err := client.ExecJSON[toolResult](ctx, id, probe)
 	if err == nil && shared != nil && result.Stage == "share_orchestrator" {
-		shareErr := shared.install(ctx, client, id, command, result.orchestratorTarget)
+		shareErr := shared.installStaged(ctx, client, id, command, result.orchestratorTarget, staged)
 		switch {
 		case shareErr == nil:
 			notice(diagnostic, success, "%s Verified shared ts-orch build", name)

@@ -56,6 +56,11 @@ func (target orchestratorTarget) matches(info *buildinfo.BuildInfo) bool {
 type sharedOrchestrator struct {
 	cache, git, goTool string
 	builds             singleflight.Group
+	latestRef          chan struct{}
+	latestReady        chan struct{}
+	latestTarget       orchestratorTarget
+	latestBundle       orchestratorBundle
+	latestErr          error
 }
 
 type orchestratorBundle struct {
@@ -71,6 +76,54 @@ func newSharedOrchestrator() *sharedOrchestrator {
 		return nil
 	}
 	return &sharedOrchestrator{cache: filepath.Join(cache, "t3-agent37", "ts-orch"), git: git, goTool: goTool}
+}
+
+// The TerraScale image targets linux/amd64. Only the exact commit and
+// compiler reported by a guest can use a build from this preparation.
+func (shared *sharedOrchestrator) startPreparation(ctx context.Context) {
+	shared.latestRef = make(chan struct{})
+	shared.latestReady = make(chan struct{})
+	go func() {
+		defer close(shared.latestReady)
+		shared.latestTarget = shared.latestRevision(ctx)
+		close(shared.latestRef)
+		if shared.latestTarget.valid() {
+			shared.latestBundle, shared.latestErr = shared.bundle(ctx, shared.latestTarget)
+		}
+	}()
+}
+
+func (shared *sharedOrchestrator) latestRevision(ctx context.Context) orchestratorTarget {
+	lookup, stop := context.WithTimeout(ctx, 6*time.Second)
+	defer stop()
+	stage, err := os.MkdirTemp("", "t3-agent37-orchestrator-ref-")
+	if err != nil {
+		return orchestratorTarget{}
+	}
+	defer os.RemoveAll(stage)
+	command := exec.CommandContext(lookup, shared.git, "ls-remote", "--exit-code", "--", orchestratorRepo, "HEAD")
+	command.Dir = stage
+	command.Env = orchestratorEnv()
+	output, err := command.Output()
+	if err != nil {
+		return orchestratorTarget{}
+	}
+	revision, ref, found := strings.Cut(strings.TrimSpace(string(output)), "\t")
+	if !found || ref != "HEAD" {
+		return orchestratorTarget{}
+	}
+	version, err := shared.goVersion(lookup)
+	if err != nil {
+		return orchestratorTarget{}
+	}
+	return orchestratorTarget{Revision: revision, Arch: "amd64", GoVersion: version}
+}
+
+func (shared *sharedOrchestrator) goVersion(ctx context.Context) (string, error) {
+	command := exec.CommandContext(ctx, shared.goTool, "env", "GOVERSION")
+	command.Env = append(os.Environ(), "GOENV=off", "GOTOOLCHAIN=local")
+	version, err := command.Output()
+	return strings.TrimSpace(string(version)), err
 }
 
 func (shared *sharedOrchestrator) bundle(ctx context.Context, target orchestratorTarget) (orchestratorBundle, error) {
@@ -126,10 +179,8 @@ func (shared *sharedOrchestrator) buildBundle(ctx context.Context, key string, t
 }
 
 func (shared *sharedOrchestrator) build(ctx context.Context, target orchestratorTarget, binary string) error {
-	check := exec.CommandContext(ctx, shared.goTool, "env", "GOVERSION")
-	check.Env = append(os.Environ(), "GOTOOLCHAIN=local")
-	version, err := check.Output()
-	if err != nil || strings.TrimSpace(string(version)) != target.GoVersion {
+	version, err := shared.goVersion(ctx)
+	if err != nil || version != target.GoVersion {
 		return errors.New("the workstation Go version does not match the sandbox")
 	}
 	stage, err := os.MkdirTemp(shared.cache, ".build-")
@@ -137,20 +188,11 @@ func (shared *sharedOrchestrator) build(ctx context.Context, target orchestrator
 		return err
 	}
 	defer os.RemoveAll(stage)
-	env := slices.DeleteFunc(os.Environ(), func(entry string) bool {
-		name, _, _ := strings.Cut(entry, "=")
-		switch strings.ToUpper(name) {
-		case "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY",
-			"GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_INDEX_FILE", "GIT_CONFIG", "GOFLAGS":
-			return true
-		}
-		return false
-	})
+	env := orchestratorEnv()
 	git := func(args ...string) error {
 		command := exec.CommandContext(ctx, shared.git, args...)
 		command.Dir = stage
-		command.Env = append(env, "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_NOSYSTEM=1",
-			"GIT_CONFIG_COUNT=0", "GIT_TERMINAL_PROMPT=0")
+		command.Env = env
 		return command.Run()
 	}
 	if err := git("init", "--quiet"); err != nil {
@@ -177,22 +219,51 @@ func (shared *sharedOrchestrator) build(ctx context.Context, target orchestrator
 	return os.Rename(artifact, binary)
 }
 
+func orchestratorEnv() []string {
+	env := slices.DeleteFunc(os.Environ(), func(entry string) bool {
+		name, _, _ := strings.Cut(entry, "=")
+		switch strings.ToUpper(name) {
+		case "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY",
+			"GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_INDEX_FILE", "GIT_CONFIG", "GIT_CONFIG_PARAMETERS", "GOFLAGS":
+			return true
+		}
+		return false
+	})
+	return append(env, "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_NOSYSTEM=1",
+		"GIT_CONFIG_COUNT=0", "GIT_TERMINAL_PROMPT=0")
+}
+
 func (shared *sharedOrchestrator) install(ctx context.Context, client *agent37.Client, id, command string, target orchestratorTarget) error {
 	bundle, err := shared.bundle(ctx, target)
 	if err != nil {
 		return err
 	}
+	archive, err := bundle.upload(ctx, client, id)
+	if err == nil {
+		err = archive.install(ctx, client, id, command)
+	}
+	if err != nil {
+		archive.discard(ctx, client, id)
+	}
+	return err
+}
+
+type orchestratorArchive struct{ filename, digest string }
+
+func (bundle orchestratorBundle) upload(ctx context.Context, client *agent37.Client, id string) (orchestratorArchive, error) {
 	nonce := make([]byte, 16)
-	if _, err = rand.Read(nonce); err != nil {
-		return err
+	if _, err := rand.Read(nonce); err != nil {
+		return orchestratorArchive{}, err
 	}
-	filename := "ts-orch-" + hex.EncodeToString(nonce) + ".gz"
-	if err = uploadGuestFile(ctx, func() error {
-		return client.UploadOrchestrator(ctx, id, filename, bundle.body)
-	}); err != nil {
-		return err
-	}
-	result, err := client.ExecJSON[struct{ Stage string }](ctx, id, command+" install-shared "+filename+" "+bundle.digest)
+	archive := orchestratorArchive{filename: "ts-orch-" + hex.EncodeToString(nonce) + ".gz", digest: bundle.digest}
+	err := uploadGuestFile(ctx, func() error {
+		return client.UploadOrchestrator(ctx, id, archive.filename, bundle.body)
+	})
+	return archive, err
+}
+
+func (archive orchestratorArchive) install(ctx context.Context, client *agent37.Client, id, command string) error {
+	result, err := client.ExecJSON[struct{ Stage string }](ctx, id, command+" install-shared "+archive.filename+" "+archive.digest)
 	if err != nil {
 		return err
 	}
@@ -200,4 +271,76 @@ func (shared *sharedOrchestrator) install(ctx context.Context, client *agent37.C
 		return errors.New("sandbox did not verify the shared orchestrator")
 	}
 	return nil
+}
+
+func (archive orchestratorArchive) discard(ctx context.Context, client *agent37.Client, id string) {
+	if archive.filename != "" {
+		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		_, _ = client.Exec(cleanup, id, `unlink "$HOME/.local/share/t3-agent37/`+archive.filename+`"`)
+	}
+}
+
+type stagedOrchestrator struct {
+	stop    context.CancelFunc
+	done    chan struct{}
+	archive orchestratorArchive
+	err     error
+}
+
+func (shared *sharedOrchestrator) stage(ctx context.Context, client *agent37.Client, id, imageRevision string) *stagedOrchestrator {
+	ctx, stop := context.WithCancel(ctx)
+	staged := &stagedOrchestrator{stop: stop, done: make(chan struct{})}
+	go func() {
+		defer close(staged.done)
+		select {
+		case <-ctx.Done():
+			return
+		case <-shared.latestRef:
+		}
+		if shared.latestTarget.Revision == imageRevision {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-shared.latestReady:
+		}
+		staged.err = shared.latestErr
+		if len(shared.latestBundle.body) != 0 {
+			staged.archive, staged.err = shared.latestBundle.upload(ctx, client, id)
+		}
+	}()
+	return staged
+}
+
+func (staged *stagedOrchestrator) finish(ctx context.Context, client *agent37.Client, id string) {
+	staged.stop()
+	<-staged.done
+	staged.archive.discard(ctx, client, id)
+}
+
+func (shared *sharedOrchestrator) installStaged(ctx context.Context, client *agent37.Client, id, command string, target orchestratorTarget, staged *stagedOrchestrator) error {
+	if staged != nil {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-shared.latestRef:
+		}
+		if shared.latestTarget == target {
+			<-staged.done
+			if staged.err != nil {
+				return staged.err
+			}
+			if staged.archive.filename != "" {
+				if err := staged.archive.install(ctx, client, id, command); err == nil {
+					staged.archive = orchestratorArchive{}
+					return nil
+				}
+			}
+		} else {
+			staged.stop()
+		}
+	}
+	return shared.install(ctx, client, id, command, target)
 }

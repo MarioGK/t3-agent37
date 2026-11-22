@@ -12,7 +12,35 @@ from types import SimpleNamespace
 from urllib.error import HTTPError
 
 from remote import machine_info_with_label, select_runtime, unpack_runtime
-from remote import desktop_confirmed, pairing_status, provider_ready, register_projects
+from remote import desktop_confirmed, manage_tailnet, pairing_status, provider_ready, register_projects
+from tailnet import EnrollmentRequired
+
+
+class TailnetPublishTest(unittest.TestCase):
+    def test_consumes_private_key_and_publishes_in_one_request(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            filename = "tailscale-enrollment-" + "a" * 32
+            key = root / filename
+            key.write_text("fixture-enrollment")
+            origin = "https://sandbox.example.ts.net"
+            with (patch("remote.ROOT", root),
+                  patch("tailnet.join", return_value={"id": "fixture", "hostname": "sandbox"}) as join,
+                  patch("tailnet.serve_peer", return_value=origin) as serve,
+                  redirect_stdout(io.StringIO()) as output):
+                manage_tailnet("tailnet-publish", "sandbox", filename)
+            join.assert_called_once_with("sandbox", "fixture-enrollment")
+            serve.assert_called_once()
+            self.assertFalse(key.exists())
+            self.assertEqual(json.loads(output.getvalue()), {"id": "fixture", "hostname": "sandbox", "url": origin})
+
+    def test_requests_enrollment_before_publishing_an_unjoined_guest(self):
+        with (patch("tailnet.join", side_effect=EnrollmentRequired),
+              patch("tailnet.serve_peer") as serve,
+              redirect_stdout(io.StringIO()) as output):
+            manage_tailnet("tailnet-publish", "sandbox")
+        serve.assert_not_called()
+        self.assertEqual(json.loads(output.getvalue()), {"enrollmentRequired": True})
 
 
 class DesktopPairingTest(unittest.TestCase):
