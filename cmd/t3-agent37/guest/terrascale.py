@@ -1,7 +1,10 @@
 """Prepare the checked-out TerraScale workspace for work in a disposable guest."""
 
+import gzip
+import hashlib
 import json
 import os
+import platform
 from pathlib import Path
 import re
 import shutil
@@ -75,17 +78,51 @@ def prepare_mise(home, orchestrator):
         raise ValueError("Mise selected another Go version")
 
 
-def install_orchestrator(orchestrator, home):
+MAX_ORCHESTRATOR_SIZE = 200 * 1024 * 1024
+
+
+def workspace_root(home, workspace_path):
+    workspace = (home / workspace_path.removeprefix("~/")).resolve(strict=True)
+    if not workspace_path.startswith("~/") or workspace == home or not workspace.is_relative_to(home):
+        raise ValueError("Invalid TerraScale workspace path")
+    return workspace
+
+
+def build_info(binary, home):
+    return dict(line.removeprefix("\tbuild\t").partition("=")[::2]
+                for line in run(["go", "version", "-m", str(binary)], cwd=home).splitlines()
+                if line.startswith("\tbuild\t"))
+
+
+def orchestrator_target(orchestrator):
+    revision = run(["git", "rev-parse", "HEAD"], cwd=orchestrator)
+    platform_arch = {"x86_64": "amd64", "aarch64": "arm64"}.get(platform.machine())
+    if not platform_arch or platform.system() != "Linux":
+        return None
+    if not re.fullmatch(r"[0-9a-f]{40}", revision) or run(
+            ["git", "status", "--porcelain", "--untracked-files=normal"], cwd=orchestrator):
+        return None
+    version = run(["go", "env", "GOVERSION"], cwd=orchestrator)
+    return {"revision": revision, "arch": platform_arch, "go_version": version}
+
+
+def install_orchestrator(orchestrator, home, request_shared=False):
     destination = home / ".local/bin/ts-orch"
     revision = run(["git", "rev-parse", "HEAD"], cwd=orchestrator)
     installed = destination if destination.exists() else Path("/usr/local/bin/ts-orch")
     if installed.is_file() and os.access(installed, os.X_OK):
         try:
-            build_info = run(["go", "version", "-m", str(installed)], cwd=home)
-            if ("\tbuild\tvcs.revision=" + revision in build_info and
-                    "\tbuild\tvcs.modified=false" in build_info):
-                return
+            info = build_info(installed, home)
+            if info.get("vcs.revision") == revision and info.get("vcs.modified") == "false":
+                return None
         except subprocess.CalledProcessError:
+            pass
+    if request_shared:
+        try:
+            target = orchestrator_target(orchestrator)
+            if target is not None:
+                return target
+        except (OSError, subprocess.SubprocessError):
             pass
     env = {**os.environ, "GOTOOLCHAIN": "local", "GIT_TERMINAL_PROMPT": "0"}
     with tempfile.TemporaryDirectory(prefix=".ts-orch-", dir=destination.parent) as stage:
@@ -95,19 +132,51 @@ def install_orchestrator(orchestrator, home):
         binary.replace(destination)
 
 
-def prepare(workspace_path):
+def install_shared(workspace_path, filename, digest):
+    home = Path.home().resolve()
+    if not re.fullmatch(r"ts-orch-[0-9a-f]{32}\.gz", filename) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise ValueError("Invalid shared orchestrator artifact")
+    compressed = home / ".local/share/t3-agent37" / filename
+    try:
+        orchestrator = workspace_root(home, workspace_path) / "ts-orchestrator"
+        target = orchestrator_target(orchestrator)
+        if target is None:
+            raise ValueError("Shared build requires a clean checkout")
+        destination = home / ".local/bin/ts-orch"
+        with tempfile.TemporaryDirectory(prefix=".ts-orch-", dir=destination.parent) as directory:
+            staged = Path(directory) / "ts-orch"
+            checksum = hashlib.sha256()
+            size = 0
+            with gzip.open(compressed, "rb") as source, staged.open("xb") as output:
+                while data := source.read(1024 * 1024):
+                    size += len(data)
+                    if size > MAX_ORCHESTRATOR_SIZE:
+                        raise ValueError("Shared orchestrator exceeds the size limit")
+                    checksum.update(data)
+                    output.write(data)
+            if checksum.hexdigest() != digest:
+                raise ValueError("Shared orchestrator checksum mismatch")
+            info = build_info(staged, home)
+            if (info.get("vcs.revision") != target["revision"] or info.get("vcs.modified") != "false"
+                    or info.get("GOOS") != "linux" or info.get("GOARCH") != target["arch"]):
+                raise ValueError("Shared orchestrator targets another revision or platform")
+            staged.chmod(0o755)
+            staged.replace(destination)
+    finally:
+        compressed.unlink(missing_ok=True)
+
+
+def prepare(workspace_path, request_shared=False):
     home = Path.home().resolve()
     stage = "skills"
     try:
-        workspace = (home / workspace_path.removeprefix("~/")).resolve(strict=True)
-        if not workspace_path.startswith("~/") or workspace == home or not workspace.is_relative_to(home):
-            return stage
+        workspace = workspace_root(home, workspace_path)
         orchestrator = workspace / "ts-orchestrator"
         install_links(workspace, home)
         stage = "toolchain"
         for tool in ("git", "gh", "dotnet", "go", "node", "npm", "python3", "rustc", "codex", "claude", "opencode", "ts"):
             if shutil.which(tool) is None:
-                return stage
+                return {"stage": stage}
         product = workspace / "terrascale"
         run(["dotnet", "--version"], cwd=product)
         if (product / ".config/dotnet-tools.json").is_file():
@@ -115,11 +184,22 @@ def prepare(workspace_path):
         stage = "mise"
         prepare_mise(home, orchestrator)
         stage = "orchestrator"
-        install_orchestrator(orchestrator, home)
+        target = install_orchestrator(orchestrator, home, request_shared)
+        if target is not None:
+            return {"stage": "share_orchestrator", **target}
     except (OSError, ValueError, KeyError, subprocess.SubprocessError):
-        return stage
-    return "ready"
+        return {"stage": stage}
+    return {"stage": "ready"}
 
 
 if __name__ == "__main__":
-    print(json.dumps({"stage": prepare(sys.argv[1])}))
+    workspace, *mode = sys.argv[1:]
+    if mode and mode[0] == "install-shared":
+        try:
+            install_shared(workspace, *mode[1:])
+            response = {"stage": "ready"}
+        except (OSError, EOFError, ValueError, subprocess.SubprocessError):
+            response = {"stage": "orchestrator"}
+    else:
+        response = prepare(workspace, mode == ["request-shared"])
+    print(json.dumps(response))

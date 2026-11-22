@@ -172,6 +172,7 @@ type sandboxBootstrap struct {
 	peerLinks, mayRestart, githubAccess, skipWorkspace bool
 	prepareDesktop                                     bool
 	playbook                                           *workspacePlaybook
+	orchestrator                                       *sharedOrchestrator
 }
 
 func bootstrap(ctx context.Context, client *agent37.Client, enrollment *peers.Enrollment, instance agent37.Instance, name string, settings sandboxBootstrap, diagnostic io.Writer) (setupProof, error) {
@@ -269,7 +270,7 @@ func bootstrap(ctx context.Context, client *agent37.Client, enrollment *peers.En
 				var toolErr error
 				if playbook.terraScale() {
 					installTools = func() {
-						toolErr = playbook.installTerraScaleTools(ctx, client, instance.ID, name, diagnostic)
+						toolErr = playbook.installTerraScaleTools(ctx, client, instance.ID, name, settings.orchestrator, diagnostic)
 					}
 				}
 				projectErr := finishSandboxSetup(ctx, installTools, func() error {
@@ -540,7 +541,7 @@ func prepareCreated(ctx context.Context, client *agent37.Client, enrollment *pee
 	}
 	proof, err := bootstrap(ctx, client, enrollment, instance, opts.name, sandboxBootstrap{
 		peerLinks: true, mayRestart: wasStopped, githubAccess: opts.githubAccess,
-		prepareDesktop: opts.up && !opts.noDesktop, playbook: opts.playbook,
+		prepareDesktop: opts.up && !opts.noDesktop, playbook: opts.playbook, orchestrator: opts.orchestrator,
 	}, diagnostic)
 	if err == nil && !proof.ProviderReady {
 		notice(diagnostic, warning, "%s needs sign-in. Run t3-agent37 terminal %s.", providerLabel(provider), opts.name)

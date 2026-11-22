@@ -270,11 +270,32 @@ func (playbook *workspacePlaybook) applyTerraScaleManifest(manifest string) erro
 	return playbook.validate()
 }
 
-func (playbook workspacePlaybook) installTerraScaleTools(ctx context.Context, client *agent37.Client, id, name string, diagnostic io.Writer) error {
+func (playbook workspacePlaybook) installTerraScaleTools(ctx context.Context, client *agent37.Client, id, name string, shared *sharedOrchestrator, diagnostic io.Writer) error {
 	started := time.Now()
 	notice(diagnostic, info, "%s Preparing TerraScale skills and tools", name)
 	command := "python3 -B -c " + shellQuote(guestTerraScale) + " " + shellQuote(playbook.Path)
-	result, err := client.ExecJSON[struct{ Stage string }](ctx, id, command)
+	type toolResult struct {
+		Stage string `json:"stage"`
+		orchestratorTarget
+	}
+	probe := command
+	if shared != nil {
+		probe += " request-shared"
+	}
+	result, err := client.ExecJSON[toolResult](ctx, id, probe)
+	if err == nil && shared != nil && result.Stage == "share_orchestrator" {
+		shareErr := shared.install(ctx, client, id, command, result.orchestratorTarget)
+		switch {
+		case shareErr == nil:
+			notice(diagnostic, success, "%s Verified shared ts-orch build", name)
+			result.Stage = "ready"
+		case ctx.Err() != nil:
+			err = ctx.Err()
+		default:
+			notice(diagnostic, warning, "%s Shared ts-orch unavailable. Building in the sandbox", name)
+			result, err = client.ExecJSON[toolResult](ctx, id, command)
+		}
+	}
 	if err != nil {
 		return fmt.Errorf("could not prepare TerraScale tools in %s: %w", name, err)
 	}

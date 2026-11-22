@@ -83,6 +83,9 @@ func runBatch(ctx context.Context, client *agent37.Client, verifyEnrollment func
 	if err != nil {
 		return err
 	}
+	if opts.playbook != nil && opts.playbook.terraScale() {
+		opts.orchestrator = newSharedOrchestrator()
+	}
 	parallel := min(opts.parallelism, len(reserved))
 	progress.preflightDone("Creating and setting up sandboxes")
 	notice(progress, info, "Provisioning %d Agent37 sandboxes, up to %d at a time…", len(reserved), parallel)

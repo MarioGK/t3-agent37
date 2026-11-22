@@ -42,6 +42,7 @@ type options struct {
 	cpu, ram                         *int
 	workspace                        *bool
 	playbook                         *workspacePlaybook
+	orchestrator                     *sharedOrchestrator
 	up                               bool
 	showSize                         bool
 	yes, dryRun, pair, tailscale     bool

@@ -23,12 +23,13 @@ const (
 )
 
 var (
-	idPattern          = regexp.MustCompile("^[a-z0-9]{10}$")
-	errorCodePattern   = regexp.MustCompile("^[a-z_]{1,80}$")
-	enrollmentPattern  = regexp.MustCompile("^tailscale-enrollment-[a-f0-9]{32}$")
-	githubStagePattern = regexp.MustCompile("^github-handoff-[a-f0-9]{32}$")
-	errRequest         = errors.New("Agent37 request failed or returned an invalid response")
-	errT3Ready         = errors.New("protected T3 endpoint did not become ready. Check instance status and retry")
+	idPattern           = regexp.MustCompile("^[a-z0-9]{10}$")
+	errorCodePattern    = regexp.MustCompile("^[a-z_]{1,80}$")
+	enrollmentPattern   = regexp.MustCompile("^tailscale-enrollment-[a-f0-9]{32}$")
+	githubStagePattern  = regexp.MustCompile("^github-handoff-[a-f0-9]{32}$")
+	orchestratorPattern = regexp.MustCompile(`^ts-orch-[a-f0-9]{32}\.gz$`)
+	errRequest          = errors.New("Agent37 request failed or returned an invalid response")
+	errT3Ready          = errors.New("protected T3 endpoint did not become ready. Check instance status and retry")
 )
 
 type Error struct {
@@ -318,6 +319,14 @@ func (c *Client) UploadGitHubHandoff(ctx context.Context, id, stage string, payl
 		return errors.New("invalid GitHub handoff directory")
 	}
 	return c.uploadPrivateFile(ctx, id, stage+"/access.json", payload)
+}
+
+// UploadOrchestrator sends a compressed public build through the protected guest file API.
+func (c *Client) UploadOrchestrator(ctx context.Context, id, filename string, payload []byte) error {
+	if !orchestratorPattern.MatchString(filename) {
+		return errors.New("invalid orchestrator artifact name")
+	}
+	return c.uploadPrivateFile(ctx, id, filename, payload)
 }
 
 func (c *Client) uploadPrivateFile(ctx context.Context, id, relativePath string, contents []byte) error {

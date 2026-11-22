@@ -116,9 +116,11 @@ Use `up --workspace=false` to skip the playbook for a launch. Set
 
 With `TerraScale/workspace` as `root_repository`, `up` also reads its
 committed `repos.txt`, installs the workspace's skills and helper links,
-checks the .NET and Mise Go toolchains, restores the workspace's .NET tools,
-and builds `ts-orch` from the cloned revision when needed. T3 pairing waits
-for the tools and projects to be ready.
+and verifies the .NET and Mise Go toolchains. When the image's `ts-orch`
+is stale, `up <count>` can build the current revision once with a matching
+workstation Go toolchain and share it across the batch. Sandboxes can build
+locally when the shared build is unavailable. T3 pairing waits until the
+tools and projects are ready.
 
 On another PC, join the same tailnet, run `t3-agent37 setup`, then run
 `t3-agent37 link`. It wakes existing sandboxes as needed and opens each
