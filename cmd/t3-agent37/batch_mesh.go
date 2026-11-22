@@ -49,6 +49,7 @@ func batchMeshNodes(ctx context.Context, client *agent37.Client, inventory []age
 			failures = append(failures, fmt.Errorf("%s: sandbox needs a fresh boot for T3 peer routing", item.name))
 		}
 		node.CleanupOnly = pending || item.err != nil || !item.proof.PeerProxy || item.proof.EnvironmentID == ""
+		node.PreparedOwner = item.proof.preparedOwner
 		nodes = append(nodes, node)
 	}
 	for _, item := range batch {

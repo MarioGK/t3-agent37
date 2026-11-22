@@ -225,6 +225,7 @@ func (playbook *workspacePlaybook) clone(ctx context.Context, client *agent37.Cl
 	notice(diagnostic, info, "%s Checking %d workspace repositories for updates", name, len(playbook.Repositories))
 	groups := slices.Collect(slices.Chunk(playbook.Repositories, workspaceCloneGroupSize))
 	failures := make([]error, len(groups))
+	reused := make([]int, len(groups))
 	var checkouts errgroup.Group
 	checkouts.SetLimit(2)
 	for i, group := range groups {
@@ -232,13 +233,22 @@ func (playbook *workspacePlaybook) clone(ctx context.Context, client *agent37.Cl
 			break
 		}
 		checkouts.Go(func() error {
-			failures[i] = cloneWorkspaceGroup(ctx, client, id, name, baseCommand, playbook.Path, group)
+			reused[i], failures[i] = cloneWorkspaceGroup(ctx, client, id, name, baseCommand, playbook.Path, group)
 			return nil
 		})
 	}
 	_ = checkouts.Wait()
 	if err := errors.Join(errors.Join(failures...), ctx.Err()); err != nil {
 		return err
+	}
+	if os.Getenv("T3_AGENT37_TIMINGS") == "1" {
+		var total int
+		for _, count := range reused {
+			total += count
+		}
+		if total > 0 {
+			notice(diagnostic, info, "%s Reused %d baked worktrees", name, total)
+		}
 	}
 	notice(diagnostic, success, "%s Checkouts ready at %s", name, playbook.Path)
 	launchTiming(diagnostic, name, "Repository checkout", started)
@@ -318,26 +328,30 @@ func (playbook workspacePlaybook) installTerraScaleTools(ctx context.Context, cl
 }
 
 // A bounded group fits inside the same exec timeout as a single checkout.
-func cloneWorkspaceGroup(ctx context.Context, client *agent37.Client, id, name, baseCommand, workspace string, repos []workspaceRepository) error {
+func cloneWorkspaceGroup(ctx context.Context, client *agent37.Client, id, name, baseCommand, workspace string, repos []workspaceRepository) (int, error) {
 	payload, err := json.Marshal(repos)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	result, err := client.ExecJSON[struct{ Statuses []string }](ctx, id, baseCommand+" --batch "+shellQuote(string(payload)))
 	if err != nil {
-		return fmt.Errorf("could not check out workspace repositories in %s: %w", name, err)
+		return 0, fmt.Errorf("could not check out workspace repositories in %s: %w", name, err)
 	}
 	if len(result.Statuses) != len(repos) {
-		return errors.New("sandbox returned incomplete checkout results")
+		return 0, errors.New("sandbox returned incomplete checkout results")
 	}
 	var failures []error
+	var seeded int
 	for i, status := range result.Statuses {
+		if status == "seeded" {
+			seeded++
+		}
 		repo := repos[i]
 		if err := checkoutError(status, workspace, name, repo.Repo, repo.directory()); err != nil {
 			failures = append(failures, err)
 		}
 	}
-	return errors.Join(failures...)
+	return seeded, errors.Join(failures...)
 }
 
 func cloneWorkspaceRepository(ctx context.Context, client *agent37.Client, id, name, baseCommand, workspace string, repo workspaceRepository, folder string) error {
@@ -351,7 +365,7 @@ func cloneWorkspaceRepository(ctx context.Context, client *agent37.Client, id, n
 
 func checkoutError(status, workspace, name, repo, folder string) error {
 	switch status {
-	case "cloned", "existing":
+	case "cloned", "existing", "seeded":
 		return nil
 	case "conflict":
 		return fmt.Errorf("%s in %s conflicts with the checkout of %s. Resolve the conflict before retrying", path.Join(workspace, folder), name, repo)

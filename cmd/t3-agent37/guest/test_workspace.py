@@ -122,6 +122,56 @@ class WorkspaceTest(unittest.TestCase):
                          self.git("-C", str(self.source), "rev-parse", "HEAD"))
         self.git("-C", str(checkout), "diff", "--quiet", "HEAD")
 
+    def bake(self, name):
+        snapshots = self.home / "worktree-snapshots"
+        snapshot = snapshots / "example-org" / name
+        snapshot.parent.mkdir(parents=True, exist_ok=True)
+        self.git("clone", "https://github.com/example-org/" + name + ".git", str(snapshot))
+        self.enterContext(patch.object(workspace, "PUBLIC_WORKTREE_SNAPSHOTS", snapshots))
+        return snapshot
+
+    def test_baked_checkout_fast_forwards_without_recloning(self):
+        self.publish("example-app")
+        snapshot = self.bake("example-app")
+        self.advance("example-app", "new-file")
+        real_run = subprocess.run
+
+        def check_command(args, **kwargs):
+            self.assertFalse("clone" in args, "local snapshot should avoid a fresh clone")
+            return real_run(args, **kwargs)
+
+        with patch.object(workspace.subprocess, "run", side_effect=check_command):
+            self.assertEqual(self.clone("example-app"), "seeded")
+        checkout = self.root / "example-app"
+        self.assertFalse((snapshot / "new-file").exists())
+        self.assertEqual((checkout / "new-file").read_text(), "updated upstream")
+        self.assertEqual(self.git("-C", str(checkout), "rev-parse", "HEAD"),
+                         self.git("-C", str(self.source), "rev-parse", "HEAD"))
+        self.git("-C", str(checkout), "diff", "--quiet", "HEAD")
+
+    def test_baked_checkout_reclones_after_upstream_rewinds(self):
+        self.publish("example-app")
+        original = self.git("-C", str(self.source), "rev-parse", "HEAD")
+        self.advance("example-app", "later-file")
+        snapshot = self.bake("example-app")
+        self.git("-C", str(self.source), "push", "--force", str(self.remotes / "example-app.git"),
+                 original + ":refs/heads/main")
+        self.assertEqual(self.clone("example-app"), "cloned")
+        checkout = self.root / "example-app"
+        self.assertTrue((snapshot / "later-file").is_file())
+        self.assertFalse((checkout / "later-file").exists())
+        self.assertEqual(self.git("-C", str(checkout), "rev-parse", "HEAD"), original)
+
+    def test_explicit_branch_clones_without_reading_baked_checkout(self):
+        self.publish("example-app")
+        self.bake("example-app")
+        self.git("-C", str(self.source), "switch", "-c", "other")
+        self.git("-C", str(self.source), "push", str(self.remotes / "example-app.git"), "other")
+        with patch.object(workspace, "use_snapshot") as use_snapshot:
+            self.assertEqual(self.clone("example-app", "other"), "cloned")
+        use_snapshot.assert_not_called()
+        self.assertEqual(self.git("-C", str(self.root / "example-app"), "branch", "--show-current"), "other")
+
     def test_refresh_fast_forwards_and_keeps_unrelated_local_work(self):
         self.publish("example-app")
         self.assertEqual(self.clone("example-app"), "cloned")

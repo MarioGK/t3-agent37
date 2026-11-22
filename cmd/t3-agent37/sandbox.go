@@ -56,6 +56,7 @@ type setupProof struct {
 	TailnetURL       string `json:"-"`
 	RequestedName    string `json:"-"`
 	preparedPairing  desktopPairing
+	preparedOwner    *peers.PreparedOwnerSession
 }
 
 func shellQuote(value string) string {
@@ -252,6 +253,11 @@ func bootstrap(ctx context.Context, client *agent37.Client, enrollment *peers.En
 		}
 	}
 	launchTiming(diagnostic, name, "Guest T3 startup", stageStart)
+	if settings.fresh && proof.PeerProxy {
+		proof.preparedOwner = peers.PrepareOwnerSession(ctx, func(ctx context.Context) (string, error) {
+			return issueSandboxOwner(ctx, client, instance.ID)
+		})
+	}
 	if proof.RequestedName != "" && proof.Label != proof.RequestedName {
 		if proof.LabelSaved {
 			notice(diagnostic, info, "T3 will show %s after the sandbox restarts.", proof.RequestedName)

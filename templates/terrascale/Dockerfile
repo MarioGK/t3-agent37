@@ -109,13 +109,14 @@ RUN set -eu; \
     ln -s /usr/local/go "$MISE_DATA_DIR/installs/go/$version"
 
 
-# Cache public Git objects only. Each sandbox still checks GitHub for current refs.
+# Bake public working trees without credentials. Guests still check GitHub for current refs.
 RUN set -eu; \
     stage="$(mktemp -d)"; \
     trap 'rm -rf "$stage"' EXIT; \
     export HOME="$stage" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0; \
+    snapshots=/opt/terrascale/worktree-snapshots/terrascale; \
     cache=/opt/terrascale/git-cache/terrascale; \
-    install -d -m 0755 "$cache"; \
+    install -d -m 0755 "$snapshots" "$cache"; \
     for repo in branch-action homebrew-tap terraform-provider-terrascale terrascale \
       test-skills ts-orchestrator ts-resources; do \
       git -c credential.helper= clone --quiet --filter=blob:none \
@@ -125,9 +126,11 @@ RUN set -eu; \
           go build -trimpath -buildvcs=true -ldflags="-s -w" \
           -o /usr/local/bin/ts-orch ./cmd/terrascale-orchestrator); \
       fi; \
-      mv "$stage/$repo/.git" "$cache/$repo.git"; \
+      test -z "$(git -C "$stage/$repo" status --porcelain)"; \
+      mv "$stage/$repo" "$snapshots/$repo"; \
+      ln -s "$snapshots/$repo/.git" "$cache/$repo.git"; \
     done; \
-    chmod -R a+rX "$cache"
+    chmod -R a+rX "$snapshots"
 
 RUN set -eu; \
     export PATH=/usr/local/bin:/usr/bin:/bin; \

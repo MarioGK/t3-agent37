@@ -25,6 +25,7 @@ type MeshNode struct {
 	URL           string
 	EnvironmentID string
 	IssueToken    func(context.Context) (string, error)
+	PreparedOwner *PreparedOwnerSession
 	// ListLinksJSON is optional and returns the output of the local T3
 	// environment list command. Dry runs only use this read-only route.
 	ListLinksJSON func(context.Context) ([]byte, error)
@@ -56,7 +57,8 @@ func meshNodes(configured []Peer, sandboxes []MeshNode) []MeshNode {
 	for _, peer := range configured {
 		nodes = append(nodes, MeshNode{
 			Name: peer.Host, URL: peer.URL, EnvironmentID: peer.EnvironmentID,
-			IssueToken: func(ctx context.Context) (string, error) { return issueOverSSH(ctx, peer) },
+			IssueToken:    func(ctx context.Context) (string, error) { return issueOverSSH(ctx, peer) },
+			PreparedOwner: peer.prepared,
 			ListLinksJSON: func(ctx context.Context) ([]byte, error) {
 				return runOwnerCLI(ctx, peer, "environment", "list", "--json")
 			},
@@ -159,17 +161,7 @@ func readMeshInventory(ctx context.Context, client *http.Client, node MeshNode, 
 	if !node.CleanupOnly && !environmentID.MatchString(node.EnvironmentID) {
 		state.err = fmt.Errorf("invalid private T3 environment %q", node.Name)
 	} else if reconcile && !node.CleanupOnly {
-		api := newPeerAPI(client, node.Name, node.URL, node.EnvironmentID)
-		if state.err = api.verify(ctx, 2, true); state.err == nil {
-			var token string
-			if token, state.err = node.issue(ctx); state.err == nil {
-				state.endpoint = meshEndpoint{api: api, token: token}
-				if visit != nil {
-					state.entries, state.err = listPeerLinks(ctx, api, token)
-					state.readable = state.err == nil
-				}
-			}
-		}
+		state = authorizeMeshInventory(ctx, client, node, visit != nil)
 	}
 	if visit == nil {
 		return state
@@ -195,6 +187,31 @@ func readMeshInventory(ctx context.Context, client *http.Client, node MeshNode, 
 		state.removed, pruneErr = pruneMeshNode(ctx, client, node, false, visit)
 	}
 	state.err = errors.Join(state.err, pruneErr)
+	return state
+}
+
+func authorizeMeshInventory(ctx context.Context, client *http.Client, node MeshNode, readLinks bool) (state meshInventory) {
+	api := newPeerAPI(client, node.Name, node.URL, node.EnvironmentID)
+	if state.err = api.verify(ctx, 2, true); state.err != nil {
+		return state
+	}
+	if readLinks && node.PreparedOwner != nil {
+		if token := node.PreparedOwner.currentToken(ctx); token != "" {
+			if entries, err := listPeerLinks(ctx, api, token); err == nil {
+				return meshInventory{endpoint: meshEndpoint{api: api, token: token}, entries: entries, readable: true}
+			}
+		}
+	}
+	token, err := node.issue(ctx)
+	if err != nil {
+		state.err = err
+		return state
+	}
+	state.endpoint = meshEndpoint{api: api, token: token}
+	if readLinks {
+		state.entries, state.err = listPeerLinks(ctx, api, token)
+		state.readable = state.err == nil
+	}
 	return state
 }
 

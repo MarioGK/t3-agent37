@@ -84,6 +84,8 @@ Batch preflight checks OAuth and reads the Agent37 inventory concurrently.
 Each guest configures GitHub access while its private Tailscale endpoint comes
 up. Fresh batch launches enroll and start private Tailscale Serve in one guest
 request. The workspace and HTTPS checks finish before desktop pairing.
+Batch launches prepare the short-lived owner sessions while guests start.
+When desktop pairing is enabled, T3 peer links wait for it to succeed.
 To measure scheduling with fixed service delays and no cloud calls, run:
 
 ```sh
@@ -179,12 +181,13 @@ agent37 templates build templates/terrascale --name terrascale-agent37 --default
 ```
 
 The Agent37 gateway uses port 3737 and T3 uses protected port 3773.
-The image caches Git objects from the seven public TerraScale repositories
-without credentials. Each sandbox still fetches current refs from GitHub.
-Its checkouts remain usable independently of the image cache. Private
-repositories are cloned at runtime using the workstation's GitHub handoff.
+The image includes working trees and Git objects for seven public TerraScale
+repositories. Each new sandbox checks their default branches on GitHub and
+fast-forwards the local copy when needed. Private repositories are cloned at
+runtime using the workstation's GitHub handoff. No GitHub credentials or
+private checkout files are stored in the image.
 [Dockerfile](../templates/terrascale/Dockerfile)
 
-The image includes a `ts-orch` built from the cached public
+The image includes a `ts-orch` built from its baked public
 `ts-orchestrator` revision. The CLI reuses it when its build revision
 matches the current checkout and builds it again when the revision changes.

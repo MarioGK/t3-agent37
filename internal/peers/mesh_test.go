@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
@@ -90,6 +91,42 @@ func TestSyncMeshReadsOnceAndReplacesAStaleAddress(t *testing.T) {
 	if len(mesh.unlinked) != 1 || mesh.unlinked[0] != "beta" || mesh.links["alpha"]["beta"].Access != accessRequired ||
 		mesh.links["alpha"]["gamma"].Access != "read-only" || mesh.grants != 5 {
 		t.Fatalf("sync failed to replace the stale address or preserve existing access: %+v", mesh.links["alpha"])
+	}
+}
+
+func TestSyncMeshReusesPreparedOwnerAndRefreshesRejectedOne(t *testing.T) {
+	mesh := newMeshFixture(t, "alpha", "beta", "pending")
+	mesh.nodes[0].PreparedOwner = PrepareOwnerSession(t.Context(), func(context.Context) (string, error) {
+		return "fixture-owner-alpha", nil
+	})
+	mesh.nodes[1].PreparedOwner = PrepareOwnerSession(t.Context(), func(context.Context) (string, error) {
+		return "fixture-revoked", nil
+	})
+	mesh.nodes[2].PreparedOwner = PrepareOwnerSession(t.Context(), func(context.Context) (string, error) {
+		return "fixture-unconfirmed", nil
+	})
+	mesh.nodes[2].CleanupOnly = true
+	mesh.nodes[2].ListLinksJSON = func(context.Context) ([]byte, error) { return []byte("[]"), nil }
+	mesh.nodes[2].Unlink = func(context.Context, string) error {
+		t.Error("the fixture cannot have stale links")
+		return nil
+	}
+	count, removed, err := syncMesh(t.Context(), mesh.client, mesh.nodes,
+		func(context.Context, SandboxLink, func() error) (bool, error) { return false, nil })
+	if err != nil || count != 2 || len(removed) != 0 || mesh.issues != 1 || mesh.lists != 2 || mesh.grants != 2 {
+		t.Fatalf("sync: %d links, %d lists, %d fresh sessions, %d grants, removed %v, error %v",
+			count, mesh.lists, mesh.issues, mesh.grants, removed, err)
+	}
+}
+
+func TestPreparedOwnerSkipsAnExpiredSession(t *testing.T) {
+	session := PrepareOwnerSession(t.Context(), func(context.Context) (string, error) {
+		return "fixture-owner", nil
+	})
+	<-session.ready
+	session.started = time.Now().Add(-preparedOwnerMaxAge - time.Second)
+	if token := session.currentToken(t.Context()); token != "" {
+		t.Fatal("expired prepared owner was used")
 	}
 }
 
@@ -201,6 +238,10 @@ func (mesh *meshFixture) serve(t *testing.T, name string, w http.ResponseWriter,
 		}
 		_, _ = w.Write([]byte(`{"environmentId":"` + name + `","capabilities":{"peerLinks":true,"linkFence":true,"mcpModeLimitHeader":true,"peerLinkPairingCodes":true}}`))
 	case "/api/auth/websocket-ticket/rpc", "/api/auth/pairing-token":
+		if r.Header.Get("Authorization") == "Bearer fixture-revoked" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
 		if r.Header.Get("Authorization") != "Bearer fixture-owner-"+name {
 			t.Error("wrong owner session for fixture endpoint")
 			w.WriteHeader(http.StatusUnauthorized)

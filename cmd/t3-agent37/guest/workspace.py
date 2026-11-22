@@ -12,6 +12,7 @@ from pathlib import Path
 
 
 PUBLIC_GIT_CACHE = Path("/opt/terrascale/git-cache")
+PUBLIC_WORKTREE_SNAPSHOTS = Path("/opt/terrascale/worktree-snapshots")
 
 
 def git_environment():
@@ -49,7 +50,7 @@ def valid_path_part(part):
     return bool(part) and part not in {".", ".."} and "/" not in part and "\\" not in part
 
 
-def refresh_checkout(checkout, env, workspace_root):
+def refresh_checkout(checkout, env, workspace_root, fetch_timeout="120s"):
     git = ["git", "-C", str(checkout)]
     branch = subprocess.run([*git, "symbolic-ref", "--quiet", "--short", "HEAD"],
                             capture_output=True, text=True, timeout=5, env=env)
@@ -68,7 +69,7 @@ def refresh_checkout(checkout, env, workspace_root):
     # Update the exact tracking ref even if origin has a narrowed fetch refspec.
     # This also avoids sharing FETCH_HEAD with another Git operation.
     tracking_ref = "refs/remotes/origin/" + ref.removeprefix("refs/heads/")
-    fetched = subprocess.run(["timeout", "--kill-after=5s", "120s", *git, "fetch", "--quiet",
+    fetched = subprocess.run(["timeout", "--kill-after=5s", fetch_timeout, *git, "fetch", "--quiet",
                               "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head", "--refmap=",
                               "origin", f"+{ref}:{tracking_ref}"],
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
@@ -97,6 +98,46 @@ def refresh_checkout(checkout, env, workspace_root):
     return "existing" if merged.returncode == 0 else "pull_conflict"
 
 
+def use_snapshot(snapshot, checkout, repo, env):
+    if snapshot.is_symlink() or not snapshot.is_dir():
+        return False
+    copied = subprocess.run(
+        ["cp", "-R", "--preserve=mode,timestamps", "--reflink=auto", "--", str(snapshot), str(checkout)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20,
+    )
+    if copied.returncode != 0 or not matches_checkout(checkout, repo, env):
+        return False
+
+    git = ["git", "-C", str(checkout)]
+    remote = subprocess.run([*git, "ls-remote", "--symref", "origin", "HEAD"],
+                            capture_output=True, text=True, timeout=12, env=env)
+    if remote.returncode != 0:
+        return False
+    remote_ref, remote_revision = "", ""
+    for line in remote.stdout.splitlines():
+        value, _, name = line.partition("\t")
+        if name == "HEAD":
+            if value.startswith("ref: "):
+                remote_ref = value.removeprefix("ref: ")
+            else:
+                remote_revision = value
+    if not remote_ref.startswith("refs/heads/") or not re.fullmatch(r"[a-f0-9]{40}", remote_revision):
+        return False
+    branch = subprocess.run([*git, "symbolic-ref", "--quiet", "HEAD"],
+                            capture_output=True, text=True, timeout=5, env=env)
+    if branch.returncode != 0 or branch.stdout.strip() != remote_ref:
+        return False
+
+    def matches_remote():
+        revision = subprocess.run([*git, "rev-parse", "--verify", "HEAD^{commit}"],
+                                  capture_output=True, text=True, timeout=5, env=env)
+        return revision.returncode == 0 and revision.stdout.strip() == remote_revision
+
+    if matches_remote():
+        return True
+    return refresh_checkout(checkout, env, False, fetch_timeout="20s") == "existing" and matches_remote()
+
+
 def clone_repository(home, workspace_path, repo, directory, ref):
     parts = workspace_path.removeprefix("~/").split("/")
     if (not workspace_path.startswith("~/") or not all(map(valid_path_part, parts))
@@ -121,21 +162,29 @@ def clone_repository(home, workspace_path, repo, directory, ref):
 
     with tempfile.TemporaryDirectory(prefix=".t3-agent37-clone-", dir=parent) as stage:
         checkout = Path(stage) / target.name
-        command = ["timeout", "--kill-after=5s", "210s", "git", "clone", "--quiet", "--filter=blob:none"]
-        cache = PUBLIC_GIT_CACHE / (repo.lower() + ".git")
-        if cache.is_dir():
-            command.extend(["--reference-if-able", str(cache), "--dissociate"])
-        if ref:
-            command.extend(["--branch", ref])
-        command.extend(["--", f"https://github.com/{repo}.git", str(checkout)])
-        result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
-        if result.returncode in {124, 137}:
-            return "timeout"
-        if result.returncode != 0:
-            return "clone_failed"
+        snapshot = PUBLIC_WORKTREE_SNAPSHOTS / repo.lower()
+        try:
+            seeded = not ref and use_snapshot(snapshot, checkout, repo, env)
+        except subprocess.TimeoutExpired:
+            seeded = False
+        if not seeded:
+            if checkout.exists():
+                checkout = Path(stage) / "fresh-clone"
+            command = ["timeout", "--kill-after=5s", "210s", "git", "clone", "--quiet", "--filter=blob:none"]
+            cache = PUBLIC_GIT_CACHE / (repo.lower() + ".git")
+            if cache.is_dir():
+                command.extend(["--reference-if-able", str(cache), "--dissociate"])
+            if ref:
+                command.extend(["--branch", ref])
+            command.extend(["--", f"https://github.com/{repo}.git", str(checkout)])
+            result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
+            if result.returncode in {124, 137}:
+                return "timeout"
+            if result.returncode != 0:
+                return "clone_failed"
 
         if move_without_overwrite(checkout, target):
-            return "cloned"
+            return "seeded" if seeded else "cloned"
         if not directory and can_adopt_root(target):
             for entry in checkout.iterdir():
                 if entry.name != ".git" and (target / entry.name / ".git").exists():
@@ -148,7 +197,7 @@ def clone_repository(home, workspace_path, repo, directory, ref):
             result = subprocess.run([*git, "diff", "--quiet"], timeout=30, stdout=subprocess.DEVNULL,
                                     stderr=subprocess.DEVNULL, env=env)
             if result.returncode == 0 and move_without_overwrite(checkout / ".git", target / ".git"):
-                return "cloned"
+                return "seeded" if seeded else "cloned"
         if target.exists() or target.is_symlink():
             return refresh_checkout(target, env, not directory) if matches_checkout(target, repo, env) else "conflict"
         return "filesystem_error"

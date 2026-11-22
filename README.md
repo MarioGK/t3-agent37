@@ -105,9 +105,9 @@ to its path.
 An optional `root_repository` checks out a repository at `path` itself.
 Repository checkout runs while T3 starts and the sandbox joins Tailscale.
 The CLI runs up to two guest requests in parallel, with up to four child
-repositories per request. Git
-fetches historical blobs on demand and can reuse public objects from the
-TerraScale image. Each startup
+repositories per request. New TerraScale sandboxes can reuse public working
+trees from the image after checking the current GitHub refs. Git fetches older
+file contents on demand. Each startup
 fetches and fast-forwards the tracked GitHub branches for the workspace root
 and its repositories. It preserves local branches, pinned tags, and
 conflicting files. The CLI verifies the T3 projects before requesting

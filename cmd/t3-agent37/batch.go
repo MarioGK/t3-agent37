@@ -91,6 +91,7 @@ func runBatch(ctx context.Context, client *agent37.Client, verifyEnrollment func
 	if err != nil {
 		return err
 	}
+	configured = peers.PrepareConfiguredPeers(ctx, configured)
 	parallel := min(opts.parallelism, len(reserved))
 	progress.preflightDone("Creating and setting up sandboxes")
 	notice(progress, info, "Provisioning %d Agent37 sandboxes, up to %d at a time…", len(reserved), parallel)

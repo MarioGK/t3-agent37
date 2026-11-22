@@ -68,16 +68,7 @@ func meshNode(client *agent37.Client, id, name string, proof sandboxPeer) (peers
 	}
 	return peers.MeshNode{
 		Name: name, URL: proof.URL, EnvironmentID: proof.EnvironmentID,
-		IssueToken: func(ctx context.Context) (string, error) {
-			admin, err := client.ExecJSON[struct{ Token string }](ctx, id, remote+" peer-admin")
-			if err != nil {
-				return "", err
-			}
-			if admin.Token == "" {
-				return "", errors.New("sandbox did not issue a T3 owner session")
-			}
-			return admin.Token, nil
-		},
+		IssueToken: func(ctx context.Context) (string, error) { return issueSandboxOwner(ctx, client, id) },
 		ListLinksJSON: func(ctx context.Context) ([]byte, error) {
 			value, err := client.Exec(ctx, id, "python3 -B -c "+shellQuote(runGuestEnvironment)+" list --json")
 			return []byte(value), err
@@ -87,6 +78,17 @@ func meshNode(client *agent37.Client, id, name string, proof sandboxPeer) (peers
 			return err
 		},
 	}, nil
+}
+
+func issueSandboxOwner(ctx context.Context, client *agent37.Client, id string) (string, error) {
+	admin, err := client.ExecJSON[struct{ Token string }](ctx, id, remote+" peer-admin")
+	if err != nil {
+		return "", err
+	}
+	if admin.Token == "" {
+		return "", errors.New("sandbox did not issue a T3 owner session")
+	}
+	return admin.Token, nil
 }
 
 func discoverSandboxPeer(ctx context.Context, client *agent37.Client, instance agent37.Instance, allowWake, forCleanup bool) (sandboxPeer, error) {

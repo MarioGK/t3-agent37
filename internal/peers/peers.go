@@ -44,6 +44,7 @@ type Peer struct {
 	URL           string      `json:"url"`
 	EnvironmentID string      `json:"environmentId"`
 	Incus         *IncusOwner `json:"incus,omitempty"`
+	prepared      *PreparedOwnerSession
 }
 
 // IncusOwner is an optional owner-command route through a trusted SSH host.
