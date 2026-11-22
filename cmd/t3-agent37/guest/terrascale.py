@@ -125,7 +125,7 @@ def install_orchestrator(orchestrator, home, request_shared=False):
             target = orchestrator_target(orchestrator)
             if target is not None:
                 cached_env = {**env, "GOCACHE": str(build_cache), "GOMODCACHE": str(modules), "CGO_ENABLED": "0"}
-                build_orchestrator(orchestrator, destination, cached_env, timeout=25, target=target)
+                build_orchestrator(orchestrator, destination, cached_env, timeout=40, target=target)
                 return None
         except (OSError, ValueError, subprocess.SubprocessError):
             # New dependencies or a template mismatch can make a cached build
