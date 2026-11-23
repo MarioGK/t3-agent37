@@ -2,12 +2,7 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
-	_ "embed"
-	"encoding/hex"
-	json "encoding/json/v2"
 	"errors"
-	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
@@ -21,15 +16,7 @@ import (
 	"github.com/MarioGK/t3-agent37/internal/agent37"
 )
 
-//go:embed guest/github.py
-var guestGitHub string
-
 var githubTokenPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
-
-type githubAccessResult struct {
-	GitHub      bool `json:"github"`
-	GitIdentity bool `json:"gitIdentity"`
-}
 
 type githubHandoff struct {
 	Token string `json:"token,omitempty"`
@@ -37,8 +24,6 @@ type githubHandoff struct {
 	Email string `json:"email,omitempty"`
 }
 
-// inheritGitHub applies the local GitHub.com login and Git author defaults
-// without placing credentials in the guest exec command or instance metadata.
 func readGitHubHandoff(ctx context.Context) (githubHandoff, error) {
 	token, err := workstationGitHubToken(ctx)
 	if err != nil {
@@ -46,50 +31,6 @@ func readGitHubHandoff(ctx context.Context) (githubHandoff, error) {
 	}
 	name, email := workstationGitIdentity(ctx)
 	return githubHandoff{Token: token, Name: name, Email: email}, ctx.Err()
-}
-
-func inheritGitHub(ctx context.Context, client *agent37.Client, id string, handoff githubHandoff) (githubAccessResult, error) {
-	var result githubAccessResult
-	if handoff == (githubHandoff{}) {
-		return result, ctx.Err()
-	}
-	payload, err := json.Marshal(handoff)
-	if err != nil {
-		return result, errors.New("could not encode GitHub access handoff")
-	}
-	defer clear(payload)
-
-	var nonce [16]byte
-	if _, err := rand.Read(nonce[:]); err != nil {
-		return result, err
-	}
-	stage := "github-handoff-" + hex.EncodeToString(nonce[:])
-	command := "python3 -c " + shellQuote(guestGitHub) + " " + stage
-	applied := false
-	defer func() {
-		if !applied {
-			cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-			defer cancel()
-			_, _ = client.Exec(cleanup, id, command+" cleanup")
-		}
-	}()
-
-	if _, err := client.Exec(ctx, id, command+" prepare"); err != nil {
-		return result, fmt.Errorf("could not prepare private GitHub handoff: %w", err)
-	}
-	if err := uploadGitHubHandoff(ctx, client, id, stage, payload); err != nil {
-		return result, fmt.Errorf("could not deliver private GitHub handoff: %w", err)
-	}
-	result, err = client.ExecJSON[githubAccessResult](ctx, id, command+" apply")
-	if err != nil {
-		return result, fmt.Errorf("could not set up sandbox GitHub access: %w", err)
-	}
-	applied = true
-	return result, nil
-}
-
-func uploadGitHubHandoff(ctx context.Context, client *agent37.Client, id, stage string, payload []byte) error {
-	return uploadGuestFile(ctx, func() error { return client.UploadGitHubHandoff(ctx, id, stage, payload) })
 }
 
 func uploadGuestFile(ctx context.Context, upload func() error) error {

@@ -324,7 +324,7 @@ func VerifyTailnet(ctx context.Context, name, environmentID, address string, rep
 	if err != nil {
 		return "", err
 	}
-	client := newHTTPClient(5 * time.Second)
+	client := newHTTPClient(8 * time.Second)
 	defer client.CloseIdleConnections()
 	target := newPeerAPI(client, name, origin, environmentID)
 	// Accept the endpoint as soon as it works, with enough time for a fresh

@@ -196,7 +196,7 @@ func runRecordedDown(ctx context.Context, client *agent37.Client, opts options, 
 	}
 
 	opts.name, opts.targetID = receipt.Name, receipt.ID
-	lock, err := lockSandbox(ctx, client, state, &opts)
+	lock, err := lockSandbox(ctx, client, state, &opts, nil)
 	if err != nil {
 		return err
 	}

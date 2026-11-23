@@ -20,7 +20,7 @@ func (transport testTransport) RoundTrip(request *http.Request) (*http.Response,
 
 func TestAgent37RoutesAndAuthentication(t *testing.T) {
 	const id = "ab12cd34ef"
-	const enrollment = "tailscale-enrollment-0123456789abcdef0123456789abcdef"
+	const stage = "launch-0123456789abcdef0123456789abcdef"
 	client := New("private-fixture-key")
 	client.http.Transport = testTransport(func(request *http.Request) (int, string) {
 		switch request.URL.Host {
@@ -58,11 +58,11 @@ func TestAgent37RoutesAndAuthentication(t *testing.T) {
 			return 200, `{"exit_code":0,"stdout":"ready","truncated":false}`
 		case "PUT /v1/files/content":
 			body, err := io.ReadAll(request.Body)
-			if err != nil || string(body) != "fixture-enroll" ||
+			if err != nil || string(body) != `{"provider":"codex"}` ||
 				request.Header.Get("Content-Type") != "application/octet-stream" ||
-				request.URL.Query().Get("path") != "~/.local/share/t3-agent37/"+enrollment ||
+				request.URL.Query().Get("path") != "~/.local/share/t3-agent37/"+stage+"/spec.json" ||
 				request.URL.Query().Get("overwrite") != "false" {
-				t.Error("enrollment key upload changed")
+				t.Error("launch spec upload changed")
 			}
 			return 204, ""
 		default:
@@ -81,11 +81,11 @@ func TestAgent37RoutesAndAuthentication(t *testing.T) {
 	if stdout, err := client.Exec(ctx, id, "verify"); err != nil || stdout != "ready" {
 		t.Fatalf("exec returned %q, %v", stdout, err)
 	}
-	if err := client.UploadEnrollmentKey(ctx, id, enrollment, "fixture-enroll"); err != nil {
+	if err := client.UploadLaunchSpec(ctx, id, stage, []byte(`{"provider":"codex"}`)); err != nil {
 		t.Fatal(err)
 	}
-	if err := client.UploadEnrollmentKey(ctx, id, "../unsafe", "fixture-enroll"); err == nil {
-		t.Fatal("unsafe enrollment filename accepted")
+	if err := client.UploadLaunchSpec(ctx, id, "../unsafe", []byte(`{}`)); err == nil {
+		t.Fatal("unsafe launch stage directory accepted")
 	}
 }
 

@@ -1,24 +1,18 @@
 package main
 
 import (
-	"context"
-	_ "embed"
 	json "encoding/json/v2"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"os"
 	"path"
 	"regexp"
-	"slices"
 	"strings"
-	"time"
 	"unicode"
 
 	"github.com/MarioGK/t3-agent37/internal/agent37"
 	flag "github.com/spf13/pflag"
-	"golang.org/x/sync/errgroup"
 )
 
 const (
@@ -26,35 +20,10 @@ const (
 	workspaceDisabledKey  = "workspace_disabled"
 	workspaceSetupKey     = "workspace_setup"
 	workspaceReadyFile    = "workspace-ready"
-	workspaceReadyPath    = "$HOME/.local/share/t3-agent37/" + workspaceReadyFile
 )
 
 func requiresWorkspaceSetup(instance agent37.Instance) bool {
 	return instance.Metadata[workspaceSetupKey] == "required"
-}
-
-// Instance metadata declares the prerequisite before the guest becomes discoverable.
-// The guest marker lets later commands verify completion without the workstation playbook.
-func requireWorkspaceReady(ctx context.Context, client *agent37.Client, instance agent37.Instance, name string, completed bool) error {
-	if !requiresWorkspaceSetup(instance) {
-		return nil
-	}
-	if completed {
-		_, err := client.Exec(ctx, instance.ID, `mkdir -p -m 700 "$HOME/.local/share/t3-agent37" && touch "`+workspaceReadyPath+`"`)
-		if err != nil {
-			return fmt.Errorf("could not record workspace readiness in %s: %w", name, err)
-		}
-		return nil
-	}
-	proof, err := client.ExecJSON[struct{ Ready bool }](ctx, instance.ID,
-		`if test -f "`+workspaceReadyPath+`"; then printf '%s\n' '{"ready":true}'; else printf '%s\n' '{"ready":false}'; fi`)
-	if err != nil {
-		return err
-	}
-	if !proof.Ready {
-		return fmt.Errorf("finish workspace setup with t3-agent37 up %s before linking T3", name)
-	}
-	return nil
 }
 
 type workspacePlaybook struct {
@@ -81,12 +50,6 @@ func (playbook workspacePlaybook) terraScale() bool {
 }
 
 var githubRepositoryPattern = regexp.MustCompile(`^[A-Za-z0-9-]+/[A-Za-z0-9_.-]+$`)
-
-//go:embed guest/workspace.py
-var guestWorkspace string
-
-//go:embed guest/terrascale.py
-var guestTerraScale string
 
 func addWorkspaceFlag(flags *flag.FlagSet) *bool {
 	return flags.Bool("workspace", true, "Use the local workspace playbook when configured")
@@ -198,181 +161,39 @@ func previewCreatePayload(opts options) map[string]any {
 	return payload
 }
 
-const workspaceCloneGroupSize = 4
-
-func (playbook *workspacePlaybook) clone(ctx context.Context, client *agent37.Client, id, name string, diagnostic io.Writer) error {
-	started := time.Now()
-	progress, _ := diagnostic.(*launchProgress)
-	if progress != nil && progress.total == 1 {
-		progress.setPhase("Updating workspace checkouts")
-	}
-	baseCommand := "python3 -B -c " + shellQuote(guestWorkspace) + " " + shellQuote(playbook.Path)
-	if playbook.terraScale() {
-		if err := playbook.checkoutTerraScaleRoot(ctx, client, id, name, baseCommand); err != nil {
-			return err
-		}
-	} else if playbook.RootRepo != "" {
-		if err := cloneWorkspaceRepository(ctx, client, id, name, baseCommand, playbook.Path, workspaceRepository{Repo: playbook.RootRepo}, ""); err != nil {
-			return err
-		}
-	}
-	notice(diagnostic, info, "%s Checking %d workspace repositories for updates", name, len(playbook.Repositories))
-	groups := slices.Collect(slices.Chunk(playbook.Repositories, workspaceCloneGroupSize))
-	failures := make([]error, len(groups))
-	reused := make([]int, len(groups))
-	var checkouts errgroup.Group
-	checkouts.SetLimit(2)
-	for i, group := range groups {
-		if err := ctx.Err(); err != nil {
-			break
-		}
-		checkouts.Go(func() error {
-			reused[i], failures[i] = cloneWorkspaceGroup(ctx, client, id, name, baseCommand, playbook.Path, group)
-			return nil
-		})
-	}
-	_ = checkouts.Wait()
-	if err := errors.Join(errors.Join(failures...), ctx.Err()); err != nil {
-		return err
-	}
-	if os.Getenv("T3_AGENT37_TIMINGS") == "1" {
-		var total int
-		for _, count := range reused {
-			total += count
-		}
-		if total > 0 {
-			notice(diagnostic, info, "%s Reused %d baked worktrees", name, total)
-		}
-	}
-	notice(diagnostic, success, "%s Checkouts ready at %s", name, playbook.Path)
-	launchTiming(diagnostic, name, "Repository checkout", started)
-	return nil
-}
-
-func (playbook *workspacePlaybook) checkoutTerraScaleRoot(ctx context.Context, client *agent37.Client, id, name, baseCommand string) error {
-	result, err := client.ExecJSON[struct{ Status, Manifest, ManifestError string }](ctx, id, baseCommand+" --terrascale-root")
-	if err != nil {
-		return fmt.Errorf("could not clone %s in %s: %w", playbook.RootRepo, name, err)
-	}
-	if err := checkoutError(result.Status, playbook.Path, name, playbook.RootRepo, ""); err != nil {
-		return err
-	}
-	switch result.ManifestError {
-	case "":
-		return playbook.applyTerraScaleManifest(result.Manifest)
-	case "too_large":
-		return errors.New("TerraScale repos.txt is too large")
-	default:
-		return fmt.Errorf("could not read the TerraScale repository manifest in %s", name)
-	}
-}
-
-func (playbook *workspacePlaybook) applyTerraScaleManifest(manifest string) error {
-	if len(manifest) > 16<<10 {
-		return errors.New("TerraScale repos.txt is too large")
-	}
-	// Copy the slice before adding repos. Batch launches share the original playbook.
-	repositories := append([]workspaceRepository(nil), playbook.Repositories...)
-	seen := make(map[string]string, len(repositories))
-	for _, repo := range repositories {
-		seen[strings.ToLower(repo.Repo)] = repo.directory()
-	}
-	entries := strings.Fields(manifest)
-	if len(entries) == 0 {
-		return errors.New("TerraScale repos.txt is empty")
-	}
-	for _, entry := range entries {
-		repo := "TerraScale/" + entry
-		if !validWorkspaceRepository(repo) {
-			return errors.New("TerraScale repos.txt contains an invalid repository name")
-		}
-		key := strings.ToLower(repo)
-		if directory, exists := seen[key]; !exists {
-			repositories = append(repositories, workspaceRepository{Repo: repo})
-			seen[key] = entry
-		} else if directory != entry {
-			return fmt.Errorf("TerraScale repos.txt requires %s at %s", repo, entry)
-		}
-	}
-	playbook.Repositories = repositories
-	return playbook.validate()
-}
-
-func (playbook workspacePlaybook) installTerraScaleTools(ctx context.Context, client *agent37.Client, id, name string, shared *sharedOrchestrator, staged *stagedOrchestrator, diagnostic io.Writer) error {
-	started := time.Now()
-	notice(diagnostic, info, "%s Preparing TerraScale skills and tools", name)
-	command := "python3 -B -c " + shellQuote(guestTerraScale) + " " + shellQuote(playbook.Path)
-	type toolResult struct {
-		Stage string `json:"stage"`
-		orchestratorTarget
-	}
-	probe := command
-	if shared != nil {
-		probe += " request-shared"
-	}
-	result, err := client.ExecJSON[toolResult](ctx, id, probe)
-	if err == nil && shared != nil && result.Stage == "share_orchestrator" {
-		shareErr := shared.installStaged(ctx, client, id, command, result.orchestratorTarget, staged)
-		switch {
-		case shareErr == nil:
-			notice(diagnostic, success, "%s Verified shared ts-orch build", name)
-			result.Stage = "ready"
-		case ctx.Err() != nil:
-			err = ctx.Err()
-		default:
-			notice(diagnostic, warning, "%s Shared ts-orch unavailable. Building in the sandbox", name)
-			result, err = client.ExecJSON[toolResult](ctx, id, command)
-		}
-	}
-	if err != nil {
-		return fmt.Errorf("could not prepare TerraScale tools in %s: %w", name, err)
-	}
-	switch result.Stage {
-	case "ready":
-		launchTiming(diagnostic, name, "TerraScale skills and tools", started)
-		notice(diagnostic, success, "%s TerraScale skills and tools ready", name)
+func workspaceProofError(playbook *workspacePlaybook, name string, proof setupProof) error {
+	if playbook == nil {
 		return nil
-	case "skills", "mise", "orchestrator", "toolchain":
-		return fmt.Errorf("TerraScale %s setup did not complete in %s", result.Stage, name)
-	default:
-		return errors.New("sandbox returned an unknown TerraScale setup result")
-	}
-}
-
-// A bounded group fits inside the same exec timeout as a single checkout.
-func cloneWorkspaceGroup(ctx context.Context, client *agent37.Client, id, name, baseCommand, workspace string, repos []workspaceRepository) (int, error) {
-	payload, err := json.Marshal(repos)
-	if err != nil {
-		return 0, err
-	}
-	result, err := client.ExecJSON[struct{ Statuses []string }](ctx, id, baseCommand+" --batch "+shellQuote(string(payload)))
-	if err != nil {
-		return 0, fmt.Errorf("could not check out workspace repositories in %s: %w", name, err)
-	}
-	if len(result.Statuses) != len(repos) {
-		return 0, errors.New("sandbox returned incomplete checkout results")
 	}
 	var failures []error
-	var seeded int
-	for i, status := range result.Statuses {
-		if status == "seeded" {
-			seeded++
-		}
-		repo := repos[i]
-		if err := checkoutError(status, workspace, name, repo.Repo, repo.directory()); err != nil {
-			failures = append(failures, err)
-		}
+	for _, item := range proof.WorkspaceErrors {
+		failures = append(failures, checkoutError(item.Status, playbook.Path, name, item.Repo, item.Folder))
 	}
-	return seeded, errors.Join(failures...)
-}
-
-func cloneWorkspaceRepository(ctx context.Context, client *agent37.Client, id, name, baseCommand, workspace string, repo workspaceRepository, folder string) error {
-	command := baseCommand + " " + shellQuote(repo.Repo) + " " + shellQuote(folder) + " " + shellQuote(repo.Ref)
-	result, err := client.ExecJSON[struct{ Status string }](ctx, id, command)
-	if err != nil {
-		return fmt.Errorf("could not clone %s in %s: %w", repo.Repo, name, err)
+	switch proof.ManifestError {
+	case "":
+	case "too_large":
+		failures = append(failures, errors.New("TerraScale repos.txt is too large"))
+	case "empty":
+		failures = append(failures, errors.New("TerraScale repos.txt is empty"))
+	case "invalid", "duplicate", "directory_conflict":
+		failures = append(failures, errors.New("TerraScale repos.txt contains an invalid repository entry"))
+	default:
+		failures = append(failures, fmt.Errorf("could not read the TerraScale repository manifest in %s", name))
 	}
-	return checkoutError(result.Status, workspace, name, repo.Repo, folder)
+	switch proof.ToolsStage {
+	case "":
+	case "skills", "mise", "orchestrator", "toolchain":
+		failures = append(failures, fmt.Errorf("TerraScale %s setup did not complete in %s", proof.ToolsStage, name))
+	default:
+		failures = append(failures, errors.New("sandbox returned an unknown TerraScale setup result"))
+	}
+	if proof.ProjectsError != "" {
+		failures = append(failures, fmt.Errorf("could not verify T3 project registrations in %s: %s", name, proof.ProjectsError))
+	}
+	if len(failures) == 0 && !proof.WorkspaceReady {
+		failures = append(failures, fmt.Errorf("workspace setup did not complete in %s", name))
+	}
+	return errors.Join(failures...)
 }
 
 func checkoutError(status, workspace, name, repo, folder string) error {
@@ -394,29 +215,4 @@ func checkoutError(status, workspace, name, repo, folder string) error {
 	default:
 		return errors.New("sandbox returned an unknown workspace clone status")
 	}
-}
-
-func (playbook workspacePlaybook) register(ctx context.Context, client *agent37.Client, id, name string, diagnostic io.Writer) error {
-	started := time.Now()
-	projects := make(map[string]string, len(playbook.Repositories)+1)
-	if playbook.RootRepo != "" {
-		projects[playbook.Path] = playbook.RootRepo
-	}
-	for _, repo := range playbook.Repositories {
-		projects[path.Join(playbook.Path, repo.directory())] = repo.Repo
-	}
-	payload, err := json.Marshal(projects)
-	if err != nil {
-		return err
-	}
-	if progress, ok := diagnostic.(*launchProgress); ok && progress.total == 1 {
-		progress.setPhase("Registering T3 projects")
-	}
-	notice(diagnostic, info, "%s Registering %d projects in T3 Code", name, len(projects))
-	if _, err := client.Exec(ctx, id, remote+" register-projects "+shellQuote(string(payload))); err != nil {
-		return fmt.Errorf("could not verify T3 project registrations in %s: %w", name, err)
-	}
-	notice(diagnostic, success, "%s T3 projects verified", name)
-	launchTiming(diagnostic, name, "T3 project registration", started)
-	return nil
 }

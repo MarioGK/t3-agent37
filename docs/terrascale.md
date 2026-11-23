@@ -2,7 +2,7 @@
 
 Use t3-agent37 0.2.25 or later. Run `t3-agent37 setup` and choose
 `terrascale-agent37` if your workspace has access. The current Dockerfile
-installs T3 Code `0.1.11-nightly.20261119.4954`.
+installs T3 Code `0.1.12-nightly.20261123.5138`.
 You can also [publish your own copy](#publish-the-template).
 Choose CLIProxy as the model provider, or use Automatic with the TerraScale
 template. For Tailscale, define `tag:agent37` in your tailnet policy and grant your
@@ -37,11 +37,11 @@ Rerun `setup` to replace a saved OAuth credential. Leave both fields blank
 to keep the saved pair.
 
 `up` configures Codex, Claude Code, and OpenCode to use the sandbox's CLIProxy
-key. Each uses GLM 5.3 in T3 and at the terminal. T3 selects OpenCode
-`cliproxy/glm-5.3` for new threads. The key comes from the sandbox environment.
-Set `T3_AGENT37_CLIPROXY_MODEL` before `create` to pick another default model
-that CLIProxy supports across the three APIs. Run `t3-agent37 prepare terrascale-dev`
-to configure a running sandbox and refresh its OpenCode model catalog.
+key. It selects `T3_AGENT37_CLIPROXY_MODEL` when set and available, or falls back
+automatically to an available model in the CLIProxy catalog (picking a native
+Claude model for Claude Code when present). The key comes from the sandbox
+environment. Run `t3-agent37 prepare terrascale-dev` to configure a running
+sandbox and refresh its OpenCode model catalog.
 
 The template includes Antigravity CLI (`agy`). It uses the sandbox's CLIProxy
 key through the Gemini-compatible endpoint. Run `agy models` to see the
@@ -80,16 +80,26 @@ At 8 GB per sandbox, ten new sandboxes require 80 GB of running memory in
 addition to the memory in use by existing sandboxes. Agent37 enforces the
 [workspace memory limit](https://www.agent37.com/docs/agents-api/errors#sandbox-api-codes).
 
-Batch preflight checks OAuth and reads the Agent37 inventory concurrently.
-Each guest configures GitHub access while its private Tailscale endpoint comes
-up. Fresh batch launches enroll and start private Tailscale Serve in one guest
-request. The workspace and HTTPS checks finish before desktop pairing.
-Batch launches prepare the short-lived owner sessions while guests start.
-When desktop pairing is enabled, T3 peer links wait for it to succeed.
+Launch preflight checks Tailscale OAuth, reads the Agent37 inventory, fetches
+the CLIProxy model catalog once, and prepares GitHub access concurrently before
+allocating any sandbox. The TerraScale container entrypoint pre-warms
+`tailscaled`, `/etc/machine-info`, and provider configuration during container
+boot, and a single guest startup script (`startup.py`) finishes Tailscale
+enrollment, T3 startup, parallel repository checkout, TerraScale tool setup,
+T3 project registration, pairing token creation, and owner session issuance in
+one pass. When desktop pairing is enabled, T3 peer links wait for it to succeed.
 To measure scheduling with fixed service delays and no cloud calls, run:
 
 ```sh
 go test ./cmd/t3-agent37 -run '^$' -bench '^BenchmarkUpPipeline$' -benchtime=8x -count=4
+```
+
+To benchmark live provisioning end-to-end (including Tailscale HTTPS,
+bidirectional T3 peer mesh verification, TerraScale readiness, and optional
+live agent/GitHub/build checks via `--e2e`), run:
+
+```sh
+go run ./cmd/t3-agent37-bench --runs 1 --template terrascale-agent37@15 --e2e
 ```
 
 `sleep [name]` suspends the sandbox and keeps its disk, Tailscale enrollment,
@@ -168,10 +178,13 @@ The image includes T3, OpenCode, Codex, Claude Code, Antigravity CLI, Tailscale,
 Rust 1.99.1 with rustfmt and Clippy, Python 3.12 with uv, and Node 24 with
 mise. The Node pins are 24.21.0 with npm 11.18.0 and 24.22.1. The image also
 includes Git, GitHub CLI, GCC, Make, Ruby, ShellCheck, actionlint, the TerraScale `ts`
-CLI, PostgreSQL 16 client, NSS tools, and Playwright with Chromium. Set
-`PLAYWRIGHT_BROWSERS_PATH=/opt/terrascale/playwright` to use the bundled browser.
-For older sandboxes, the CLI can install missing `gh` and Claude Code binaries
-from checksum-pinned downloads.
+CLI, PostgreSQL 16 client, NSS tools, and Playwright with Chromium
+(`PLAYWRIGHT_BROWSERS_PATH=/opt/terrascale/playwright` is set in the image
+environment). The image also bundles the guest startup script
+(`/opt/t3-agent37/startup.py`) and pre-warming entrypoint
+(`/usr/local/bin/terrascale-entrypoint.sh`).
+For older sandboxes, the CLI installs `startup.py` automatically and can install
+missing `gh` and Claude Code binaries from checksum-pinned downloads.
 
 To publish your own copy, run this from the checkout with Agent37 CLI 0.4.1
 or later. Use the published revision in `--template`.
@@ -188,11 +201,12 @@ runtime using the workstation's GitHub handoff. No GitHub credentials or
 private checkout files are stored in the image.
 [Dockerfile](../templates/terrascale/Dockerfile)
 
-When GitHub handoff is enabled, a TerraScale batch checks the workstation
+When GitHub handoff is enabled, TerraScale launches check the workstation
 login before allocating sandboxes.
 
 The image includes a `ts-orch` built from its baked public
-`ts-orchestrator` revision. The CLI reuses it when its build revision
-matches the current checkout. When the revision changes, the guest tries
-building it with the Go dependencies and compile cache in the image. Older
-images and cache misses can use the verified shared build.
+`ts-orchestrator` revision along with pre-warmed Go (`GOCACHE`, `GOMODCACHE`)
+and NuGet (`NUGET_PACKAGES`) caches for the public TerraScale repositories.
+The guest startup script reuses `ts-orch` when its build revision matches the
+current checkout, and rebuilds it incrementally from the image's Go cache when
+the revision changes.

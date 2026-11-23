@@ -54,12 +54,12 @@ Larger batches use up to 16 workers by default. Set `--parallel` to choose
 between 1 and 32, for example `up 24 --parallel 24`.
 T3 Code prompts for each sandbox as it becomes ready while the others keep
 provisioning. Once you approve a prompt, the CLI can open the next one while
-it verifies the previous connection. It checks with a 100 ms delay, waits
-longer if Agent37 rate-limits the checks, and links the mesh once at the end.
+it verifies the previous connection using long-polling inside the sandbox, then
+links the mesh once at the end.
 The mesh pass uses one verified link list per reachable environment to
 clean up stale links and add missing ones.
-It prepares the pairing code while HTTPS becomes ready and opens it after
-the sandbox and its projects pass verification.
+The guest startup script prepares the pairing code and owner session during
+launch, and opens pairing after the sandbox and its projects pass verification.
 
 `up 10 --dry-run` previews the batch. `up 10 --no-desktop` runs it headless.
 Use `up <name>` to start an existing sandbox.
@@ -80,8 +80,9 @@ Use `ls --json` for scripts. Sandbox previews and `start`, `stop`, `sleep`, and 
 results keep their JSON output when piped.
 
 With the TerraScale template and CLIProxy selected, `up` configures Codex,
-Claude Code, and OpenCode with your CLIProxy key. All three use GLM 5.3 by
-default. T3 Code starts with OpenCode selected.
+Claude Code, and OpenCode with your CLIProxy key, picking `T3_AGENT37_CLIPROXY_MODEL`
+or automatically falling back to an available catalog model (with a native Claude
+model for Claude Code). T3 Code starts with OpenCode selected.
 
 New sandboxes inherit the workstation's GitHub.com CLI login and Git author
 defaults. Use `up --github=false` to skip it, or set
@@ -103,27 +104,25 @@ to its path.
 ```
 
 An optional `root_repository` checks out a repository at `path` itself.
-Repository checkout runs while T3 starts and the sandbox joins Tailscale.
-The CLI runs up to two guest requests in parallel, with up to four child
-repositories per request. New TerraScale sandboxes can reuse public working
-trees from the image after checking the current GitHub refs. Git fetches older
-file contents on demand. Each startup
-fetches and fast-forwards the tracked GitHub branches for the workspace root
-and its repositories. It preserves local branches, pinned tags, and
-conflicting files. The CLI verifies the T3 projects before requesting
+A single guest startup script runs inside the sandbox to configure T3, join
+Tailscale, apply GitHub access, clone or fast-forward all workspace repositories
+in parallel, and register the T3 projects in one pass. New TerraScale sandboxes
+reuse baked public working trees from the image after checking current GitHub
+refs and fetch older file contents on demand. Each startup fetches and
+fast-forwards tracked GitHub branches while preserving local branches, pinned
+tags, and conflicting files. The CLI verifies the T3 projects before requesting
 desktop pairing.
 Use `up --workspace=false` to skip the playbook for a launch. Set
-`T3_AGENT37_TIMINGS=1` to print the duration of each stage.
+`T3_AGENT37_TIMINGS=1` to print the duration of each stage, or run
+`go run ./cmd/t3-agent37-bench --runs 1 --target 2m` to benchmark end-to-end
+startup, TerraScale readiness, and bidirectional T3 peer connectivity with
+automatic cleanup.
 
-With `TerraScale/workspace` as `root_repository`, `up` also reads its
-committed `repos.txt`, installs the workspace's skills and helper links,
-and verifies the .NET and Mise Go toolchains. When the image's `ts-orch`
-is stale, `up <count>` can build the current revision once with a matching
-workstation Go toolchain and share it across the batch. The workstation starts
-the build during allocation and sends it while the guests check out the
-workspace. Sandboxes can build
-locally when the shared build is unavailable. T3 pairing waits until the
-tools and projects are ready.
+With `TerraScale/workspace` as `root_repository`, the guest startup script also
+reads its committed `repos.txt`, installs the workspace's skills and helper
+links, verifies the .NET and Mise Go toolchains, and reuses the image's baked
+`ts-orch` binary (or rebuilds it incrementally from the image's Go cache when
+the revision changes). T3 pairing waits until the tools and projects are ready.
 
 On another PC, join the same tailnet, run `t3-agent37 setup`, then run
 `t3-agent37 link`. It wakes existing sandboxes as needed and opens each

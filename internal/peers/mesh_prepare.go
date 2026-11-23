@@ -31,6 +31,16 @@ func PrepareOwnerSession(ctx context.Context, issue func(context.Context) (strin
 	return session
 }
 
+// ReadyOwnerSession wraps a scoped owner token already minted during guest startup.
+func ReadyOwnerSession(token string) *PreparedOwnerSession {
+	if token == "" {
+		return nil
+	}
+	ready := make(chan struct{})
+	close(ready)
+	return &PreparedOwnerSession{started: time.Now(), ready: ready, token: token}
+}
+
 func (session *PreparedOwnerSession) currentToken(ctx context.Context) string {
 	select {
 	case <-ctx.Done():

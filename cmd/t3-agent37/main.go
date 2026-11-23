@@ -42,7 +42,9 @@ type options struct {
 	cpu, ram                         *int
 	workspace                        *bool
 	playbook                         *workspacePlaybook
-	orchestrator                     *sharedOrchestrator
+	cliproxyModels                   []string
+	cliproxyModel                    string
+	cliproxyHasSol                   bool
 	preparedGitHub                   func() (githubHandoff, error)
 	up                               bool
 	showSize                         bool
@@ -295,7 +297,14 @@ func createPayload(opts options, extraEnv map[string]string) map[string]any {
 	if opts.playbook != nil {
 		metadata[workspaceSetupKey] = "required"
 	}
-	env := map[string]string{"AGENT37_MANAGED_PLUGIN_COMPOSIO_ENABLED": "false"}
+	env := map[string]string{
+		"AGENT37_MANAGED_PLUGIN_COMPOSIO_ENABLED": "false",
+		"T3_AGENT37_NAME":                         opts.name,
+		"T3_AGENT37_PROVIDER":                     opts.provider,
+	}
+	if opts.tailscale {
+		env["T3_AGENT37_PEER_LINKS"] = "1"
+	}
 	maps.Copy(env, extraEnv)
 	payload := map[string]any{
 		"name": opts.name, "template": opts.template, "metadata": metadata, "type": "default",
@@ -451,6 +460,9 @@ func getOrCreate(ctx context.Context, client *agent37.Client, opts options, stat
 		if err != nil {
 			return existing, err
 		}
+		if opts.cliproxyHasSol {
+			extra["T3_AGENT37_CLIPROXY_HAS_SOL"] = "1"
+		}
 	}
 	started := time.Now()
 	notice(diagnostic, info, "Creating %s on Agent37…", opts.name)
@@ -482,24 +494,12 @@ func getOrCreate(ctx context.Context, client *agent37.Client, opts options, stat
 	return instance, nil
 }
 
-func operate(ctx context.Context, client *agent37.Client, enrollment *peers.Enrollment, opts options, state string, output, diagnostic io.Writer, progress *launchProgress) error {
+func operate(ctx context.Context, client *agent37.Client, launch launchContext, opts options, state string, output, diagnostic io.Writer, progress *launchProgress) error {
 	var instance agent37.Instance
-	var configured []peers.Peer
-	var launcher []string
+	configured := launch.configured
+	launcher := launch.launcher
 	var err error
 	if opts.action == "create" {
-		if opts.generatedName && !opts.noDesktop {
-			launcher, err = desktopLauncher(ctx)
-			if err != nil {
-				return fmt.Errorf("desktop confirmation is unavailable. Use --no-desktop for headless provisioning: %w", err)
-			}
-		}
-		if opts.tailscale {
-			configured, err = peers.Configured()
-			if err != nil {
-				return err
-			}
-		}
 		progress.preflightDone("Creating " + opts.name)
 		instance, err = getOrCreate(ctx, client, opts, state, diagnostic)
 	} else if opts.targetID != "" {
@@ -583,9 +583,12 @@ func operate(ctx context.Context, client *agent37.Client, enrollment *peers.Enro
 	_, interactiveOutput := ttyOutput(output)
 	var proof setupProof
 	if opts.action == "create" {
+		if opts.tailscale && configured != nil {
+			configured = peers.PrepareConfiguredPeers(ctx, configured)
+		}
 		progress.allocated()
 		progress.setPhase("Setting up T3 Code and Tailscale")
-		proof, err = prepareCreated(ctx, client, enrollment, instance, opts, diagnostic)
+		proof, err = prepareCreated(ctx, client, launch.enrollment, instance, opts, diagnostic)
 		if err != nil {
 			if opts.playbook != nil {
 				return fmt.Errorf("sandbox exists. Run t3-agent37 up %s to retry setup: %w", opts.name, err)
@@ -713,13 +716,13 @@ func runCommand(ctx context.Context, opts options, output, diagnostic io.Writer)
 		diagnostic = progress
 		defer launchTiming(diagnostic, cmp.Or(opts.name, "up"), "Command elapsed", time.Now())
 	}
-	var enrollment *peers.Enrollment
 	if opts.action == "create" && opts.batchSize == 0 {
-		enrollment, err = verifyTailscaleEnrollment(ctx)
-		if err != nil {
+		if _, _, err := tailscaleCredentials(); err != nil {
 			return err
 		}
-		progress.setPhase("Preparing sandbox launch")
+		if _, err := workstationTailscaleTags(); err != nil {
+			return err
+		}
 	}
 	key, err := agent37APIKey()
 	if err != nil {
@@ -728,6 +731,16 @@ func runCommand(ctx context.Context, opts options, output, diagnostic io.Writer)
 	client := agent37.New(key)
 	if opts.batchSize > 0 {
 		return runBatch(ctx, client, verifyTailscaleEnrollment, opts, state, output, progress)
+	}
+	var launch launchContext
+	if opts.action == "create" {
+		progress.setPhase("Checking credentials and sandbox inventory")
+		launch, err = prepareLaunch(ctx, client, verifyTailscaleEnrollment, opts, diagnostic)
+		if err != nil {
+			return err
+		}
+		opts = launch.opts
+		progress.setPhase("Preparing sandbox launch")
 	}
 	if opts.action == "sync" {
 		return syncSandboxLinks(ctx, client, opts.dryRun, output, diagnostic)
@@ -788,15 +801,17 @@ func runCommand(ctx context.Context, opts options, output, diagnostic io.Writer)
 	if err := os.MkdirAll(state, 0o700); err != nil {
 		return err
 	}
+	inventory := launch.instances
 	for {
 		if opts.generatedName {
 			progress.setPhase("Selecting a sandbox name")
 		}
-		lock, err := lockSandbox(ctx, client, state, &opts)
+		lock, err := lockSandbox(ctx, client, state, &opts, inventory)
+		inventory = nil
 		if err != nil {
 			return err
 		}
-		err = operate(ctx, client, enrollment, opts, state, output, diagnostic, progress)
+		err = operate(ctx, client, launch, opts, state, output, diagnostic, progress)
 		unlockErr := lock.Unlock()
 		if opts.generatedName && errors.Is(err, errSandboxNameTaken) && unlockErr == nil {
 			continue
@@ -811,13 +826,16 @@ func launchTiming(output io.Writer, name, stage string, started time.Time) {
 	}
 }
 
-func lockSandbox(ctx context.Context, client *agent37.Client, state string, opts *options) (*flock.Flock, error) {
+func lockSandbox(ctx context.Context, client *agent37.Client, state string, opts *options, inventory []agent37.Instance) (*flock.Flock, error) {
 	if opts.generatedName {
-		instances, err := client.List(ctx)
-		if err != nil {
-			return nil, err
+		if inventory == nil {
+			var err error
+			inventory, err = client.List(ctx)
+			if err != nil {
+				return nil, err
+			}
 		}
-		name, lock, err := reserveSandboxName(ctx, state, opts.namePrefix, instances)
+		name, lock, err := reserveSandboxName(ctx, state, opts.namePrefix, inventory)
 		opts.name = name
 		return lock, err
 	}

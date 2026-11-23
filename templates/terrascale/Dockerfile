@@ -30,7 +30,11 @@ COPY --from=uv /uv /uvx /usr/local/bin/
 
 ENV DOTNET_ROOT=/usr/share/dotnet DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 \
     RUSTUP_HOME=/usr/local/rustup MISE_DATA_DIR=/opt/terrascale/mise \
-    UV_PYTHON_INSTALL_DIR=/opt/terrascale/python
+    UV_PYTHON_INSTALL_DIR=/opt/terrascale/python \
+    PLAYWRIGHT_BROWSERS_PATH=/opt/terrascale/playwright \
+    GOCACHE=/opt/terrascale/orch-go-cache/build \
+    GOMODCACHE=/opt/terrascale/orch-go-cache/modules \
+    NUGET_PACKAGES=/opt/terrascale/nuget
 
 RUN set -eu; \
     ln -s /usr/share/dotnet/dotnet /usr/local/bin/dotnet; \
@@ -40,7 +44,7 @@ RUN set -eu; \
       ln -s "/opt/terrascale/rustup-bin/$binary" "/usr/local/bin/$binary"; \
     done
 
-ARG T3_VERSION=0.1.11-nightly.20261119.4954
+ARG T3_VERSION=0.1.12-nightly.20261123.5138
 ARG OPENCODE_VERSION=1.19.5
 ARG MISE_VERSION=2026.11.9
 ARG ACTIONLINT_VERSION=1.7.12
@@ -55,7 +59,7 @@ RUN set -eu; \
       printf '%s  %s\n' "$3" "$downloads/$2" | sha256sum -c -; \
     }; \
     fetch "https://github.com/pingdotgg/t3code/releases/download/v${T3_VERSION}/t3-${T3_VERSION}-linux-x64.tar.gz" t3.tar.gz \
-      ad94394d27733b75e000deefefbfefe187e61366ea18b0df8ffb549d3bb2966d; \
+      77974bc1679da7e078370985fd4ed23ac479c5beec7a90b33668c9d6e89cf441; \
     fetch "https://github.com/jdx/mise/releases/download/v${MISE_VERSION}/mise-v${MISE_VERSION}-linux-x64.tar.gz" mise.tar.gz \
       23ba592fcbc61f057e2b82c1eafd085832712ba0c759b714ca16cd06babca378; \
     fetch "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" actionlint.tar.gz \
@@ -111,6 +115,8 @@ RUN set -eu; \
     tar -xzf "$archive" -C /opt/terrascale/antigravity; \
     rm "$archive"
 COPY --chmod=0755 agy /usr/local/bin/agy
+COPY --chmod=0755 startup.py /opt/t3-agent37/startup.py
+COPY --chmod=0755 terrascale-entrypoint.sh /usr/local/bin/terrascale-entrypoint.sh
 
 RUN set -eu; \
     version="$(go env GOVERSION | cut -c3-)"; \
@@ -126,23 +132,32 @@ RUN set -eu; \
     snapshots=/opt/terrascale/worktree-snapshots/terrascale; \
     cache=/opt/terrascale/git-cache/terrascale; \
     toolcache=/opt/terrascale/orch-go-cache; \
-    install -d -m 0755 "$snapshots" "$cache"; \
-    for repo in branch-action homebrew-tap terraform-provider-terrascale terrascale \
-      test-skills ts-orchestrator ts-resources; do \
+    install -d -m 0755 "$snapshots" "$cache" "$toolcache/build" "$toolcache/modules" "$NUGET_PACKAGES"; \
+    for repo in .github branch-action homebrew-tap terraform-provider-terrascale terrascale \
+      ts-orchestrator ts-resources; do \
       git -c credential.helper= clone --quiet --filter=blob:none \
         "https://github.com/TerraScale/$repo.git" "$stage/$repo"; \
       if [ "$repo" = ts-orchestrator ]; then \
         (cd "$stage/$repo" && CGO_ENABLED=0 GOTOOLCHAIN=local \
-          GOCACHE="$toolcache/build" GOMODCACHE="$toolcache/modules" \
           go build -trimpath -buildvcs=true -ldflags="-s -w" \
-          -o /usr/local/bin/ts-orch ./cmd/terrascale-orchestrator); \
+          -o /usr/local/bin/ts-orch ./cmd/terrascale-orchestrator && \
+          GOTOOLCHAIN=local go test -c -o /dev/null ./cmd/terrascale-orchestrator); \
+      elif [ "$repo" = terraform-provider-terrascale ]; then \
+        (cd "$stage/$repo" && GOTOOLCHAIN=local go mod download); \
+      elif [ "$repo" = terrascale ]; then \
+        if [ -f "$stage/$repo/sdk/go/go.mod" ]; then \
+          (cd "$stage/$repo/sdk/go" && GOTOOLCHAIN=local go mod download); \
+        fi; \
+        cp -R "$stage/$repo" "$stage/terrascale-restore"; \
+        (cd "$stage/terrascale-restore" && dotnet restore TerraScale.slnx --nologo); \
+        rm -rf "$stage/terrascale-restore"; \
       fi; \
       test -z "$(git -C "$stage/$repo" status --porcelain)"; \
       mv "$stage/$repo" "$snapshots/$repo"; \
       ln -s "$snapshots/$repo/.git" "$cache/$repo.git"; \
     done; \
     chmod -R a+rX "$snapshots"; \
-    chown -R node:node "$toolcache"
+    chown -R node:node "$toolcache" "$NUGET_PACKAGES"
 
 RUN set -eu; \
     export PATH=/usr/local/bin:/usr/bin:/bin; \
@@ -164,6 +179,9 @@ RUN set -eu; \
     ts --version; psql --version; command -v certutil unshare nsenter strace; \
     tailscale version; tailscaled --version; \
     playwright --version; \
+    python3 -B -c "import ast, pathlib; ast.parse(pathlib.Path('/opt/t3-agent37/startup.py').read_text())"; \
+    sh -n /usr/local/bin/terrascale-entrypoint.sh; \
     go version -m /usr/local/bin/ts-orch | grep -F 'vcs.modified=false'
 
 USER node
+ENTRYPOINT ["/usr/local/bin/terrascale-entrypoint.sh"]

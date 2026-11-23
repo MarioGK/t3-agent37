@@ -31,9 +31,9 @@ const (
 )
 
 type desktopPairingStatus struct {
-	Confirmed bool
-	Redeemed  bool
-	Changed   bool
+	Confirmed bool `json:"confirmed"`
+	Redeemed  bool `json:"redeemed"`
+	Changed   bool `json:"changed"`
 }
 
 type desktopPairing struct {
@@ -143,14 +143,27 @@ func handOffPairingWithPromptGate(ctx context.Context, client *agent37.Client, i
 		notice(diagnostic, info, "Confirm %s in T3 Code. Waiting before linking environments…", name)
 		return pairing.label, nil
 	}
+	var checkedLabel string
+	var seenRedeemed bool
 	check := func(ctx context.Context, label, previous string) (desktopPairingStatus, error) {
-		command := remote + " pair-status " + shellQuote(label) + " " + shellQuote(proof.EnvironmentID)
+		if label != checkedLabel {
+			checkedLabel = label
+			seenRedeemed = false
+		}
+		command := startupCmd + " pair-status --wait 5 " + shellQuote(label) + " " + shellQuote(proof.EnvironmentID)
+		if seenRedeemed {
+			command += " --redeemed"
+		}
 		if previous != "" {
 			command += " " + shellQuote(previous)
 		}
-		attempt, stop := context.WithTimeout(ctx, 8*time.Second)
+		attempt, stop := context.WithTimeout(ctx, 12*time.Second)
 		defer stop()
-		return client.ExecJSON[desktopPairingStatus](attempt, instance.ID, command)
+		status, err := client.ExecJSON[desktopPairingStatus](attempt, instance.ID, command)
+		if err == nil && status.Redeemed {
+			seenRedeemed = true
+		}
+		return status, err
 	}
 	err := waitForDesktop(ctx, open, check, func() {
 		notice(diagnostic, warning, "T3 Code accepted the pairing for %s but did not connect. Opening a fresh request…", name)
