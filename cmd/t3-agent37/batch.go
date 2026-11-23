@@ -46,6 +46,93 @@ func previewBatch(ctx context.Context, opts options, state string, output io.Wri
 	return jsonOutput(output, plans, true)
 }
 
+type launchContext struct {
+	instances  []agent37.Instance
+	enrollment *peers.Enrollment
+	configured []peers.Peer
+	launcher   []string
+	opts       options
+}
+
+// prepareLaunch runs credential checks, sandbox inventory, desktop launcher
+// detection, CLIProxy catalog fetch, and GitHub handoff lookup concurrently
+// before allocating any sandbox.
+func prepareLaunch(ctx context.Context, client *agent37.Client, verifyEnrollment func(context.Context) (*peers.Enrollment, error), opts options, diagnostic io.Writer) (launchContext, error) {
+	started := time.Now()
+	out := launchContext{opts: opts}
+	var err error
+	if opts.generatedName && !opts.noDesktop {
+		out.launcher, err = desktopLauncher(ctx)
+		if err != nil {
+			return out, fmt.Errorf("desktop confirmation is unavailable. Use --no-desktop for headless provisioning: %w", err)
+		}
+	}
+	if opts.tailscale {
+		out.configured, err = peers.Configured()
+		if err != nil {
+			return out, err
+		}
+	}
+	var proxyEnv map[string]string
+	if opts.provider == "cliproxy" {
+		proxyEnv, err = cliproxyEnv()
+		if err != nil {
+			return out, err
+		}
+	}
+
+	var ghHandoff githubHandoff
+	var ghErr error
+	var ghDone bool
+	var catalog cliproxyCatalog
+	group, gctx := errgroup.WithContext(ctx)
+	group.Go(func() error {
+		var err error
+		out.enrollment, err = verifyEnrollment(gctx)
+		return err
+	})
+	group.Go(func() error {
+		var err error
+		out.instances, err = client.List(gctx)
+		return err
+	})
+	if opts.githubAccess {
+		group.Go(func() error {
+			ghHandoff, ghErr = readGitHubHandoff(gctx)
+			ghDone = true
+			if opts.playbook != nil && opts.playbook.terraScale() {
+				if ghErr != nil {
+					return fmt.Errorf("could not prepare GitHub access for the TerraScale workspace: %w", ghErr)
+				}
+				if ghHandoff.Token == "" {
+					return errors.New("sign in with gh auth login --hostname github.com before creating the TerraScale workspace")
+				}
+			}
+			return nil
+		})
+	}
+	if opts.provider == "cliproxy" {
+		group.Go(func() error {
+			var err error
+			catalog, err = fetchCLIProxyCatalog(gctx, proxyEnv)
+			return err
+		})
+	}
+	if err := group.Wait(); err != nil {
+		return out, err
+	}
+	if ghDone {
+		out.opts.preparedGitHub = func() (githubHandoff, error) { return ghHandoff, ghErr }
+	}
+	if len(catalog.Models) != 0 {
+		out.opts.cliproxyModels = catalog.Models
+		out.opts.cliproxyModel = catalog.DefaultModel
+		out.opts.cliproxyHasSol = catalog.HasSol
+	}
+	launchTiming(diagnostic, "preflight", "Preflight", started)
+	return out, nil
+}
+
 type batchSandbox struct {
 	name     string
 	instance agent37.Instance
@@ -54,79 +141,40 @@ type batchSandbox struct {
 }
 
 func runBatch(ctx context.Context, client *agent37.Client, verifyEnrollment func(context.Context) (*peers.Enrollment, error), opts options, state string, output io.Writer, progress *launchProgress) error {
-	var launcher []string
-	if !opts.noDesktop {
-		var err error
-		launcher, err = desktopLauncher(ctx)
-		if err != nil {
-			return fmt.Errorf("desktop confirmation is unavailable. Use --no-desktop for headless provisioning: %w", err)
-		}
-	}
-	configured, err := peers.Configured()
-	if err != nil {
-		return err
-	}
-	if opts.provider == "cliproxy" {
-		if _, err := cliproxyEnv(); err != nil {
-			return err
-		}
-	}
-	if opts.githubAccess {
-		prepare, cancel := context.WithCancel(ctx)
-		defer cancel()
-		opts.preparedGitHub = sync.OnceValues(func() (githubHandoff, error) { return readGitHubHandoff(prepare) })
-		go opts.preparedGitHub()
-	}
-	if opts.playbook != nil && opts.playbook.terraScale() {
-		opts.orchestrator = newSharedOrchestrator()
-		if opts.orchestrator != nil && terraTemplate(opts.template) {
-			prepare, cancel := context.WithCancel(ctx)
-			defer cancel()
-			opts.orchestrator.startPreparation(prepare)
-		}
-	}
 	progress.setPhase("Checking credentials and sandbox inventory")
-	instances, enrollment, err := batchPreflight(ctx, client, verifyEnrollment)
+	launch, err := prepareLaunch(ctx, client, verifyEnrollment, opts, progress)
 	if err != nil {
 		return err
 	}
-	if opts.playbook != nil && opts.playbook.terraScale() && opts.preparedGitHub != nil {
-		handoff, err := opts.preparedGitHub()
-		if err != nil {
-			return fmt.Errorf("could not prepare GitHub access for the TerraScale workspace: %w", err)
-		}
-		if handoff.Token == "" {
-			return errors.New("sign in with gh auth login --hostname github.com before creating the TerraScale workspace")
-		}
-	}
+	opts = launch.opts
 	if err := os.MkdirAll(state, 0o700); err != nil {
 		return err
 	}
-	reserved, err := reserveSandboxNames(ctx, state, opts.namePrefix, instances, opts.batchSize)
+	reserved, err := reserveSandboxNames(ctx, state, opts.namePrefix, launch.instances, opts.batchSize)
 	if err != nil {
 		return err
 	}
-	configured = peers.PrepareConfiguredPeers(ctx, configured)
+	configured := peers.PrepareConfiguredPeers(ctx, launch.configured)
 	parallel := min(opts.parallelism, len(reserved))
 	progress.preflightDone("Creating and setting up sandboxes")
 	notice(progress, info, "Provisioning %d Agent37 sandboxes, up to %d at a time…", len(reserved), parallel)
 	gate := make(desktopPromptGate, 1)
 	results := provisionAndPairBatch(len(reserved), parallel, parallel, func(i int) batchSandbox {
-		item := provisionBatchSandbox(ctx, client, enrollment, opts, state, reserved[i], progress)
+		item := provisionBatchSandbox(ctx, client, launch.enrollment, opts, state, reserved[i], progress)
 		progress.provisioned(item.err == nil)
 		if item.err == nil {
 			notice(progress, success, "%s is ready on Tailscale.", item.name)
 		}
 		return item
 	}, func(item *batchSandbox) {
-		if launcher == nil {
+		if launch.launcher == nil {
 			return
 		}
 		if item.err = ctx.Err(); item.err != nil {
 			return
 		}
 		progress.setPhase("Pairing T3 Code as sandboxes become ready")
-		proof, err := pairSandboxWithPromptGate(ctx, client, item.instance, item.proof, state, item.name, launcher, progress, gate, nil)
+		proof, err := pairSandboxWithPromptGate(ctx, client, item.instance, item.proof, state, item.name, launch.launcher, progress, gate, nil)
 		progress.pairedDesktop(err == nil)
 		if ctx.Err() != nil && err != nil {
 			item.err = ctx.Err()
@@ -174,24 +222,6 @@ func finishBatchMesh(ctx context.Context, client *agent37.Client, configured []p
 	return nil
 }
 
-func batchPreflight(ctx context.Context, client *agent37.Client, verifyEnrollment func(context.Context) (*peers.Enrollment, error)) ([]agent37.Instance, *peers.Enrollment, error) {
-	var enrollment *peers.Enrollment
-	var instances []agent37.Instance
-	checks, checked := errgroup.WithContext(ctx)
-	checks.Go(func() error {
-		var err error
-		enrollment, err = verifyEnrollment(checked)
-		return err
-	})
-	checks.Go(func() error {
-		var err error
-		instances, err = client.List(checked)
-		return err
-	})
-	err := checks.Wait()
-	return instances, enrollment, err
-}
-
 func provisionAndPairBatch(count, parallel, pairingWorkers int, provision func(int) batchSandbox, pair func(*batchSandbox)) []batchSandbox {
 	type completedSandbox struct {
 		index int
@@ -202,8 +232,6 @@ func provisionAndPairBatch(count, parallel, pairingWorkers int, provision func(i
 		jobs <- i
 	}
 	close(jobs)
-	// A desktop approval may block the consumer. Provisioning workers can
-	// publish their results and take the next job while the user approves.
 	completed := make(chan completedSandbox, count)
 	var workers sync.WaitGroup
 	for range parallel {
@@ -253,7 +281,7 @@ func provisionBatchSandbox(ctx context.Context, client *agent37.Client, enrollme
 		if item.err = entry.lock.Unlock(); item.err != nil {
 			return item
 		}
-		entry.lock, item.err = lockSandbox(ctx, client, state, &opts)
+		entry.lock, item.err = lockSandbox(ctx, client, state, &opts, nil)
 		if item.err != nil {
 			return item
 		}

@@ -49,7 +49,7 @@ jobs:
         run: go test ./internal/agent37 -run '^TestNativeT3Smoke$' -v
       - name: Test guest setup
         if: matrix.os == 'linux' && matrix.arch == 'amd64'
-        run: python3 -B -m unittest discover -s cmd/t3-agent37/guest
+        run: python3 -B -m unittest discover -s templates/terrascale && sh -n templates/terrascale/terrascale-entrypoint.sh
       - name: Build and smoke test the executable
         shell: bash
         run: |

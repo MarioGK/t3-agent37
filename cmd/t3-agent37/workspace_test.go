@@ -142,17 +142,12 @@ func TestBatchWorkspaceFailureCanResumeByName(t *testing.T) {
 	t.Setenv("AGENT37_API_KEY", "fixture")
 	t.Setenv("T3_AGENT37_GITHUB_TOKEN", "fixture-workspace-token")
 	playbook := writeWorkspaceFixture(t)
-	rootArgs := strings.Join([]string{shellQuote(playbook.Path), shellQuote(playbook.RootRepo), "''", "''"}, " ")
 	const firstID, secondID = "aaaaaaaaaa", "bbbbbbbbbb"
 	type fixtureSandbox struct {
 		instance       agent37.Instance
-		clones         map[string]int
-		rootCheckout   chan struct{}
-		credentialSent bool
-		githubReady    bool
+		lastSpec       launchSpec
+		upCalls        int
 		workspaceReady bool
-		t3Ready        bool
-		registered     bool
 		joined         bool
 	}
 	sandboxes := map[string]*fixtureSandbox{}
@@ -202,28 +197,33 @@ func TestBatchWorkspaceFailureCanResumeByName(t *testing.T) {
 			if sandboxes[instance.ID] != nil {
 				t.Error("retry created a second sandbox")
 			}
-			sandboxes[instance.ID] = &fixtureSandbox{
-				instance: instance, clones: make(map[string]int), rootCheckout: make(chan struct{}),
-			}
+			sandboxes[instance.ID] = &fixtureSandbox{instance: instance}
 			write(instance)
 		case r.URL.Path == "/.well-known/t3/environment":
-			id, _, _ := strings.Cut(strings.TrimPrefix(r.Host, "a37-agent-"), ".")
 			if !strings.HasSuffix(r.Host, ".ts.net") {
 				t.Error("workspace setup waited for the unused protected T3 route")
 				w.WriteHeader(http.StatusBadGateway)
 				return
 			}
+			id, _, _ := strings.Cut(strings.TrimPrefix(r.Host, "a37-agent-"), ".")
 			_, id, _ = strings.Cut(id, "-")
 			write(map[string]string{"environmentId": id})
 		case r.Method == http.MethodPut && r.URL.Path == "/v1/files/content":
 			id, _, _ := strings.Cut(r.Host, ".")
 			sandbox := sandboxes[id]
-			if sandbox == nil || !strings.HasSuffix(r.URL.Query().Get("path"), "/access.json") {
-				t.Error("unexpected credential upload")
+			if sandbox == nil || !strings.HasSuffix(r.URL.Query().Get("path"), "/spec.json") {
+				t.Error("unexpected launch spec upload")
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
-			sandbox.credentialSent = true
+			data, _ := io.ReadAll(r.Body)
+			var spec launchSpec
+			if err := json.Unmarshal(data, &spec); err != nil {
+				t.Errorf("invalid launch spec JSON: %v", err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			sandbox.lastSpec = spec
 			write(map[string]any{})
 		default:
 			id, action, _ := strings.Cut(strings.TrimPrefix(r.URL.Path, "/v1/instances/"), "/")
@@ -249,48 +249,37 @@ func TestBatchWorkspaceFailureCanResumeByName(t *testing.T) {
 			name := sandbox.instance.Name
 			origin := "https://a37-" + name + "-" + id + ".fixture.ts.net"
 			switch {
-			case strings.HasSuffix(request.Command, " prepare"):
+			case strings.Contains(request.Command, "gzip.decompress"):
 				execResult(nil)
-			case strings.HasSuffix(request.Command, " apply"):
-				if !sandbox.credentialSent {
-					t.Error("GitHub setup ran before the credential upload")
-				}
-				sandbox.githubReady = true
-				execResult(githubAccessResult{GitHub: true})
-			case strings.Contains(request.Command, "&& touch") && strings.Contains(request.Command, workspaceReadyFile):
-				if !sandbox.registered {
-					t.Error("workspace was marked ready before T3 project registration")
-				}
-				sandbox.workspaceReady = true
-				execResult(nil)
-			case strings.HasPrefix(request.Command, "if test -f") && strings.Contains(request.Command, workspaceReadyFile):
-				execResult(map[string]bool{"ready": sandbox.workspaceReady})
-			case strings.Contains(request.Command, " setup "):
-				// A cold workspace must progress even while T3 startup is pending.
-				mu.Unlock()
-				select {
-				case <-sandbox.rootCheckout:
-				case <-r.Context().Done():
-					mu.Lock()
+			case strings.Contains(request.Command, " up launch-"):
+				spec := sandbox.lastSpec
+				if spec.RequireWorkspaceReady && !sandbox.workspaceReady {
+					execResult(setupProof{WorkspacePending: true})
 					return
 				}
-				mu.Lock()
-				sandbox.t3Ready = true
-				execResult(setupProof{EnvironmentID: id, Label: name, Port: 3773, ProviderReady: true, PeerProxy: true})
-			case strings.Contains(request.Command, " remote.py "):
-				execResult(nil)
-			case strings.Contains(request.Command, " register-projects "):
-				if !sandbox.t3Ready || len(sandbox.clones) != len(playbook.Repositories)+1 ||
-					!strings.Contains(request.Command, playbook.RootRepo) || !strings.Contains(request.Command, playbook.Path) {
-					t.Error("T3 registration did not include the workspace project after startup")
-				}
-				sandbox.registered = true
-				execResult(nil)
-			case strings.Contains(request.Command, " tailnet-publish "):
+				sandbox.upCalls++
 				sandbox.joined = true
-				execResult(tailIdentity{ID: id, Hostname: "a37-" + name + "-" + id, URL: origin})
-			case strings.Contains(request.Command, "import remote, tailnet"):
-				if !strings.HasSuffix(request.Command, " "+shellQuote(workspaceReadyFile)) {
+				proof := setupProof{
+					EnvironmentID: id, Label: name, Port: 3773, ProviderReady: true, PeerProxy: true,
+					TailnetURL: origin, TailnetHostname: "a37-" + name + "-" + id, TailnetID: id,
+					GitHub: spec.GitHub != nil && spec.GitHub.Token != "",
+				}
+				if spec.Workspace != nil {
+					if spec.Workspace.Path != playbook.Path || spec.Workspace.RootRepo != playbook.RootRepo {
+						t.Errorf("unexpected workspace spec: %+v", spec.Workspace)
+					}
+					if id == firstID && sandbox.upCalls == 1 {
+						proof.WorkspaceErrors = []workspaceCloneFailure{{
+							Status: "clone_failed", Repo: "example-org/example-tools", Folder: "tools",
+						}}
+					} else {
+						sandbox.workspaceReady = true
+						proof.WorkspaceReady = true
+					}
+				}
+				execResult(proof)
+			case strings.Contains(request.Command, " inspect "):
+				if !strings.Contains(request.Command, shellQuote(workspaceReadyFile)) {
 					t.Error("discovery bypassed the workspace readiness check")
 				}
 				if !sandbox.workspaceReady {
@@ -302,46 +291,10 @@ func TestBatchWorkspaceFailureCanResumeByName(t *testing.T) {
 					proof.EnvironmentID, proof.URL = id, origin
 				}
 				execResult(proof)
-			case strings.HasSuffix(request.Command, " list --json"):
+			case strings.Contains(request.Command, " env list --json"):
 				execResult([]any{})
-			case strings.HasSuffix(request.Command, " "+rootArgs):
-				if !sandbox.githubReady {
-					t.Error("workspace cloning ran before GitHub access was configured")
-				}
-				sandbox.clones[playbook.RootRepo]++
-				if sandbox.clones[playbook.RootRepo] == 1 {
-					close(sandbox.rootCheckout)
-				}
-				execResult(map[string]string{"status": "cloned"})
 			default:
-				index := strings.LastIndex(request.Command, " --batch ")
-				if index >= 0 {
-					if !sandbox.githubReady || sandbox.clones[playbook.RootRepo] == 0 {
-						t.Error("a nested repository started before GitHub access and the workspace root")
-					}
-					var repos []workspaceRepository
-					args := strings.Trim(request.Command[index+len(" --batch "):], "'")
-					if err := json.Unmarshal([]byte(args), &repos); err != nil || len(repos) != 2 {
-						t.Errorf("invalid guest repository group: %v", err)
-						w.WriteHeader(http.StatusBadRequest)
-						return
-					}
-					statuses := make([]string, 0, len(repos))
-					for _, repo := range repos {
-						sandbox.clones[repo.Repo]++
-						status := "cloned"
-						switch {
-						case id == firstID && repo.Repo == "example-org/example-tools" && sandbox.clones[repo.Repo] == 1:
-							status = "clone_failed"
-						case id == firstID && repo.Repo == "example-org/example-app" && sandbox.clones[repo.Repo] > 1:
-							status = "existing"
-						}
-						statuses = append(statuses, status)
-					}
-					execResult(map[string][]string{"statuses": statuses})
-					return
-				}
-				t.Error("unexpected guest command")
+				t.Errorf("unexpected guest command: %s", request.Command)
 				w.WriteHeader(http.StatusBadRequest)
 			}
 		}
@@ -401,25 +354,5 @@ func TestBatchWorkspaceFailureCanResumeByName(t *testing.T) {
 	defer mu.Unlock()
 	if !sandboxes[firstID].workspaceReady || !sandboxes[secondID].workspaceReady {
 		t.Fatal("both sandboxes must have verified workspace registrations after retry")
-	}
-}
-func TestTerraScaleManifestAddsMissingProjects(t *testing.T) {
-	original := workspacePlaybook{
-		Path:     "~/Projects/TerraScale",
-		RootRepo: "TerraScale/workspace",
-		Repositories: []workspaceRepository{
-			{Repo: "TerraScale/terrascale", Ref: "main"},
-		},
-	}
-	expanded := original
-	if err := expanded.applyTerraScaleManifest("terrascale\nts-orchestrator\n"); err != nil {
-		t.Fatal(err)
-	}
-	if len(original.Repositories) != 1 || len(expanded.Repositories) != 2 ||
-		expanded.Repositories[0].Ref != "main" || expanded.Repositories[1].Repo != "TerraScale/ts-orchestrator" {
-		t.Fatalf("unexpected requirements: %+v", expanded.Repositories)
-	}
-	if err := expanded.applyTerraScaleManifest("../outside"); err == nil {
-		t.Fatal("manifest traversal must fail")
 	}
 }

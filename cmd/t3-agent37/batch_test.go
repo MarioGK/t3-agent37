@@ -317,8 +317,9 @@ func TestBatchPairingWorkersOverlapVerifiedConnections(t *testing.T) {
 }
 
 // BenchmarkUpPipeline uses fixed service delays to compare the previous serial
-// preflight and handoff with the launch pipeline. It never contacts an API.
+// preflight with the unified parallel launch preflight. It never contacts an API.
 func BenchmarkUpPipeline(b *testing.B) {
+	b.Setenv("T3_AGENT37_PEERS_FILE", "")
 	previousTransport := http.DefaultTransport
 	b.Cleanup(func() { http.DefaultTransport = previousTransport })
 	http.DefaultTransport = downTestTransport(func(r *http.Request) (*http.Response, error) {
@@ -332,6 +333,7 @@ func BenchmarkUpPipeline(b *testing.B) {
 		time.Sleep(12 * time.Millisecond)
 		return nil, nil
 	}
+	opts := options{provider: "codex", noDesktop: true}
 	for _, count := range []int{4, 16} {
 		for _, concurrent := range []bool{false, true} {
 			mode, workers := "previous", 10
@@ -343,7 +345,7 @@ func BenchmarkUpPipeline(b *testing.B) {
 				for b.Loop() {
 					ctx := b.Context()
 					if concurrent {
-						if _, _, err := batchPreflight(ctx, client, verifyEnrollment); err != nil {
+						if _, err := prepareLaunch(ctx, client, verifyEnrollment, opts, io.Discard); err != nil {
 							b.Fatal(err)
 						}
 					} else {
@@ -353,17 +355,8 @@ func BenchmarkUpPipeline(b *testing.B) {
 						}
 					}
 					batch := provisionAndPairBatch(count, min(count, workers), 1, func(int) batchSandbox {
-						time.Sleep(18 * time.Millisecond)
-						github := func() { time.Sleep(24 * time.Millisecond) }
-						tailnet := func() error {
-							time.Sleep(28 * time.Millisecond)
-							return nil
-						}
-						if concurrent {
-							return batchSandbox{err: finishSandboxSetup(ctx, github, tailnet)}
-						}
-						github()
-						return batchSandbox{err: tailnet()}
+						time.Sleep(28 * time.Millisecond)
+						return batchSandbox{}
 					}, func(*batchSandbox) {})
 					for _, item := range batch {
 						if item.err != nil {

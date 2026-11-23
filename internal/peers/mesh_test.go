@@ -119,6 +119,17 @@ func TestSyncMeshReusesPreparedOwnerAndRefreshesRejectedOne(t *testing.T) {
 	}
 }
 
+func TestReconcileMeshReusesPreparedOwnerWithoutDuplicateListOrIssue(t *testing.T) {
+	mesh := newMeshFixture(t, "alpha", "beta")
+	mesh.nodes[0].PreparedOwner = ReadyOwnerSession("fixture-owner-alpha")
+	mesh.nodes[1].PreparedOwner = ReadyOwnerSession("fixture-revoked")
+	count, err := reconcileMesh(t.Context(), mesh.client, mesh.nodes)
+	if err != nil || count != 2 || mesh.issues != 1 || mesh.lists != 2 || mesh.grants != 2 {
+		t.Fatalf("reconcile: %d links, %d lists, %d fresh sessions, %d grants, error %v",
+			count, mesh.lists, mesh.issues, mesh.grants, err)
+	}
+}
+
 func TestPreparedOwnerSkipsAnExpiredSession(t *testing.T) {
 	session := PrepareOwnerSession(t.Context(), func(context.Context) (string, error) {
 		return "fixture-owner", nil

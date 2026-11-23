@@ -14,8 +14,9 @@ import (
 	"github.com/MarioGK/t3-agent37/internal/peers"
 )
 
-// These read-only commands also work with the guest programs installed by older CLIs.
-const inspectGuestPeer = `import json, sys
+// Fallbacks keep mesh inspection and cleanup working against running sandboxes
+// provisioned before startup.py existed.
+const legacyInspectGuestPeer = `import json, sys
 from pathlib import Path
 root = Path.home() / ".local/share/t3-agent37"
 if len(sys.argv) > 1 and not (root / sys.argv[1]).is_file():
@@ -37,7 +38,7 @@ print(json.dumps({"environmentId": environment,
                   "peerProxy": (remote.ROOT / "peer-proxy-active").is_file(),
                   "desktopConfirmed": bool(environment) and getattr(remote, "desktop_confirmed", lambda _: False)(environment)}))`
 
-const runGuestEnvironment = `import os, subprocess, sys
+const legacyGuestEnvironment = `import os, subprocess, sys
 from pathlib import Path
 sys.path.insert(0, str(Path.home() / ".local/share/t3-agent37"))
 import remote
@@ -46,6 +47,12 @@ env = dict(os.environ, NODE_USE_ENV_PROXY="1", HTTPS_PROXY="http://127.0.0.1:105
 raise SystemExit(subprocess.run([str(remote.T3), "environment", *sys.argv[1:],
                                  "--base-dir", str(remote.DATA)], stderr=subprocess.DEVNULL,
                                  env=env).returncode)`
+
+func startupOrLegacy(startupArgs, legacyCmd string) string {
+	return `if test -f "$HOME/.local/share/t3-agent37/startup.py"; then python3 -B "$HOME/.local/share/t3-agent37/startup.py" ` + startupArgs +
+		`; elif test -f /opt/t3-agent37/startup.py; then python3 -B /opt/t3-agent37/startup.py ` + startupArgs +
+		`; else ` + legacyCmd + `; fi`
+}
 
 type sandboxPeer struct {
 	EnvironmentID    string `json:"environmentId"`
@@ -70,18 +77,24 @@ func meshNode(client *agent37.Client, id, name string, proof sandboxPeer) (peers
 		Name: name, URL: proof.URL, EnvironmentID: proof.EnvironmentID,
 		IssueToken: func(ctx context.Context) (string, error) { return issueSandboxOwner(ctx, client, id) },
 		ListLinksJSON: func(ctx context.Context) ([]byte, error) {
-			value, err := client.Exec(ctx, id, "python3 -B -c "+shellQuote(runGuestEnvironment)+" list --json")
+			cmd := startupOrLegacy("env list --json", "python3 -B -c "+shellQuote(legacyGuestEnvironment)+" list --json")
+			value, err := client.Exec(ctx, id, cmd)
 			return []byte(value), err
 		},
 		Unlink: func(ctx context.Context, environmentID string) error {
-			_, err := client.Exec(ctx, id, "python3 -B -c "+shellQuote(runGuestEnvironment)+" unlink "+shellQuote(environmentID))
+			quoted := shellQuote(environmentID)
+			cmd := startupOrLegacy("env unlink "+quoted, "python3 -B -c "+shellQuote(legacyGuestEnvironment)+" unlink "+quoted)
+			_, err := client.Exec(ctx, id, cmd)
 			return err
 		},
 	}, nil
 }
 
 func issueSandboxOwner(ctx context.Context, client *agent37.Client, id string) (string, error) {
-	admin, err := client.ExecJSON[struct{ Token string }](ctx, id, remote+" peer-admin")
+	cmd := startupOrLegacy("peer-admin", `python3 "$HOME/.local/share/t3-agent37/remote.py" peer-admin`)
+	admin, err := client.ExecJSON[struct {
+		Token string `json:"token"`
+	}](ctx, id, cmd)
 	if err != nil {
 		return "", err
 	}
@@ -100,10 +113,14 @@ func discoverSandboxPeer(ctx context.Context, client *agent37.Client, instance a
 			return sandboxPeer{}, err
 		}
 	}
-	command := "python3 -B -c " + shellQuote(inspectGuestPeer)
+	startupArgs := "inspect"
+	legacyCmd := "python3 -B -c " + shellQuote(legacyInspectGuestPeer)
 	if requiresWorkspaceSetup(instance) {
-		command += " " + shellQuote(workspaceReadyFile)
+		marker := shellQuote(workspaceReadyFile)
+		startupArgs += " " + marker
+		legacyCmd += " " + marker
 	}
+	command := startupOrLegacy(startupArgs, legacyCmd)
 	for {
 		running, err := client.ExecJSON[sandboxPeer](probe, instance.ID, command)
 		ready := running.EnvironmentID != "" && !running.Offline
@@ -207,6 +224,7 @@ func linkStartedSandbox(ctx context.Context, client *agent37.Client, instance ag
 		notice(diagnostic, warning, "T3 mesh pending for %s. %v", name, err)
 		return false
 	}
+	node.PreparedOwner = proof.preparedOwner
 	meshCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
 	instances, inventoryErr := client.List(meshCtx)

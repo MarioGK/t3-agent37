@@ -166,7 +166,7 @@ func deleteBulkTarget(ctx context.Context, client *agent37.Client, state string,
 		return err
 	}
 	opts := options{name: target.receipt.Name}
-	lock, err := lockSandbox(ctx, client, state, &opts)
+	lock, err := lockSandbox(ctx, client, state, &opts, nil)
 	if err != nil {
 		return err
 	}

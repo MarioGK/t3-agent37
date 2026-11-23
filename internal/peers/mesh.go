@@ -137,12 +137,12 @@ func syncMesh(ctx context.Context, client *http.Client, candidates []MeshNode,
 			if state.endpoint.token == "" || pruned[identity{api.environmentID, api.origin}] {
 				return
 			}
-			if visit == nil {
+			if visit == nil && !state.readable {
 				state.entries, linkFailures[i] = listPeerLinks(ctx, api, state.endpoint.token)
 				if linkFailures[i] != nil {
 					return
 				}
-			} else if !state.readable {
+			} else if visit != nil && !state.readable {
 				return
 			}
 			counts[i], linkFailures[i] = reconcileListedSource(ctx, state.endpoint, available, state.entries)
@@ -195,7 +195,7 @@ func authorizeMeshInventory(ctx context.Context, client *http.Client, node MeshN
 	if state.err = api.verify(ctx, 2, true); state.err != nil {
 		return state
 	}
-	if readLinks && node.PreparedOwner != nil {
+	if node.PreparedOwner != nil {
 		if token := node.PreparedOwner.currentToken(ctx); token != "" {
 			if entries, err := listPeerLinks(ctx, api, token); err == nil {
 				return meshInventory{endpoint: meshEndpoint{api: api, token: token}, entries: entries, readable: true}

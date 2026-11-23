@@ -1,0 +1,4 @@
+embed.go
+test_*.py
+__pycache__
+*.pyc
